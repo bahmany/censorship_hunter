@@ -258,21 +258,29 @@ class HunterConfig:
     def validate(self) -> List[str]:
         """Validate configuration and return list of errors."""
         errors = []
+        warnings = []
         
-        # Check for missing API credentials - don't treat loaded values as missing
+        # Telegram credentials are now OPTIONAL - just warn if missing
         api_id = self.get("api_id")
         if not api_id:
-            errors.append("HUNTER_API_ID is required")
+            warnings.append("HUNTER_API_ID not set - Telegram features will be disabled")
         
         api_hash = self.get("api_hash", "")
-        if not api_hash or api_hash == "":  # Empty default
-            errors.append("HUNTER_API_HASH is required")
+        if not api_hash or api_hash == "":
+            warnings.append("HUNTER_API_HASH not set - Telegram features will be disabled")
         
         phone = self.get("phone", "")
-        if not phone or phone == "":  # Empty default
-            errors.append("HUNTER_PHONE is required")
+        if not phone or phone == "":
+            warnings.append("HUNTER_PHONE not set - Telegram features will be disabled")
         
-        # Validate numeric values
+        # Log warnings but don't treat as errors
+        if warnings:
+            logger = logging.getLogger(__name__)
+            logger.info("Configuration warnings (non-critical):")
+            for warning in warnings:
+                logger.info(f"  - {warning}")
+        
+        # Validate numeric values (these ARE required)
         numeric_fields = [
             ("scan_limit", 1, 1000),
             ("max_total", 1, 10000),

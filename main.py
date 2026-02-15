@@ -21,6 +21,9 @@ import warnings
 from pathlib import Path
 from colorama import Fore, Style, init
 
+import json
+import re
+
 try:
     import psutil
 except ImportError:
@@ -29,8 +32,10 @@ except ImportError:
 # Initialize colorama for Windows
 init(autoreset=True)
 
-# Add current directory to path for imports
+# Add current directory AND parent to path for imports
+# Parent is needed so 'hunter.*' package imports work (e.g. from hunter.core.config import ...)
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     from cryptography.utils import CryptographyDeprecationWarning
@@ -154,33 +159,37 @@ def check_and_cleanup_memory(logger):
     """Check memory usage at startup and force cleanup if needed."""
     if not psutil:
         logger.warning("psutil not available, skipping memory check")
-        return
+        return True
     
     mem = psutil.virtual_memory()
     mem_percent = mem.percent
     
     logger.info(f"Startup memory check: {mem_percent:.1f}% used ({mem.used / (1024**3):.1f}GB / {mem.total / (1024**3):.1f}GB)")
     
-    # If memory is already high at startup, force aggressive cleanup
-    if mem_percent >= 80:
-        logger.warning(f"High memory at startup ({mem_percent:.1f}%), forcing aggressive cleanup...")
-        
-        # Multiple GC passes
-        for i in range(3):
+    # Always force aggressive cleanup at startup if memory > 70% (silent)
+    if mem_percent >= 70:
+        # Multiple aggressive GC passes (silent)
+        for i in range(5):
             gc.collect()
-            time.sleep(0.5)
+            time.sleep(0.3)
         
         # Check again
         mem_after = psutil.virtual_memory()
-        logger.info(f"After cleanup: {mem_after.percent:.1f}% used")
-        
-        if mem_after.percent >= 85:
-            logger.error(
-                f"CRITICAL: Memory still at {mem_after.percent:.1f}% after cleanup. "
-                f"Please close other applications or restart your system before running Hunter."
-            )
-            return False
+        mem_percent = mem_after.percent
     
+    # Adaptive startup based on memory level (silent - no warnings)
+    if mem_percent >= 95:
+        logger.info(f"Starting in ULTRA-MINIMAL mode (memory: {mem_percent:.1f}%)")
+    elif mem_percent >= 90:
+        logger.info(f"Starting in MINIMAL mode (memory: {mem_percent:.1f}%)")
+    elif mem_percent >= 85:
+        logger.info(f"Starting in REDUCED mode (memory: {mem_percent:.1f}%)")
+    elif mem_percent >= 80:
+        logger.info(f"Starting in CONSERVATIVE mode (memory: {mem_percent:.1f}%)")
+    else:
+        logger.info(f"Starting in NORMAL mode (memory: {mem_percent:.1f}%)")
+    
+    # Always allow startup - let cycle-level adaptation handle it
     return True
 
 
@@ -193,8 +202,96 @@ def print_config_info(config: HunterConfig):
     print()
 
 
+def load_env_files():
+    """Load all environment files into os.environ BEFORE any config init.
+    
+    Priority: hunter_secrets.env > .env (first found wins per key).
+    Properly handles SSH_SERVERS_JSON with JSON array values.
+    """
+    hunter_dir = Path(__file__).parent
+    env_files = [
+        hunter_dir / "hunter_secrets.env",
+        hunter_dir / ".env",
+    ]
+    
+    loaded_count = 0
+    for env_file in env_files:
+        if not env_file.exists():
+            continue
+        try:
+            content = env_file.read_text(encoding="utf-8")
+            
+            # Handle SSH_SERVERS_JSON specially (contains JSON with = and , chars)
+            if "SSH_SERVERS_JSON=" in content:
+                start = content.find("SSH_SERVERS_JSON=") + len("SSH_SERVERS_JSON=")
+                remaining = content[start:].strip()
+                # Find the complete JSON array
+                bracket_count = 0
+                json_str = ""
+                for char in remaining:
+                    json_str += char
+                    if char == '[':
+                        bracket_count += 1
+                    elif char == ']':
+                        bracket_count -= 1
+                        if bracket_count == 0:
+                            break
+                if json_str:
+                    os.environ.setdefault("SSH_SERVERS_JSON", json_str)
+            
+            # Parse all other key=value lines
+            for line in content.splitlines():
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if line.startswith("SSH_SERVERS_JSON"):
+                    continue  # Already handled above
+                
+                # Handle PowerShell $env: format
+                if line.lower().startswith("$env:"):
+                    m = re.match(r"^\$env:([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+)$", line)
+                    if m:
+                        key, value = m.group(1).strip(), m.group(2).strip()
+                    else:
+                        continue
+                elif "=" in line:
+                    key, value = line.split("=", 1)
+                    key, value = key.strip(), value.strip()
+                else:
+                    continue
+                
+                # Remove quotes
+                if len(value) >= 2:
+                    if (value[0] == '"' and value[-1] == '"') or (value[0] == "'" and value[-1] == "'"):
+                        value = value[1:-1]
+                
+                os.environ.setdefault(key, value)
+                loaded_count += 1
+            
+        except Exception as e:
+            print(f"Warning: Failed to load {env_file.name}: {e}")
+    
+    # Also set SSH_SERVERS from SSH_SERVERS_JSON for components that check SSH_SERVERS
+    if "SSH_SERVERS_JSON" in os.environ and "SSH_SERVERS" not in os.environ:
+        os.environ["SSH_SERVERS"] = os.environ["SSH_SERVERS_JSON"]
+    
+    # Map HUNTER_* to TELEGRAM_* for components that expect TELEGRAM_* vars
+    _alias_map = {
+        "HUNTER_API_ID": "TELEGRAM_API_ID",
+        "HUNTER_API_HASH": "TELEGRAM_API_HASH",
+        "HUNTER_PHONE": "TELEGRAM_PHONE",
+        "CHAT_ID": "TELEGRAM_GROUP_ID",
+    }
+    for src, dst in _alias_map.items():
+        if src in os.environ and dst not in os.environ:
+            os.environ[dst] = os.environ[src]
+
+
 async def main():
     """Main entry point for the hunter system"""
+    # Load env files FIRST - before any config or component init
+    load_env_files()
+    
     print_banner()
     setup_logging()
 

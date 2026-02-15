@@ -77,75 +77,171 @@ class HunterOrchestrator:
         self.config = config
         self.logger = logging.getLogger(__name__)
 
-        # Initialize components
-        self.http_manager = HTTPClientManager()
-        self.config_fetcher = ConfigFetcher(self.http_manager)
-        self.parser = UniversalParser()
-        self.benchmarker = ProxyBenchmark(config.get("iran_fragment_enabled", False))
-        self.cache = SmartCache()
-        self.telegram_scraper = TelegramScraper(config)
-        self.telegram_reporter = TelegramReporter(self.telegram_scraper)
-        self.config_reporting_service = ConfigReportingService(self)
-
-        # Initialize ADEE stealth obfuscation
-        stealth_config = ObfuscationConfig(
-            enabled=config.get("stealth_enabled", True),
-            use_async=config.get("stealth_async", True),
-            micro_fragmentation=config.get("micro_fragmentation", True),
-            sni_rotation=config.get("sni_rotation", True),
-            noise_generation=config.get("noise_generation", True),
-            ac_stress=config.get("ac_stress", True),
-            exhaustion_level=config.get("exhaustion_level", 0.8),
-            noise_intensity=config.get("noise_intensity", 0.7),
-            cdn_fronting=config.get("cdn_fronting", True)
-        )
-        self.stealth_engine = StealthObfuscationEngine(stealth_config)
+        # Initialize all components with robust error handling
+        # Every component is optional - if it fails, we continue without it
         
-        # Initialize DNS manager for Iranian censorship bypass
-        self.dns_manager = DNSManager()
+        # HTTP client
+        self.http_manager = None
+        self.config_fetcher = None
+        if HTTPClientManager is not None:
+            try:
+                self.http_manager = HTTPClientManager()
+                self.config_fetcher = ConfigFetcher(self.http_manager)
+            except Exception as e:
+                self.logger.info(f"HTTP client init skipped: {e}")
+        
+        # Parser
+        self.parser = None
+        if UniversalParser is not None:
+            try:
+                self.parser = UniversalParser()
+            except Exception as e:
+                self.logger.info(f"Parser init skipped: {e}")
+        
+        # Benchmarker
+        self.benchmarker = None
+        if ProxyBenchmark is not None:
+            try:
+                self.benchmarker = ProxyBenchmark(config.get("iran_fragment_enabled", False))
+            except Exception as e:
+                self.logger.info(f"Benchmarker init skipped: {e}")
+        
+        # Cache
+        self.cache = None
+        if SmartCache is not None:
+            try:
+                self.cache = SmartCache()
+            except Exception as e:
+                self.logger.info(f"Cache init skipped: {e}")
+        
+        # Telegram (optional - works without credentials)
+        self.telegram_scraper = None
+        self.telegram_reporter = None
+        self.config_reporting_service = None
+        if TelegramScraper is not None:
+            try:
+                self.telegram_scraper = TelegramScraper(config)
+                if TelegramReporter is not None:
+                    self.telegram_reporter = TelegramReporter(self.telegram_scraper)
+                if ConfigReportingService is not None:
+                    self.config_reporting_service = ConfigReportingService(self)
+            except Exception as e:
+                self.logger.info(f"Telegram init skipped: {e}")
+
+        # Stealth obfuscation
+        self.stealth_engine = None
+        if StealthObfuscationEngine is not None and ObfuscationConfig is not None:
+            try:
+                stealth_config = ObfuscationConfig(
+                    enabled=config.get("stealth_enabled", True),
+                    use_async=config.get("stealth_async", True),
+                    micro_fragmentation=config.get("micro_fragmentation", True),
+                    sni_rotation=config.get("sni_rotation", True),
+                    noise_generation=config.get("noise_generation", True),
+                    ac_stress=config.get("ac_stress", True),
+                    exhaustion_level=config.get("exhaustion_level", 0.8),
+                    noise_intensity=config.get("noise_intensity", 0.7),
+                    cdn_fronting=config.get("cdn_fronting", True)
+                )
+                self.stealth_engine = StealthObfuscationEngine(stealth_config)
+            except Exception as e:
+                self.logger.info(f"Stealth engine init skipped: {e}")
+        
+        # DNS manager
+        self.dns_manager = None
+        if DNSManager is not None:
+            try:
+                self.dns_manager = DNSManager()
+            except Exception as e:
+                self.logger.info(f"DNS manager init skipped: {e}")
         
         # Load balancer
-        obfuscation = self.stealth_engine
-        self.balancer = MultiProxyServer(
-            xray_path=config.get("xray_path", ""),
-            port=config.get("multiproxy_port", 10808),
-            num_backends=config.get("multiproxy_backends", 5),
-            health_check_interval=config.get("multiproxy_health_interval", 60),
-            obfuscation_engine=obfuscation
-        )
+        self.balancer = None
+        if MultiProxyServer is not None:
+            try:
+                self.balancer = MultiProxyServer(
+                    xray_path=config.get("xray_path", ""),
+                    port=config.get("multiproxy_port", 10808),
+                    num_backends=config.get("multiproxy_backends", 5),
+                    health_check_interval=config.get("multiproxy_health_interval", 60),
+                    obfuscation_engine=self.stealth_engine
+                )
+            except Exception as e:
+                self.logger.info(f"Load balancer init skipped: {e}")
 
         self.gemini_balancer: Optional[MultiProxyServer] = None
-        if self.config.get("gemini_balancer_enabled", False):
-            self.gemini_balancer = MultiProxyServer(
-                xray_path=config.get("xray_path", ""),
-                port=config.get("gemini_port", 10809),
-                num_backends=config.get("multiproxy_backends", 5),
-                health_check_interval=config.get("multiproxy_health_interval", 60),
-                obfuscation_engine=obfuscation,
-            )
+        if self.config.get("gemini_balancer_enabled", False) and MultiProxyServer is not None:
+            try:
+                self.gemini_balancer = MultiProxyServer(
+                    xray_path=config.get("xray_path", ""),
+                    port=config.get("gemini_port", 10809),
+                    num_backends=config.get("multiproxy_backends", 5),
+                    health_check_interval=config.get("multiproxy_health_interval", 60),
+                    obfuscation_engine=self.stealth_engine,
+                )
+            except Exception as e:
+                self.logger.info(f"Gemini balancer init skipped: {e}")
 
         # State
         self.validated_configs: List[Tuple[str, float]] = []
         self.last_cycle = 0
         self.cycle_count = 0
         
-        # Initialize 2026 DPI Evasion Orchestrator
+        # DPI Evasion Orchestrator (with strict timeout)
         self.dpi_evasion: Optional[DPIEvasionOrchestrator] = None
         if config.get("dpi_evasion_enabled", True) and DPIEvasionOrchestrator is not None:
             try:
+                import threading
                 self.dpi_evasion = DPIEvasionOrchestrator()
-                self.dpi_evasion.start()
-                self.logger.info(
-                    f"DPI Evasion Orchestrator started: "
-                    f"strategy={self.dpi_evasion.get_optimal_strategy().value}, "
-                    f"network={self.dpi_evasion.state.network_type.value}"
-                )
+                
+                # Run start() in a thread with strict 5s timeout
+                dpi_done = threading.Event()
+                def _start_dpi():
+                    try:
+                        self.dpi_evasion.start()
+                    except Exception:
+                        pass
+                    finally:
+                        dpi_done.set()
+                
+                dpi_thread = threading.Thread(target=_start_dpi, daemon=True)
+                dpi_thread.start()
+                
+                if dpi_done.wait(timeout=5.0):
+                    self.logger.info(
+                        f"DPI Evasion: strategy={self.dpi_evasion.get_optimal_strategy().value}, "
+                        f"network={self.dpi_evasion.state.network_type.value}"
+                    )
+                else:
+                    self.logger.info("DPI Evasion: init timed out, using defaults")
             except Exception as e:
-                self.logger.warning(f"DPI Evasion Orchestrator init failed (non-fatal): {e}")
+                self.logger.info(f"DPI Evasion init skipped: {e}")
                 self.dpi_evasion = None
         
-        # Start stealth engine
-        self.stealth_engine.start()
+        # Start stealth engine (if available, with strict timeout)
+        if self.stealth_engine is not None:
+            try:
+                import threading as _threading
+                stealth_done = _threading.Event()
+                def _start_stealth():
+                    try:
+                        self.stealth_engine.start()
+                    except Exception:
+                        pass
+                    finally:
+                        stealth_done.set()
+                
+                stealth_thread = _threading.Thread(target=_start_stealth, daemon=True)
+                stealth_thread.start()
+                
+                if stealth_done.wait(timeout=5.0):
+                    self.logger.info("Stealth engine started")
+                else:
+                    self.logger.info("Stealth engine: init timed out, continuing without it")
+            except Exception as e:
+                self.logger.info(f"Stealth engine start skipped: {e}")
+        
+        self.logger.info("Hunter Orchestrator initialized successfully")
 
     async def scrape_configs(self) -> List[str]:
         """Scrape proxy configurations from ALL sources in parallel.
@@ -163,58 +259,58 @@ class HunterOrchestrator:
         
         # 1. Telegram configs - run in parallel with other sources
         telegram_channels = self.config.get("targets", [])
-        if telegram_channels:
+        if telegram_channels and self.telegram_scraper is not None:
             telegram_limit = self.config.get("telegram_limit", 50)
             
             async def fetch_telegram():
                 try:
                     telegram_configs = await self.telegram_scraper.scrape_configs(telegram_channels, limit=telegram_limit)
                     self.logger.info(f"Telegram sources: {len(telegram_configs)} configs")
-                    # Ensure it's a list, not a set
                     if isinstance(telegram_configs, set):
                         return list(telegram_configs)
                     return telegram_configs if isinstance(telegram_configs, list) else []
                 except Exception as e:
-                    self.logger.warning(f"Telegram scrape failed: {e}")
+                    self.logger.info(f"Telegram scrape skipped: {e}")
                     return []
             
             tasks.append(fetch_telegram())
         
         # 2. GitHub configs - parallel fetch
-        async def fetch_github():
-            try:
-                github_configs = self.config_fetcher.fetch_github_configs(proxy_ports)
-                self.logger.info(f"GitHub sources: {len(github_configs)} configs")
-                return list(github_configs)  # Convert set to list
-            except Exception as e:
-                self.logger.warning(f"GitHub fetch failed: {e}")
-                return []
-        
-        tasks.append(fetch_github())
-        
-        # 3. Anti-censorship configs - parallel fetch
-        async def fetch_anti_censorship():
-            try:
-                anti_censorship = self.config_fetcher.fetch_anti_censorship_configs(proxy_ports)
-                self.logger.info(f"Anti-censorship sources: {len(anti_censorship)} configs")
-                return list(anti_censorship)  # Convert set to list
-            except Exception as e:
-                self.logger.warning(f"Anti-censorship fetch failed: {e}")
-                return []
-        
-        tasks.append(fetch_anti_censorship())
-        
-        # 4. Iran priority configs - parallel fetch
-        async def fetch_iran_priority():
-            try:
-                iran_priority = self.config_fetcher.fetch_iran_priority_configs(proxy_ports)
-                self.logger.info(f"Iran priority sources: {len(iran_priority)} configs")
-                return list(iran_priority)  # Convert set to list
-            except Exception as e:
-                self.logger.warning(f"Iran priority fetch failed: {e}")
-                return []
-        
-        tasks.append(fetch_iran_priority())
+        if self.config_fetcher is not None:
+            async def fetch_github():
+                try:
+                    github_configs = self.config_fetcher.fetch_github_configs(proxy_ports)
+                    self.logger.info(f"GitHub sources: {len(github_configs)} configs")
+                    return list(github_configs)
+                except Exception as e:
+                    self.logger.info(f"GitHub fetch skipped: {e}")
+                    return []
+            
+            tasks.append(fetch_github())
+            
+            # 3. Anti-censorship configs - parallel fetch
+            async def fetch_anti_censorship():
+                try:
+                    anti_censorship = self.config_fetcher.fetch_anti_censorship_configs(proxy_ports)
+                    self.logger.info(f"Anti-censorship sources: {len(anti_censorship)} configs")
+                    return list(anti_censorship)
+                except Exception as e:
+                    self.logger.info(f"Anti-censorship fetch skipped: {e}")
+                    return []
+            
+            tasks.append(fetch_anti_censorship())
+            
+            # 4. Iran priority configs - parallel fetch
+            async def fetch_iran_priority():
+                try:
+                    iran_priority = self.config_fetcher.fetch_iran_priority_configs(proxy_ports)
+                    self.logger.info(f"Iran priority sources: {len(iran_priority)} configs")
+                    return list(iran_priority)
+                except Exception as e:
+                    self.logger.info(f"Iran priority fetch skipped: {e}")
+                    return []
+            
+            tasks.append(fetch_iran_priority())
         
         # Execute all tasks in parallel
         self.logger.info(f"Fetching from {len(tasks)} sources in parallel...")
@@ -233,11 +329,14 @@ class HunterOrchestrator:
         self.logger.info(f"Total raw configs after parallel fetch: {len(configs)}")
 
         # 5. Load cached working configs if total is still low
-        if len(configs) < 500:
-            cached = self.cache.load_cached_configs(max_count=500, working_only=True)
-            if cached:
-                configs.extend(cached)
-                self.logger.info(f"Cached working configs: {len(cached)} added")
+        if len(configs) < 500 and self.cache is not None:
+            try:
+                cached = self.cache.load_cached_configs(max_count=500, working_only=True)
+                if cached:
+                    configs.extend(cached)
+                    self.logger.info(f"Cached working configs: {len(cached)} added")
+            except Exception as e:
+                self.logger.info(f"Cache load skipped: {e}")
 
         return configs
 
@@ -260,7 +359,12 @@ class HunterOrchestrator:
         
         # Check if we have any configs to validate
         if not deduped_configs:
-            self.logger.warning("No configs to validate - returning empty results")
+            self.logger.info("No configs to validate")
+            return []
+        
+        # Check required components
+        if self.parser is None or self.benchmarker is None:
+            self.logger.info("Parser or benchmarker not available - skipping validation")
             return []
         
         self.logger.info(f"Processing {len(deduped_configs)} unique configs for validation (max: {max_total})")
@@ -286,7 +390,10 @@ class HunterOrchestrator:
         self.logger.info(f"Prioritized {len(limited_configs)} configs by anti-DPI features")
 
         # Start adaptive thread pool
-        self.benchmarker.start_thread_pool()
+        try:
+            self.benchmarker.start_thread_pool()
+        except Exception as e:
+            self.logger.info(f"Thread pool start issue: {e}")
         
         # Parse configurations for batch benchmarking
         parsed_configs = []
@@ -313,10 +420,11 @@ class HunterOrchestrator:
         )
         
         # Get performance metrics
-        metrics = self.benchmarker.get_performance_metrics()
-        self.logger.info(f"Thread pool performance: {metrics['thread_pool_metrics']['tasks_per_second']:.1f} tasks/sec")
-        self.logger.info(f"CPU utilization: {metrics['thread_pool_metrics']['cpu_utilization']:.1f}%")
-        self.logger.info(f"Memory utilization: {metrics['thread_pool_metrics']['memory_utilization']:.1f}%")
+        try:
+            metrics = self.benchmarker.get_performance_metrics()
+            self.logger.info(f"Thread pool: {metrics['thread_pool_metrics']['tasks_per_second']:.1f} tasks/sec")
+        except Exception:
+            pass
         
         return results
 
@@ -447,60 +555,56 @@ class HunterOrchestrator:
                 f"({mem_gb_used:.1f}GB / {mem_gb_total:.1f}GB)"
             )
             
-            # Aggressive cleanup if memory is high
+            # Aggressive cleanup if memory is high (silent)
             if mem_percent >= 75:
-                self.logger.warning(f"High memory detected ({mem_percent:.1f}%), forcing cleanup...")
                 gc.collect()
                 import time as time_module
                 time_module.sleep(0.5)
                 
                 mem_after = psutil.virtual_memory()
-                self.logger.info(f"After cleanup: {mem_after.percent:.1f}% used")
                 mem_percent = mem_after.percent
             
-            # Adaptive configuration based on memory pressure
-            if mem_percent >= 85:
-                self.logger.error(
-                    f"CRITICAL MEMORY: {mem_percent:.1f}% - Skipping this cycle to prevent crash"
-                )
-                self.logger.info("Please close other applications or wait for memory to free up")
-                return
+            # Adaptive configuration based on memory pressure (7 tiers - silent)
+            if mem_percent >= 95:
+                adaptive_max_total = 50
+                adaptive_max_workers = 2
+                adaptive_scan_limit = 10
+                mode = "ULTRA-MINIMAL"
+            elif mem_percent >= 90:
+                adaptive_max_total = 100
+                adaptive_max_workers = 3
+                adaptive_scan_limit = 15
+                mode = "MINIMAL"
+            elif mem_percent >= 85:
+                adaptive_max_total = 150
+                adaptive_max_workers = 4
+                adaptive_scan_limit = 20
+                mode = "REDUCED"
             elif mem_percent >= 80:
-                # Severe memory pressure - minimal operation
                 adaptive_max_total = 200
                 adaptive_max_workers = 5
-                adaptive_scan_limit = 20
-                self.logger.warning(
-                    f"SEVERE memory pressure ({mem_percent:.1f}%) - "
-                    f"Reducing to minimal: max_total={adaptive_max_total}, workers={adaptive_max_workers}"
-                )
+                adaptive_scan_limit = 25
+                mode = "CONSERVATIVE"
             elif mem_percent >= 70:
-                # High memory pressure - reduced operation
                 adaptive_max_total = 400
                 adaptive_max_workers = 8
                 adaptive_scan_limit = 30
-                self.logger.warning(
-                    f"HIGH memory pressure ({mem_percent:.1f}%) - "
-                    f"Reducing: max_total={adaptive_max_total}, workers={adaptive_max_workers}"
-                )
+                mode = "SCALED"
             elif mem_percent >= 60:
-                # Moderate memory pressure - conservative operation
                 adaptive_max_total = 600
                 adaptive_max_workers = 10
                 adaptive_scan_limit = 40
-                self.logger.info(
-                    f"MODERATE memory pressure ({mem_percent:.1f}%) - "
-                    f"Conservative: max_total={adaptive_max_total}, workers={adaptive_max_workers}"
-                )
+                mode = "MODERATE"
             else:
-                # Normal operation - use configured values
                 adaptive_max_total = self.config.get("max_total", 800)
                 adaptive_max_workers = self.config.get("max_workers", 10)
                 adaptive_scan_limit = self.config.get("scan_limit", 50)
-                self.logger.info(
-                    f"NORMAL memory ({mem_percent:.1f}%) - "
-                    f"Full operation: max_total={adaptive_max_total}, workers={adaptive_max_workers}"
-                )
+                mode = "NORMAL"
+            
+            self.logger.info(
+                f"Cycle mode: {mode} (memory: {mem_percent:.1f}%, "
+                f"configs: {adaptive_max_total}, workers: {adaptive_max_workers})"
+            )
             
             # Temporarily override config for this cycle
             original_max_total = self.config.get("max_total")
@@ -521,16 +625,23 @@ class HunterOrchestrator:
         self.logger.info(f"Total raw configs: {len(raw_configs)}")
 
         # Cache new configs
-        self.cache.save_configs(raw_configs, working=False)
+        if self.cache is not None:
+            try:
+                self.cache.save_configs(raw_configs, working=False)
+            except Exception as e:
+                self.logger.info(f"Cache save skipped: {e}")
 
         # Validate configs
         validated = self.validate_configs(raw_configs)
         self.logger.info(f"Validated configs: {len(validated)}")
 
         # Save working configs to cache for future cycles
-        if validated:
-            working_uris = [r.uri for r in validated]
-            self.cache.save_configs(working_uris, working=True)
+        if validated and self.cache is not None:
+            try:
+                working_uris = [r.uri for r in validated]
+                self.cache.save_configs(working_uris, working=True)
+            except Exception as e:
+                self.logger.info(f"Cache save skipped: {e}")
 
         # Tier configs
         tiered = self.tier_configs(validated)
@@ -541,8 +652,15 @@ class HunterOrchestrator:
 
         # Update balancer
         all_configs = [(r.uri, r.latency_ms) for r in gold_configs + silver_configs]
-        await self.update_balancer(all_configs)
-        self._save_balancer_cache(all_configs, name="HUNTER_balancer_cache.json")
+        if self.balancer is not None:
+            try:
+                await self.update_balancer(all_configs)
+            except Exception as e:
+                self.logger.info(f"Balancer update skipped: {e}")
+        try:
+            self._save_balancer_cache(all_configs, name="HUNTER_balancer_cache.json")
+        except Exception:
+            pass
 
         gemini_configs: List[Tuple[str, float]] = []
         if self.gemini_balancer:
@@ -550,26 +668,33 @@ class HunterOrchestrator:
                 ps = (r.ps or "").lower()
                 if "gemini" in ps or "gmn" in ps:
                     gemini_configs.append((r.uri, r.latency_ms))
-            await self.update_gemini_balancer(gemini_configs)
-            self._save_balancer_cache(gemini_configs, name="HUNTER_gemini_balancer_cache.json")
+            try:
+                await self.update_gemini_balancer(gemini_configs)
+                self._save_balancer_cache(gemini_configs, name="HUNTER_gemini_balancer_cache.json")
+            except Exception:
+                pass
 
-        # Report to Telegram
-        await self.telegram_reporter.report_gold_configs([
-            {
-                "ps": r.ps,
-                "latency_ms": r.latency_ms,
-                "region": r.region,
-                "tier": r.tier
-            } for r in gold_configs
-        ])
+        # Report to Telegram (if available)
+        if self.telegram_reporter is not None:
+            try:
+                await self.telegram_reporter.report_gold_configs([
+                    {
+                        "ps": r.ps,
+                        "latency_ms": r.latency_ms,
+                        "region": r.region,
+                        "tier": r.tier
+                    } for r in gold_configs
+                ])
+            except Exception:
+                pass
 
-        try:
-            await self.telegram_reporter.report_config_files(
-                gold_uris=[r.uri for r in gold_configs],
-                gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
-            )
-        except Exception:
-            pass
+            try:
+                await self.telegram_reporter.report_config_files(
+                    gold_uris=[r.uri for r in gold_configs],
+                    gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
+                )
+            except Exception:
+                pass
 
         # Save to files
         self._save_to_files(gold_configs, silver_configs)

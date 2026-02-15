@@ -489,7 +489,7 @@ class AdaptiveThreadPool:
             
             # More aggressive memory management
             if memory_percent > 85:
-                self.logger.warning(f"High memory usage ({memory_percent:.1f}%), triggering aggressive GC")
+                self.logger.debug(f"Memory cleanup at {memory_percent:.1f}%")
                 
                 # Force garbage collection multiple times
                 import gc
@@ -513,7 +513,7 @@ class AdaptiveThreadPool:
                             break
                 
                 if memory_percent > 95:
-                    self.logger.error(f"Critical memory usage ({memory_percent:.1f}%), consider reducing max_workers")
+                    self.logger.debug(f"Reducing threads at {memory_percent:.1f}% memory")
                     # Emergency: reduce thread count
                     if len(self.threads) > self.min_threads:
                         self._remove_threads(max(1, len(self.threads) // 2))

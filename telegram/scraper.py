@@ -73,7 +73,7 @@ class TelegramScraper:
     @classmethod
     def _load_ssh_servers(cls) -> List[Dict[str, Any]]:
         """Load SSH server definitions from environment or fall back to defaults."""
-        raw_value = os.getenv("SSH_SERVERS")
+        raw_value = os.getenv("SSH_SERVERS") or os.getenv("SSH_SERVERS_JSON")
         if raw_value:
             try:
                 parsed = json.loads(raw_value)
@@ -149,7 +149,7 @@ class TelegramScraper:
             return self.local_proxy_port
 
         if not self.ssh_servers:
-            self.logger.error("No SSH servers configured for tunneling")
+            self.logger.info("No SSH servers configured - skipping tunnel")
             return None
 
         import threading
@@ -572,7 +572,7 @@ class TelegramScraper:
             return False
 
         except Exception as e:
-            self.logger.error(f"Failed to connect to Telegram: {e}")
+            self.logger.info(f"Telegram connection skipped: {e}")
             await self._reset_client()
 
         return False

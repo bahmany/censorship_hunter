@@ -9,8 +9,9 @@ import json
 import subprocess
 from pathlib import Path
 
-# Add the hunter directory to Python path
+# Add the hunter directory AND parent to Python path
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def load_secrets():
     """Load environment variables from hunter_secrets.env."""

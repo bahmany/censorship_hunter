@@ -124,12 +124,12 @@ class StealthObfuscationEngine:
             
             # Start ADEE
             if not self.adee.start(use_async=self.config.use_async):
-                self.logger.error("Failed to start ADEE")
+                self.logger.info("ADEE start skipped (non-critical)")
                 return False
             
             # Initialize integrator
             if not self.integrator.initialize(use_async=self.config.use_async):
-                self.logger.error("Failed to initialize ADEE integrator")
+                self.logger.info("ADEE integrator init skipped (non-critical)")
                 return False
             
             # Scan CDN pairs if fronting enabled

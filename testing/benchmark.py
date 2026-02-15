@@ -609,9 +609,8 @@ class ProxyBenchmark:
             enable_cpu_affinity=False
         )
         
-        # Memory management settings (LOWERED to prevent issues when starting with high memory)
-        self.memory_emergency_threshold = 0.85  # Stop at 85% memory (was 90%)
-        self.memory_warning_threshold = 0.80    # Warn at 80% memory (was 85%)
+        # Memory management settings (fully adaptive - never stops, just adapts)
+        self.memory_cleanup_threshold = 0.90    # Force GC at 90% memory
         self.batch_chunk_size = 50              # Process max 50 configs per batch
         
         # Performance tracking
@@ -680,21 +679,11 @@ class ProxyBenchmark:
             chunk_num = (chunk_idx // chunk_size) + 1
             total_chunks = (total_configs + chunk_size - 1) // chunk_size
             
-            # Check memory before processing chunk
+            # Check memory before processing chunk - adapt, never stop
             mem_percent = psutil.virtual_memory().percent
-            if mem_percent >= self.memory_emergency_threshold * 100:
-                self.logger.error(
-                    f"EMERGENCY STOP: Memory at {mem_percent:.1f}%, stopping benchmark. "
-                    f"Processed {len(all_results)}/{total_configs} configs."
-                )
-                break
-            
-            if mem_percent >= self.memory_warning_threshold * 100:
-                self.logger.warning(
-                    f"High memory ({mem_percent:.1f}%), forcing aggressive cleanup before chunk {chunk_num}/{total_chunks}"
-                )
+            if mem_percent >= self.memory_cleanup_threshold * 100:
                 gc.collect()
-                time.sleep(0.5)  # Brief pause to let GC finish
+                time.sleep(0.5)
             
             self.logger.info(f"Processing chunk {chunk_num}/{total_chunks} ({len(chunk)} configs)")
             

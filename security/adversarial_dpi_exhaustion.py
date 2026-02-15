@@ -221,7 +221,7 @@ class AdversarialDPIExhaustionEngine:
             return True
             
         except Exception as e:
-            self.logger.error(f"Failed to start ADEE async tasks: {e}")
+            self.logger.info(f"ADEE async tasks skipped: {e}")
             self.running = False
             return False
     

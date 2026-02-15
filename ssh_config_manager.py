@@ -27,23 +27,14 @@ class SSHConfigManager:
     
     def load_ssh_servers(self):
         """Load SSH servers from hunter_secrets.env, .env, or environment variables."""
-        # Look in both current dir and parent dir (scripts/ -> hunter root)
-        search_dirs = [Path(__file__).parent, Path(__file__).parent.parent]
+        # Try hunter_secrets.env first (primary), then .env (fallback)
+        secrets_path = Path(__file__).parent / "hunter_secrets.env"
+        env_path = Path(__file__).parent / ".env"
         
-        for search_dir in search_dirs:
-            if self.ssh_servers:
-                break
-            secrets_path = search_dir / "hunter_secrets.env"
-            if secrets_path.exists():
-                self._load_from_env_file(secrets_path)
-        
-        for search_dir in search_dirs:
-            if self.ssh_servers:
-                break
-            env_path = search_dir / ".env"
-            if env_path.exists():
-                self._load_from_env_file(env_path)
-        
+        if secrets_path.exists():
+            self._load_from_env_file(secrets_path)
+        if not self.ssh_servers and env_path.exists():
+            self._load_from_env_file(env_path)
         if not self.ssh_servers:
             self._load_from_environment()
         
