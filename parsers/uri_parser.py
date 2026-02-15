@@ -122,6 +122,11 @@ class VLESSParser:
                 else:
                     outbound["streamSettings"]["tlsSettings"] = base_settings
             
+            # Handle flow (xtls-rprx-vision for Reality)
+            flow = params.get("flow", [""])[0]
+            if flow:
+                outbound["settings"]["vnext"][0]["users"][0]["flow"] = flow
+            
             transport = params.get("type", [""])[0]
             if transport == "ws":
                 outbound["streamSettings"]["wsSettings"] = {
@@ -130,6 +135,21 @@ class VLESSParser:
                 }
             elif transport == "grpc":
                 outbound["streamSettings"]["grpcSettings"] = {"serviceName": params.get("serviceName", [""])[0]}
+            elif transport == "splithttp":
+                outbound["streamSettings"]["splithttpSettings"] = {
+                    "path": params.get("path", ["/"])[0],
+                    "host": params.get("host", [""])[0],
+                }
+            elif transport == "httpupgrade":
+                outbound["streamSettings"]["httpupgradeSettings"] = {
+                    "path": params.get("path", ["/"])[0],
+                    "host": params.get("host", [""])[0],
+                }
+            elif transport == "h2" or transport == "http":
+                outbound["streamSettings"]["httpSettings"] = {
+                    "path": params.get("path", ["/"])[0],
+                    "host": [params.get("host", [""])[0]] if params.get("host") else [],
+                }
             
             return HunterParsedConfig(uri=uri, outbound=outbound, host=host, port=int(port), identity=uuid, ps=ps)
         except Exception:
@@ -231,6 +251,129 @@ class ShadowsocksParser:
             return None
 
 
+class Hysteria2Parser:
+    """Parser for Hysteria2 protocol URIs.
+    
+    Format: hysteria2://auth@host:port?sni=xxx&obfs=salamander&obfs-password=xxx#remark
+    Also supports: hy2://
+    """
+    
+    @staticmethod
+    def parse(uri: str) -> Optional[HunterParsedConfig]:
+        """Parse Hysteria2 URI."""
+        try:
+            parsed_url = urlparse(uri)
+            auth = parsed_url.username or ""
+            host = parsed_url.hostname
+            port = parsed_url.port or 443
+            params = parse_qs(parsed_url.query)
+            ps = clean_ps_string(parsed_url.fragment or "Hysteria2")
+            
+            if not host or host == "0.0.0.0":
+                return None
+            
+            sni = params.get("sni", [host])[0]
+            insecure = params.get("insecure", ["0"])[0] == "1"
+            obfs_type = params.get("obfs", [""])[0]
+            obfs_password = params.get("obfs-password", [""])[0]
+            
+            outbound: Dict[str, Any] = {
+                "protocol": "hysteria2",
+                "settings": {
+                    "server": host,
+                    "port": int(port),
+                    "auth": auth,
+                    "sni": sni,
+                    "insecure": insecure,
+                },
+                "streamSettings": {
+                    "network": "udp",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "serverName": sni,
+                        "allowInsecure": insecure,
+                        "alpn": ["h3"],
+                    },
+                },
+            }
+            
+            if obfs_type:
+                outbound["settings"]["obfs"] = {
+                    "type": obfs_type,
+                    "password": obfs_password,
+                }
+            
+            # Port hopping range if present
+            ports = params.get("mport", [""])[0]
+            if ports:
+                outbound["settings"]["port_range"] = ports
+            
+            return HunterParsedConfig(
+                uri=uri, outbound=outbound, host=host, 
+                port=int(port), identity=auth, ps=ps
+            )
+        except Exception:
+            return None
+
+
+class TUICParser:
+    """Parser for TUIC v5 protocol URIs.
+    
+    Format: tuic://uuid:password@host:port?sni=xxx&congestion_control=bbr&alpn=h3#remark
+    """
+    
+    @staticmethod
+    def parse(uri: str) -> Optional[HunterParsedConfig]:
+        """Parse TUIC URI."""
+        try:
+            parsed_url = urlparse(uri)
+            user_uuid = parsed_url.username or ""
+            password = parsed_url.password or ""
+            host = parsed_url.hostname
+            port = parsed_url.port or 443
+            params = parse_qs(parsed_url.query)
+            ps = clean_ps_string(parsed_url.fragment or "TUIC")
+            
+            if not host or host == "0.0.0.0":
+                return None
+            
+            sni = params.get("sni", [host])[0]
+            insecure = params.get("allow_insecure", params.get("insecure", ["0"]))[0] == "1"
+            congestion = params.get("congestion_control", ["bbr"])[0]
+            alpn_str = params.get("alpn", ["h3"])[0]
+            alpn = alpn_str.split(",") if "," in alpn_str else [alpn_str]
+            udp_relay = params.get("udp_relay_mode", ["native"])[0]
+            
+            outbound: Dict[str, Any] = {
+                "protocol": "tuic",
+                "settings": {
+                    "server": host,
+                    "port": int(port),
+                    "uuid": user_uuid,
+                    "password": password,
+                    "congestion_control": congestion,
+                    "udp_relay_mode": udp_relay,
+                },
+                "streamSettings": {
+                    "network": "udp",
+                    "security": "tls",
+                    "tlsSettings": {
+                        "serverName": sni,
+                        "allowInsecure": insecure,
+                        "alpn": alpn,
+                    },
+                },
+            }
+            
+            identity = f"{user_uuid}:{password}" if password else user_uuid
+            return HunterParsedConfig(
+                uri=uri, outbound=outbound, host=host, 
+                port=int(port), identity=identity, ps=ps
+            )
+        except Exception:
+            return None
+
+
 class UniversalParser:
     """Universal parser that can handle all supported protocols."""
     
@@ -241,6 +384,9 @@ class UniversalParser:
             "trojan": TrojanParser(),
             "ss": ShadowsocksParser(),
             "shadowsocks": ShadowsocksParser(),
+            "hysteria2": Hysteria2Parser(),
+            "hy2": Hysteria2Parser(),
+            "tuic": TUICParser(),
         }
     
     def parse(self, uri: str) -> Optional[HunterParsedConfig]:

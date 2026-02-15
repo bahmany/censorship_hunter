@@ -113,14 +113,13 @@ Note: Sensitive files like `.env` and session files are ignored by git.
 ```
 hunter/
 ├── main.py              # Main entry point
-├── run.bat              # Windows launcher script
 ├── orchestrator.py      # Core workflow coordinator
 ├── .gitignore           # Git ignore rules
+├── .env.example         # Environment configuration template
 ├── requirements.txt     # Python dependencies
+├── README.md            # This file
+├── QUICK_START.md       # Quick start guide
 ├── __init__.py          # Package initialization
-├── hunter_secrets.env   # Environment secrets (ignored)
-├── hunter_session.session # Telegram session (ignored)
-├── subscriptions_cache.txt # Cached subscriptions (ignored)
 ├── bin/                 # Executables and tools
 │   ├── AmazTool.exe
 │   ├── chromedriver.exe
@@ -136,23 +135,44 @@ hunter/
 │   ├── config.py
 │   ├── models.py
 │   └── utils.py
+├── docs/                # Documentation files
+│   ├── MEMORY_LEAK_FIX.md
+│   ├── PERFORMANCE_OPTIMIZATION.md
+│   ├── TELEGRAM_AUTHENTICATION_FIX_SUMMARY.md
+│   └── ... (26 documentation files)
 ├── gateway/             # Gateway components
 │   └── __init__.py
+├── logs/                # Log files (created at runtime, ignored by git)
+├── native/              # Native code implementations
+│   └── android/         # Android native version
 ├── network/             # Network utilities
 │   ├── __init__.py
 │   └── http_client.py
+├── old/                 # Deprecated/old code
 ├── parsers/             # URI and config parsers
 │   ├── __init__.py
 │   └── uri_parser.py
+├── performance/         # Performance monitoring
+│   └── adaptive_thread_manager.py
 ├── proxy/               # Load balancing
 │   └── load_balancer.py
-├── security/            # Obfuscation and security
-│   └── obfuscation.py
+├── runtime/             # Runtime cache and temp files (created at runtime)
+├── scripts/             # Utility scripts and tools
+│   ├── diagnostic.py
+│   ├── launcher.py
+│   ├── performance_optimizer.py
+│   └── ... (12 script files)
+├── security/            # Obfuscation and anti-DPI modules
+│   ├── dpi_evasion_orchestrator.py
+│   ├── tls_fingerprint_evasion.py
+│   ├── tls_fragmentation.py
+│   └── ... (9 security modules)
 ├── telegram/            # Telegram integration
 │   └── scraper.py
 ├── testing/             # Benchmarking and tests
-│   └── benchmark.py
-└── runtime/             # Runtime cache and temp files (created at runtime)
+│   ├── benchmark.py
+│   └── test_*.py        # (16 test files)
+└── logs/                # Empty directory for runtime logs (git ignored)
 ```
 
 ## Usage

@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     from telethon import TelegramClient
-    from telethon.errors import FloodWaitError, SessionPasswordNeededError, ChannelPrivateError, UsernameNotOccupiedError, UsernameInvalidError
+    from telethon.errors import FloodWaitError, SessionPasswordNeededError, ChannelPrivateError, UsernameNotOccupiedError, UsernameInvalidError, SecurityError
     from telethon.tl.functions.channels import GetMessagesRequest
     from telethon.tl.functions.messages import GetHistoryRequest
     from telethon.tl.types import Message
@@ -30,10 +30,30 @@ except ImportError:
 
 import os
 import json
+import io
 
-from hunter.core.config import HunterConfig
-from hunter.core.utils import extract_raw_uris_from_text
-from hunter.config.cache import ResilientHeartbeat
+try:
+    from hunter.core.config import HunterConfig
+    from hunter.core.utils import extract_raw_uris_from_text
+    from hunter.config.cache import ResilientHeartbeat
+    from hunter.telegram.interactive_auth import InteractiveTelegramAuth
+    from hunter.ssh_config_manager import SSHConfigManager, ConfigCacheManager
+except ImportError:
+    # Fallback for direct execution
+    try:
+        from core.config import HunterConfig
+        from core.utils import extract_raw_uris_from_text
+        from config.cache import ResilientHeartbeat
+        from telegram.interactive_auth import InteractiveTelegramAuth
+        from ssh_config_manager import SSHConfigManager, ConfigCacheManager
+    except ImportError:
+        # Final fallback - set to None if imports fail
+        HunterConfig = None
+        extract_raw_uris_from_text = None
+        ResilientHeartbeat = None
+        InteractiveTelegramAuth = None
+        SSHConfigManager = None
+        ConfigCacheManager = None
 
 
 class TelegramScraper:
@@ -41,6 +61,10 @@ class TelegramScraper:
 
     DEFAULT_SSH_SERVERS = [
         {"host": "71.143.156.145", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
+        {"host": "71.143.156.146", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
+        {"host": "71.143.156.147", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
+        {"host": "71.143.156.148", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
+        {"host": "71.143.156.149", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
         {"host": "50.114.11.18", "port": 22, "username": "deployer", "password": "009100mohammad_mrb"},
     ]
     DEFAULT_SSH_SOCKS_HOST = "127.0.0.1"
@@ -93,9 +117,20 @@ class TelegramScraper:
         self.local_proxy_port = None
         self._socks_server = None
         self._socks_thread = None
-        self.ssh_servers = self._load_ssh_servers()
+        
+        # Initialize SSH config and cache managers
+        self.ssh_config_manager = SSHConfigManager()
+        self.cache_manager = ConfigCacheManager()
+        self.ssh_servers = self.ssh_config_manager.get_servers()
         self.ssh_socks_host = os.getenv("SSH_SOCKS_HOST", self.DEFAULT_SSH_SOCKS_HOST)
         self.ssh_socks_port = int(os.getenv("SSH_SOCKS_PORT", str(self.DEFAULT_SSH_SOCKS_PORT)))
+        
+        # Initialize interactive authentication
+        if InteractiveTelegramAuth:
+            self.telegram_auth = InteractiveTelegramAuth(self.logger)
+        else:
+            self.telegram_auth = None
+            self.logger.warning("Interactive authentication not available")
 
         if not TELETHON_AVAILABLE:
             self.logger.warning("Telethon not available - Telegram functionality disabled")
@@ -255,22 +290,37 @@ class TelegramScraper:
                 except Exception:
                     continue
 
-        for server in self.ssh_servers:
+        for server_idx, server in enumerate(self.ssh_servers, 1):
             try:
-                self.logger.info(f"Attempting SSH tunnel to {server['host']}:{server['port']}")
+                host = server['host']
+                port = server['port']
+                self.logger.info(f"[{server_idx}/{len(self.ssh_servers)}] Attempting SSH tunnel to {host}:{port}")
+                
                 ssh = paramiko.SSHClient()
                 ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+                
+                username = server.get('username') or server.get('user') or server.get('login') or server.get('uname') or ""
+                password = server.get('password') or server.get('pass') or ""
+                
+                self.logger.debug(f"SSH auth: user={username}, pass={'*' * len(password) if password else 'none'}")
+                
                 ssh.connect(
-                    hostname=server['host'],
-                    port=server['port'],
-                    username=server.get('username') or server.get('user') or server.get('login') or server.get('uname') or "",
-                    password=server.get('password') or server.get('pass') or "",
-                    timeout=10
+                    hostname=host,
+                    port=port,
+                    username=username,
+                    password=password,
+                    timeout=30,
+                    banner_timeout=30,
+                    auth_timeout=30,
+                    look_for_keys=False,
+                    allow_agent=False
                 )
 
                 transport = ssh.get_transport()
                 if transport is None:
                     raise RuntimeError("SSH transport is not available")
+                
+                self.logger.info(f"SSH connected to {host}:{port}, establishing SOCKS tunnel...")
 
                 # Create local SOCKS server socket
                 server_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -286,14 +336,23 @@ class TelegramScraper:
                 self._socks_thread = t
                 self.ssh_tunnel = ssh
                 self.local_proxy_port = local_port
-                self.logger.info(f"SSH tunnel established on local port {local_port}")
+                self.logger.info(f"[SUCCESS] SSH tunnel established: {host}:{port} -> localhost:{local_port}")
                 return local_port
                 
+            except paramiko.AuthenticationException as e:
+                self.logger.warning(f"SSH auth failed to {server['host']}:{server['port']}: {e}")
+                continue
+            except paramiko.SSHException as e:
+                self.logger.warning(f"SSH error to {server['host']}:{server['port']}: {e}")
+                continue
+            except socket.timeout as e:
+                self.logger.warning(f"SSH timeout to {server['host']}:{server['port']}: {e}")
+                continue
             except Exception as e:
-                self.logger.warning(f"Failed to establish SSH tunnel to {server['host']}: {e}")
+                self.logger.warning(f"SSH tunnel failed to {server['host']}:{server['port']}: {type(e).__name__}: {e}")
                 continue
         
-        self.logger.error("Failed to establish SSH tunnel to any server")
+        self.logger.error(f"Failed to establish SSH tunnel to any of {len(self.ssh_servers)} servers")
         return None
 
     def close_ssh_tunnel(self):
@@ -312,9 +371,115 @@ class TelegramScraper:
             self.ssh_tunnel = None
         self.local_proxy_port = None
         self.logger.info("SSH tunnel closed")
+    
+    async def _try_v2ray_proxy_fallback(self) -> Optional[int]:
+        """Try to establish V2Ray proxy tunnel using validated configs from cache.
+        
+        Returns:
+            Port number if successful, None otherwise
+        """
+        try:
+            from hunter.proxy_fallback import ProxyTunnelManager
+            
+            # Load cached validated configs
+            cached_configs = self._load_cached_validated_configs()
+            if not cached_configs:
+                self.logger.warning("No cached validated configs for proxy fallback")
+                return None
+            
+            self.logger.info(f"Attempting V2Ray proxy fallback with {len(cached_configs)} cached configs")
+            
+            # Try to establish tunnel
+            tunnel_manager = ProxyTunnelManager()
+            tunnel_port = tunnel_manager.establish_tunnel(
+                cached_configs,
+                max_latency_ms=200,
+                socks_port=11088
+            )
+            
+            if tunnel_port:
+                self.logger.info(f"[SUCCESS] V2Ray proxy tunnel established on port {tunnel_port}")
+                # Store for cleanup later
+                self._v2ray_tunnel_manager = tunnel_manager
+                return tunnel_port
+            
+            return None
+            
+        except Exception as e:
+            self.logger.debug(f"V2Ray proxy fallback error: {e}")
+            return None
+    
+    def _load_cached_validated_configs(self) -> List:
+        """Load cached validated configs and parse them."""
+        try:
+            from hunter.config.cache import SmartCache
+            from hunter.parsers import UniversalParser
+            from hunter.core.models import HunterBenchResult
+            
+            cache = SmartCache()
+            cached_uris = cache.load_cached_configs(max_count=50, working_only=True)
+            
+            if not cached_uris:
+                return []
+            
+            parser = UniversalParser()
+            configs = []
+            
+            for uri in cached_uris[:20]:  # Use top 20 cached
+                try:
+                    parsed = parser.parse(uri)
+                    if parsed:
+                        result = HunterBenchResult(
+                            uri=uri,
+                            outbound=parsed.outbound,
+                            host=parsed.host,
+                            port=parsed.port,
+                            identity=parsed.identity,
+                            ps=parsed.ps,
+                            latency_ms=100.0,  # Assume cached configs are reasonably fast
+                            ip=None,
+                            country_code=None,
+                            region="Unknown",
+                            tier="silver"
+                        )
+                        configs.append(result)
+                except Exception:
+                    continue
+            
+            return configs
+            
+        except Exception as e:
+            self.logger.debug(f"Failed to load cached configs: {e}")
+            return []
 
-    async def connect(self) -> bool:
-        """Establish connection to Telegram."""
+    async def _reset_client(self) -> None:
+        try:
+            if self.client:
+                await self.client.disconnect()
+        except Exception:
+            pass
+        self.client = None
+
+    def _delete_session_files(self) -> None:
+        """Best-effort delete Telethon session files (requires re-login)."""
+        try:
+            session_name = str(self.config.get("session_name", "hunter_session") or "hunter_session")
+        except Exception:
+            session_name = "hunter_session"
+        for suffix in (".session", ".session-journal"):
+            path = session_name + suffix
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+            except Exception:
+                pass
+
+    async def connect(self, use_proxy_fallback: bool = True) -> bool:
+        """Establish connection to Telegram.
+        
+        Args:
+            use_proxy_fallback: If True, use V2Ray proxy tunnel if SSH fails
+        """
         if not TELETHON_AVAILABLE:
             return False
 
@@ -322,17 +487,43 @@ class TelegramScraper:
             return True
 
         try:
-            # Establish SSH tunnel for proxy
-            proxy_port = self.establish_ssh_tunnel()
             proxy = None
-            if proxy_port:
-                proxy = (socks.SOCKS5, '127.0.0.1', proxy_port)
+            proxy_host = os.getenv("HUNTER_TELEGRAM_PROXY_HOST")
+            proxy_port_raw = os.getenv("HUNTER_TELEGRAM_PROXY_PORT")
+            proxy_user = os.getenv("HUNTER_TELEGRAM_PROXY_USER")
+            proxy_pass = os.getenv("HUNTER_TELEGRAM_PROXY_PASS")
 
+            if proxy_host and proxy_port_raw:
+                try:
+                    proxy_port = int(proxy_port_raw)
+                    if proxy_user or proxy_pass:
+                        proxy = (socks.SOCKS5, proxy_host, proxy_port, True, proxy_user or "", proxy_pass or "")
+                    else:
+                        proxy = (socks.SOCKS5, proxy_host, proxy_port)
+                except Exception:
+                    proxy = None
+
+            # Fall back to SSH tunnel for proxy (local SOCKS5)
+            if proxy is None:
+                proxy_port = self.establish_ssh_tunnel()
+                if proxy_port:
+                    proxy = (socks.SOCKS5, '127.0.0.1', proxy_port)
+                elif use_proxy_fallback:
+                    # SSH failed, try V2Ray proxy fallback
+                    self.logger.info("SSH tunnel failed, attempting V2Ray proxy fallback...")
+                    proxy_port = await self._try_v2ray_proxy_fallback()
+                    if proxy_port:
+                        proxy = (socks.SOCKS5, '127.0.0.1', proxy_port)
+
+            # Disable automatic reconnects - we manage reconnection manually
+            # This prevents noisy reconnect loops and gives us control
             self.client = TelegramClient(
                 self.config.get("session_name", "hunter_session"),
                 self.config.get("api_id"),
                 self.config.get("api_hash"),
-                proxy=proxy
+                proxy=proxy,
+                connection_retries=3,
+                auto_reconnect=False,
             )
 
             await self.client.connect()
@@ -343,16 +534,46 @@ class TelegramScraper:
                     self.logger.error("Phone number required for Telegram auth")
                     return False
 
-                await self.client.send_code_request(phone)
-                # In real usage, this would prompt for code
-                # For now, assume it's handled externally
+                # Use interactive authentication
+                if self.telegram_auth:
+                    if not await self.telegram_auth.authenticate(self.client, phone):
+                        self.logger.error("Telegram authentication failed")
+                        return False
+                else:
+                    # Fallback to basic authentication
+                    self.logger.warning("Interactive authentication not available, using basic auth")
+                    await self.client.send_code_request(phone)
+                    code = input("Enter the Telegram login code: ").strip()
+                    if code:
+                        try:
+                            await client.sign_in(phone=phone, code=code)
+                        except SessionPasswordNeededError:
+                            pwd = input("Enter Telegram 2FA password: ").strip()
+                            if pwd:
+                                await client.sign_in(password=pwd)
+                    else:
+                        self.logger.error("Telegram authentication failed")
+                        return False
 
             if await self.client.is_user_authorized():
                 self.logger.info("Connected to Telegram successfully")
                 return True
 
+        except SecurityError as e:
+            msg = str(e)
+            self.logger.warning(f"Telegram SecurityError: {msg}")
+            await self._reset_client()
+            self.close_ssh_tunnel()
+
+            reset_ok = os.getenv("HUNTER_RESET_TELEGRAM_SESSION", "false").lower() == "true"
+            if reset_ok and ("wrong session" in msg.lower() or "session id" in msg.lower()):
+                self.logger.warning("Resetting Telegram session files due to SecurityError; you may need to re-login")
+                self._delete_session_files()
+            return False
+
         except Exception as e:
             self.logger.error(f"Failed to connect to Telegram: {e}")
+            await self._reset_client()
 
         return False
 
@@ -362,15 +583,33 @@ class TelegramScraper:
             if not await self.connect():
                 return set()
 
-        configs = set()
+        configs: Set[str] = set()
+        consecutive_errors = 0
+        max_consecutive_errors = 3
 
         for channel in channels:
+            # Check connection before each channel (standard pattern from old_hunter)
+            if consecutive_errors >= max_consecutive_errors:
+                self.logger.warning(f"Too many consecutive errors ({consecutive_errors}), stopping scrape")
+                break
+            
+            try:
+                if not self.client.is_connected():
+                    self.logger.warning(f"Connection lost before scraping {channel}")
+                    reconnected = await self.heartbeat.try_reconnect(self.client)
+                    if not reconnected:
+                        break
+            except Exception:
+                pass
+            
             try:
                 entity = await self.client.get_entity(channel)
 
+                fetch_limit = max(1, min(200, int(limit) * 4))
+
                 messages = await self.client(GetHistoryRequest(
                     peer=entity,
-                    limit=limit,
+                    limit=fetch_limit,
                     offset_date=None,
                     offset_id=0,
                     max_id=0,
@@ -379,12 +618,63 @@ class TelegramScraper:
                     hash=0
                 ))
 
+                channel_configs: Set[str] = set()
+                channel_configs_ordered: List[str] = []
                 for message in messages.messages:
+                    if len(channel_configs) >= limit:
+                        break
+
                     if hasattr(message, 'message') and message.message:
                         found = extract_raw_uris_from_text(message.message)
-                        configs.update(found)
+                        for uri in found:
+                            if uri not in channel_configs:
+                                channel_configs.add(uri)
+                                channel_configs_ordered.append(uri)
+                                if len(channel_configs) >= limit:
+                                    break
 
-                self.logger.info(f"Scraped {len(configs)} configs from {channel}")
+                    if len(channel_configs) >= limit:
+                        break
+
+                    try:
+                        if getattr(message, "media", None) and getattr(message, "file", None):
+                            name = (getattr(message.file, "name", None) or "").lower()
+                            mime = (getattr(message.file, "mime_type", None) or "").lower()
+                            is_text = (
+                                mime.startswith("text/")
+                                or name.endswith(".txt")
+                                or name.endswith(".conf")
+                                or name.endswith(".json")
+                                or name.endswith(".yaml")
+                                or name.endswith(".yml")
+                                or name.endswith(".npvt")
+                                or name.endswith(".npv")
+                            )
+                            if is_text:
+                                data = await self.client.download_media(message, file=bytes)
+                                if data:
+                                    try:
+                                        text = data.decode("utf-8", errors="ignore")
+                                    except Exception:
+                                        text = ""
+                                    if text:
+                                        found = extract_raw_uris_from_text(text)
+                                        for uri in found:
+                                            if uri not in channel_configs:
+                                                channel_configs.add(uri)
+                                                channel_configs_ordered.append(uri)
+                                                if len(channel_configs) >= limit:
+                                                    break
+                    except Exception:
+                        pass
+
+                    if len(channel_configs) >= limit:
+                        break
+
+                configs.update(channel_configs_ordered)
+
+                self.logger.info(f"Scraped {len(channel_configs)} configs from {channel}")
+                consecutive_errors = 0  # Reset on success
 
             except FloodWaitError as e:
                 self.logger.warning(f"Flood wait on {channel}: {e.seconds}s")
@@ -392,7 +682,22 @@ class TelegramScraper:
             except (ChannelPrivateError, UsernameNotOccupiedError, UsernameInvalidError) as e:
                 self.logger.warning(f"Skipping {channel}: {e}")
             except Exception as e:
-                self.logger.error(f"Failed to scrape {channel}: {e}")
+                error_str = str(e).lower()
+                is_connection_error = (
+                    "disconnected" in error_str or
+                    "connection" in error_str or
+                    "security error" in error_str or
+                    "cancelled" in error_str
+                )
+                
+                if is_connection_error:
+                    consecutive_errors += 1
+                    self.logger.warning(f"Connection error for {channel}: {e}")
+                    reconnected = await self.heartbeat.try_reconnect(self.client)
+                    if reconnected:
+                        consecutive_errors = 0
+                else:
+                    self.logger.error(f"Failed to scrape {channel}: {e}")
 
         return configs
 
@@ -413,6 +718,26 @@ class TelegramScraper:
 
         except Exception as e:
             self.logger.error(f"Failed to send report: {e}")
+            return False
+
+    async def send_file(self, filename: str, content: bytes, caption: str = "") -> bool:
+        """Send a file to the Telegram report channel."""
+        if not self.client or not await self.heartbeat.check_connection(self.client):
+            if not await self.connect():
+                return False
+
+        try:
+            channel = self.config.get("report_channel")
+            if not channel:
+                return False
+
+            bio = io.BytesIO(content)
+            bio.name = filename
+            await self.client.send_file(channel, file=bio, caption=caption)
+            self.logger.info(f"File sent to Telegram: {filename}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to send file: {e}")
             return False
 
     async def disconnect(self):
@@ -441,7 +766,41 @@ class TelegramReporter:
 
         report += f"\nTotal: {len(configs)} gold configs available"
 
-        await self.scraper.send_report(report)
+        try:
+            await self.scraper.send_report(report)
+        except Exception as e:
+            self.logger.debug(f"Failed to report gold configs to Telegram: {e}")
+
+    async def report_config_files(
+        self,
+        gold_uris: List[str],
+        gemini_uris: Optional[List[str]] = None,
+        max_lines: int = 200,
+    ) -> None:
+        if not gold_uris and not gemini_uris:
+            return
+
+        try:
+            if gold_uris:
+                content = ("\n".join(gold_uris[:max_lines]) + "\n").encode("utf-8", errors="ignore")
+                await self.scraper.send_file(
+                    filename="HUNTER_gold.txt",
+                    content=content,
+                    caption=f"HUNTER Gold (top {min(len(gold_uris), max_lines)}/{len(gold_uris)})",
+                )
+        except Exception:
+            pass
+
+        try:
+            if gemini_uris:
+                content = ("\n".join(gemini_uris[:max_lines]) + "\n").encode("utf-8", errors="ignore")
+                await self.scraper.send_file(
+                    filename="HUNTER_gemini.txt",
+                    content=content,
+                    caption=f"HUNTER Gemini (top {min(len(gemini_uris), max_lines)}/{len(gemini_uris)})",
+                )
+        except Exception:
+            pass
 
     async def report_status(self, status: Dict[str, Any]):
         """Report system status to Telegram."""
@@ -450,4 +809,7 @@ class TelegramReporter:
         report += f"Backends: {status.get('backends', 0)}\n"
         report += f"Restarts: {status.get('stats', {}).get('restarts', 0)}\n"
 
-        await self.scraper.send_report(report)
+        try:
+            await self.scraper.send_report(report)
+        except Exception as e:
+            self.logger.debug(f"Failed to report status to Telegram: {e}")

@@ -29,12 +29,14 @@ class HunterConfig:
         
         self._config = {
             # Telegram Configuration
-            "api_id": int(os.getenv("HUNTER_API_ID", "31828870")),
-            "api_hash": os.getenv("HUNTER_API_HASH", ""),
-            "phone": os.getenv("HUNTER_PHONE", ""),
-            "bot_token": os.getenv("TOKEN", ""),
-            "report_channel": int(os.getenv("CHAT_ID", "-1002567385742")),
-            "session_name": os.getenv("HUNTER_SESSION", "HUNTER_session"),
+            # Note: These will be overridden by _load_env_file() and _load_from_environment()
+            "api_id": None,
+            "api_hash": None,
+            "phone": None,
+            "bot_token": None,
+            "report_channel": None,
+            "session_name": "hunter_session",
+            "telegram_limit": 50,
             
             # Target Channels
             "targets": [
@@ -62,9 +64,9 @@ class HunterConfig:
             "google_test_url": os.getenv("HUNTER_GOOGLE_TEST_URL", "https://www.google.com/generate_204"),
             "scan_limit": int(os.getenv("HUNTER_SCAN_LIMIT", "50")),
             "latest_total": int(os.getenv("HUNTER_LATEST_URIS", "500")),
-            "max_total": int(os.getenv("HUNTER_MAX_CONFIGS", "3000")),
+            "max_total": int(os.getenv("HUNTER_MAX_CONFIGS", "1500")),  # Reduced from 3000 to 1500
             "npvt_scan_limit": int(os.getenv("HUNTER_NPVT_SCAN", "50")),
-            "max_workers": int(os.getenv("HUNTER_WORKERS", "50")),
+            "max_workers": int(os.getenv("HUNTER_WORKERS", "10")),  # Reduced from 50 to 10
             "timeout_seconds": int(os.getenv("HUNTER_TEST_TIMEOUT", "10")),
             
             # Timing Configuration
@@ -81,6 +83,8 @@ class HunterConfig:
             "multiproxy_port": int(os.getenv("HUNTER_MULTIPROXY_PORT", "10808")),
             "multiproxy_backends": int(os.getenv("HUNTER_MULTIPROXY_BACKENDS", "5")),
             "multiproxy_health_interval": int(os.getenv("HUNTER_MULTIPROXY_HEALTH_INTERVAL", "60")),
+            "gemini_balancer_enabled": os.getenv("HUNTER_GEMINI_BALANCER", "false").lower() == "true",
+            "gemini_port": int(os.getenv("HUNTER_GEMINI_PORT", "10809")),
             
             # Connection Configuration
             "connect_tries": int(os.getenv("HUNTER_CONNECT_TRIES", "4")),
@@ -96,6 +100,48 @@ class HunterConfig:
             "gateway_socks_port": int(os.getenv("GATEWAY_SOCKS_PORT", "10808")),
             "gateway_http_port": int(os.getenv("GATEWAY_HTTP_PORT", "10809")),
             "gateway_dns_port": int(os.getenv("GATEWAY_DNS_PORT", "53")),
+            
+            # === 2026 DPI Evasion Configuration ===
+            # DPI Evasion Orchestrator
+            "dpi_evasion_enabled": os.getenv("HUNTER_DPI_EVASION", "true").lower() == "true",
+            "dpi_evasion_adaptive": os.getenv("HUNTER_DPI_ADAPTIVE", "true").lower() == "true",
+            
+            # TLS Fingerprint Evasion (JA3/JA4 spoofing)
+            "tls_fingerprint_enabled": os.getenv("HUNTER_TLS_FP_EVASION", "true").lower() == "true",
+            "tls_fingerprint_prefer_h2": os.getenv("HUNTER_TLS_FP_H2", "true").lower() == "true",
+            "tls_fingerprint_rotation_interval": int(os.getenv("HUNTER_TLS_FP_ROTATION", "120")),
+            
+            # TLS ClientHello Fragmentation
+            "tls_fragment_enabled": os.getenv("HUNTER_TLS_FRAGMENT", "true").lower() == "true",
+            "tls_fragment_strategy": os.getenv("HUNTER_TLS_FRAG_STRATEGY", "three_part"),
+            "tls_fragment_min_delay": float(os.getenv("HUNTER_TLS_FRAG_MIN_DELAY", "10")),
+            "tls_fragment_max_delay": float(os.getenv("HUNTER_TLS_FRAG_MAX_DELAY", "50")),
+            "tls_fragment_min_size": int(os.getenv("HUNTER_TLS_FRAG_MIN_SIZE", "1")),
+            "tls_fragment_max_size": int(os.getenv("HUNTER_TLS_FRAG_MAX_SIZE", "200")),
+            
+            # VLESS-Reality-Vision defaults
+            "reality_dest": os.getenv("HUNTER_REALITY_DEST", "swdist.apple.com:443"),
+            "reality_server_names": os.getenv("HUNTER_REALITY_SNI", "swdist.apple.com,www.apple.com"),
+            
+            # MTU Optimizer (5G PMTUD attack mitigation)
+            "mtu_optimization_enabled": os.getenv("HUNTER_MTU_OPT", "true").lower() == "true",
+            "mtu_mobile_4g": int(os.getenv("HUNTER_MTU_4G", "1350")),
+            "mtu_mobile_5g": int(os.getenv("HUNTER_MTU_5G", "1280")),
+            "mtu_fiber": int(os.getenv("HUNTER_MTU_FIBER", "1500")),
+            
+            # Active Probe Defense
+            "probe_defense_enabled": os.getenv("HUNTER_PROBE_DEFENSE", "true").lower() == "true",
+            "probe_fallback_site": os.getenv("HUNTER_PROBE_FALLBACK", "www.apple.com"),
+            
+            # Entropy Normalization
+            "entropy_normalization_enabled": os.getenv("HUNTER_ENTROPY_NORM", "true").lower() == "true",
+            
+            # UDP Protocol support (Hysteria2/TUIC)
+            "hysteria2_enabled": os.getenv("HUNTER_HY2_ENABLED", "true").lower() == "true",
+            "tuic_enabled": os.getenv("HUNTER_TUIC_ENABLED", "true").lower() == "true",
+            "udp_port_hopping": os.getenv("HUNTER_UDP_HOP", "true").lower() == "true",
+            "udp_port_range": os.getenv("HUNTER_UDP_PORT_RANGE", "20000-40000"),
+            "udp_hop_interval": int(os.getenv("HUNTER_UDP_HOP_INTERVAL", "30")),
         }
     
     def _load_env_file(self):
@@ -139,12 +185,20 @@ class HunterConfig:
     def _load_from_environment(self):
         """Override configuration with environment variables."""
         env_mappings = {
+            # Telegram credentials - support multiple env var names
             "HUNTER_API_ID": ("api_id", int),
+            "TELEGRAM_API_ID": ("api_id", int),
             "HUNTER_API_HASH": ("api_hash", str),
+            "TELEGRAM_API_HASH": ("api_hash", str),
             "HUNTER_PHONE": ("phone", str),
+            "TELEGRAM_PHONE": ("phone", str),
             "TOKEN": ("bot_token", str),
+            "TELEGRAM_BOT_TOKEN": ("bot_token", str),
             "CHAT_ID": ("report_channel", int),
+            "TELEGRAM_GROUP_ID": ("report_channel", int),
             "HUNTER_SESSION": ("session_name", str),
+            "TELEGRAM_SESSION": ("session_name", str),
+            "HUNTER_TELEGRAM_LIMIT": ("telegram_limit", int),
             "HUNTER_XRAY_PATH": ("xray_path", str),
             "HUNTER_TEST_URL": ("test_url", str),
             "HUNTER_GOOGLE_TEST_URL": ("google_test_url", str),
@@ -163,6 +217,8 @@ class HunterConfig:
             "HUNTER_MULTIPROXY_PORT": ("multiproxy_port", int),
             "HUNTER_MULTIPROXY_BACKENDS": ("multiproxy_backends", int),
             "HUNTER_MULTIPROXY_HEALTH_INTERVAL": ("multiproxy_health_interval", int),
+            "HUNTER_GEMINI_BALANCER": ("gemini_balancer_enabled", lambda x: x.lower() == "true"),
+            "HUNTER_GEMINI_PORT": ("gemini_port", int),
             "HUNTER_CONNECT_TRIES": ("connect_tries", int),
             "ADEE_ENABLED": ("adee_enabled", lambda x: x.lower() == "true"),
             "IRAN_FRAGMENT_ENABLED": ("iran_fragment_enabled", lambda x: x.lower() == "true"),
@@ -222,6 +278,7 @@ class HunterConfig:
             ("max_total", 1, 10000),
             ("max_workers", 1, 200),
             ("timeout_seconds", 1, 60),
+            ("telegram_limit", 1, 500),
             ("sleep_seconds", 10, 3600),
         ]
         

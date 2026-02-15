@@ -10,6 +10,8 @@ from .uri_parser import (
     VLESSParser, 
     TrojanParser,
     ShadowsocksParser,
+    Hysteria2Parser,
+    TUICParser,
     UniversalParser
 )
 
@@ -18,5 +20,7 @@ __all__ = [
     "VLESSParser",
     "TrojanParser", 
     "ShadowsocksParser",
+    "Hysteria2Parser",
+    "TUICParser",
     "UniversalParser"
 ]

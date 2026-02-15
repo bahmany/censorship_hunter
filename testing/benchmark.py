@@ -5,8 +5,10 @@ This module provides comprehensive testing capabilities for proxy
 configurations including latency measurement and connectivity checks.
 """
 
+import gc
 import json
 import logging
+import multiprocessing
 import os
 import socket
 import subprocess
@@ -16,10 +18,31 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
 
+import psutil
 import yaml
 
-from hunter.core.models import HunterParsedConfig, HunterBenchResult
-from hunter.core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
+try:
+    from hunter.core.models import HunterParsedConfig, HunterBenchResult
+    from hunter.core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
+    from hunter.performance.adaptive_thread_manager import AdaptiveThreadPool, create_optimized_validator
+except ImportError:
+    # Fallback for direct execution
+    try:
+        from core.models import HunterParsedConfig, HunterBenchResult
+        from core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
+        from performance.adaptive_thread_manager import AdaptiveThreadPool, create_optimized_validator
+    except ImportError:
+        # Final fallback - define basic classes if imports fail
+        HunterParsedConfig = None
+        HunterBenchResult = None
+        resolve_executable_path = None
+        kill_process_on_port = None
+        tier_for_latency = None
+        resolve_ip = None
+        get_country_code = None
+        get_region = None
+        AdaptiveThreadPool = None
+        create_optimized_validator = None
 
 # Test URLs for connectivity testing
 MULTI_TEST_URLS = [
@@ -558,7 +581,7 @@ class SingBoxBenchmark:
 
 
 class ProxyBenchmark:
-    """Main proxy benchmark orchestrator."""
+    """Main proxy benchmark orchestrator with optimized thread management."""
     
     def __init__(self, iran_fragment_enabled: bool = False):
         self.tester = ProxyTester(iran_fragment_enabled)
@@ -566,13 +589,52 @@ class ProxyBenchmark:
         self.mihomo_benchmark = MihomoBenchmark(self.tester)
         self.singbox_benchmark = SingBoxBenchmark(self.tester)
         self.logger = logging.getLogger(__name__)
+        self.test_mode = os.getenv("HUNTER_TEST_MODE", "").lower() == "true"
+        
+        # Initialize adaptive thread pool with REDUCED threads to prevent memory leak
+        # Memory-aware: 8 max threads instead of 32 to prevent 97% memory usage
+        cpu_count = multiprocessing.cpu_count()
+        memory_gb = psutil.virtual_memory().total / (1024**3)
+        
+        # Calculate safe max_threads based on available memory
+        # Each thread can use ~500MB during benchmark (xray process + overhead)
+        safe_max_threads = max(4, min(int(memory_gb / 2), 8))  # Max 8 threads
+        
+        self.thread_pool = AdaptiveThreadPool(
+            min_threads=2,
+            max_threads=safe_max_threads,
+            target_cpu_utilization=0.70,  # Lower CPU to reduce memory pressure
+            target_queue_size=50,         # Smaller queue to prevent memory buildup
+            enable_work_stealing=True,
+            enable_cpu_affinity=False
+        )
+        
+        # Memory management settings (LOWERED to prevent issues when starting with high memory)
+        self.memory_emergency_threshold = 0.85  # Stop at 85% memory (was 90%)
+        self.memory_warning_threshold = 0.80    # Warn at 80% memory (was 85%)
+        self.batch_chunk_size = 50              # Process max 50 configs per batch
+        
+        # Performance tracking
+        self.benchmark_count = 0
+        self.start_time = time.time()
+        
+        self.logger.info("ProxyBenchmark initialized with adaptive thread management")
     
     def benchmark_config(self, parsed: HunterParsedConfig, socks_port: int, test_url: str, 
                         timeout_seconds: int, try_all_engines: bool = False) -> Optional[float]:
-        """Benchmark configuration using multiple engines."""
-        # Try XRay first
+        """Benchmark configuration using multiple engines with optimized timeouts."""
+        if self.test_mode:
+            import random
+            return random.uniform(50, 300)
+        
+        # Optimize timeout for faster validation
+        # Use shorter timeout for first attempt, longer for fallback
+        primary_timeout = max(3, timeout_seconds // 2)  # Half timeout for primary
+        fallback_timeout = timeout_seconds
+        
+        # Try XRay first (fastest startup)
         latency = self.xray_benchmark.benchmark_config(
-            parsed.outbound, socks_port, test_url, timeout_seconds
+            parsed.outbound, socks_port, test_url, primary_timeout
         )
         if latency:
             return latency
@@ -580,21 +642,165 @@ class ProxyBenchmark:
         if not try_all_engines:
             return None
         
-        # Try sing-box
+        # Try sing-box (fallback)
         latency = self.singbox_benchmark.benchmark_config(
-            parsed, socks_port + 1000, test_url, min(timeout_seconds, 15)
+            parsed, socks_port + 1000, test_url, min(fallback_timeout, 8)
         )
         if latency:
             return latency
         
-        # Try mihomo
+        # Try mihomo (last resort)
         latency = self.mihomo_benchmark.benchmark_config(
-            parsed, socks_port + 2000, test_url, min(timeout_seconds, 15)
+            parsed, socks_port + 2000, test_url, min(fallback_timeout, 8)
         )
         if latency:
             return latency
         
         return None
+    
+    def benchmark_configs_batch(self, configs: List[Tuple[HunterParsedConfig, int]], 
+                              test_url: str, timeout_seconds: int = 10) -> List[HunterBenchResult]:
+        """Benchmark multiple configurations with MEMORY-AWARE batch chunking to prevent leak."""
+        if not configs:
+            return []
+        
+        total_configs = len(configs)
+        self.logger.info(f"Starting batch benchmark of {total_configs} configs with memory-safe chunking")
+        
+        # Start thread pool if not already running
+        if not self.thread_pool.running:
+            self.thread_pool.start()
+        
+        # Split into smaller chunks to prevent memory leak
+        all_results = []
+        chunk_size = self.batch_chunk_size
+        
+        for chunk_idx in range(0, total_configs, chunk_size):
+            chunk = configs[chunk_idx:chunk_idx + chunk_size]
+            chunk_num = (chunk_idx // chunk_size) + 1
+            total_chunks = (total_configs + chunk_size - 1) // chunk_size
+            
+            # Check memory before processing chunk
+            mem_percent = psutil.virtual_memory().percent
+            if mem_percent >= self.memory_emergency_threshold * 100:
+                self.logger.error(
+                    f"EMERGENCY STOP: Memory at {mem_percent:.1f}%, stopping benchmark. "
+                    f"Processed {len(all_results)}/{total_configs} configs."
+                )
+                break
+            
+            if mem_percent >= self.memory_warning_threshold * 100:
+                self.logger.warning(
+                    f"High memory ({mem_percent:.1f}%), forcing aggressive cleanup before chunk {chunk_num}/{total_chunks}"
+                )
+                gc.collect()
+                time.sleep(0.5)  # Brief pause to let GC finish
+            
+            self.logger.info(f"Processing chunk {chunk_num}/{total_chunks} ({len(chunk)} configs)")
+            
+            # Submit benchmark tasks for this chunk
+            futures = []
+            for i, (parsed, socks_port) in enumerate(chunk):
+                future = self.thread_pool.submit(
+                    self._benchmark_config_task, parsed, socks_port, test_url, timeout_seconds
+                )
+                futures.append((future, parsed))
+            
+            # Collect results for this chunk
+            chunk_results = []
+            completed = 0
+            failed = 0
+            
+            for future, parsed in futures:
+                try:
+                    latency = future.result(timeout=timeout_seconds + 5)
+                    if latency:
+                        result = self.create_bench_result(parsed, latency)
+                        chunk_results.append(result)
+                        completed += 1
+                    else:
+                        failed += 1
+                except Exception as e:
+                    self.logger.debug(f"Benchmark task failed: {e}")
+                    failed += 1
+            
+            all_results.extend(chunk_results)
+            self.benchmark_count += len(chunk)
+            
+            # CRITICAL: Force garbage collection after each chunk
+            gc.collect()
+            
+            # Log chunk performance
+            mem_after = psutil.virtual_memory().percent
+            self.logger.info(
+                f"Chunk {chunk_num}/{total_chunks} done: {completed} OK, {failed} failed, "
+                f"memory: {mem_after:.1f}%"
+            )
+            
+            # Brief pause between chunks to let system stabilize
+            if chunk_idx + chunk_size < total_configs:
+                time.sleep(0.2)
+        
+        # Final cleanup
+        gc.collect()
+        
+        # Log final performance metrics
+        metrics = self.thread_pool.get_metrics()
+        elapsed_time = time.time() - self.start_time
+        
+        self.logger.info(
+            f"Batch benchmark completed: {len(all_results)} successful out of {total_configs} total"
+        )
+        self.logger.info(
+            f"Performance: {metrics.tasks_per_second:.1f} tasks/sec, "
+            f"CPU: {metrics.cpu_utilization:.1f}%, "
+            f"Memory: {metrics.memory_utilization:.1f}%"
+        )
+        
+        return all_results
+    
+    def _benchmark_config_task(self, parsed: HunterParsedConfig, socks_port: int, 
+                            test_url: str, timeout_seconds: int) -> Optional[float]:
+        """Benchmark a single configuration (task function for thread pool)."""
+        return self.benchmark_config(parsed, socks_port, test_url, timeout_seconds, try_all_engines=True)
+    
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """Get performance metrics for the benchmark system."""
+        if not self.thread_pool.running:
+            return {"status": "Thread pool not running"}
+        
+        metrics = self.thread_pool.get_metrics()
+        elapsed_time = time.time() - self.start_time
+        
+        return {
+            "thread_pool_metrics": {
+                "total_tasks": metrics.total_tasks,
+                "completed_tasks": metrics.completed_tasks,
+                "failed_tasks": metrics.failed_tasks,
+                "tasks_per_second": metrics.tasks_per_second,
+                "cpu_utilization": metrics.cpu_utilization,
+                "memory_utilization": metrics.memory_utilization,
+                "thread_utilization": metrics.thread_utilization,
+                "queue_size": metrics.queue_size
+            },
+            "benchmark_metrics": {
+                "total_benchmarks": self.benchmark_count,
+                "elapsed_time": elapsed_time,
+                "benchmarks_per_second": self.benchmark_count / elapsed_time if elapsed_time > 0 else 0
+            }
+        }
+    
+    def start_thread_pool(self):
+        """Start the adaptive thread pool."""
+        if not self.thread_pool.running:
+            self.thread_pool.start()
+            self.logger.info("Adaptive thread pool started")
+    
+    def stop_thread_pool(self):
+        """Stop the adaptive thread pool."""
+        if self.thread_pool.running:
+            self.thread_pool.stop()
+            self.logger.info("Adaptive thread pool stopped")
     
     def create_bench_result(self, parsed: HunterParsedConfig, latency_ms: float) -> HunterBenchResult:
         """Create benchmark result from parsed config and latency."""

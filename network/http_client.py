@@ -19,7 +19,10 @@ import urllib3
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-from hunter.core.utils import extract_raw_uris_from_text, safe_b64decode
+try:
+    from hunter.core.utils import extract_raw_uris_from_text, safe_b64decode
+except ImportError:
+    from core.utils import extract_raw_uris_from_text, safe_b64decode
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 

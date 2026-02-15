@@ -129,7 +129,6 @@ dmypy.json
 .pyre/
 
 # IDEs
-.idea/
 .vscode/
 *.swp
 *.swo
@@ -141,5 +140,41 @@ Thumbs.db
 
 # Project specific
 hunter_secrets.env
+*.env
+*.session
 hunter_session.session
+*.log
+diagnostic_output.txt
+test_validation.log
+*cache*.txt
 subscriptions_cache.txt
+working_configs_cache.txt
+
+# Runtime and binaries
+bin/
+runtime/
+native/
+
+# Allow tracking and tooling access for the Android native project
+!native/android/
+!native/android/**
+
+# Configs (may contain sensitive data)
+config/
+
+# Old code
+old/
+
+# Test files and directories
+test_*.py
+testing/
+
+# Runtime cache files
+HUNTER_*.json
+HUNTER_*.txt
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
