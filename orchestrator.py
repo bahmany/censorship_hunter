@@ -243,60 +243,19 @@ class HunterOrchestrator:
 
     def validate_configs(self, configs: Iterable[str], max_workers: int = 50) -> List[HunterBenchResult]:
         """Validate and benchmark configurations with adaptive thread management."""
-        import gc
-        try:
-            import psutil
-        except ImportError:
-            psutil = None
-        
         from hunter.core.utils import prioritize_configs
-        
-        # CRITICAL: Check memory BEFORE starting benchmark
-        if psutil:
-            mem_percent = psutil.virtual_memory().percent
-            if mem_percent >= 85:
-                self.logger.error(
-                    f"CANNOT START BENCHMARK: Memory already at {mem_percent:.1f}%. "
-                    f"Forcing cleanup and reducing config count..."
-                )
-                gc.collect()
-                import time
-                time.sleep(1)
-                
-                mem_after = psutil.virtual_memory().percent
-                if mem_after >= 85:
-                    self.logger.error(
-                        f"Memory still at {mem_after:.1f}% after cleanup. "
-                        f"Skipping benchmark this cycle to prevent system crash."
-                    )
-                    return []
         
         results: List[HunterBenchResult] = []
         test_url = self.config.get("test_url", "https://www.cloudflare.com/cdn-cgi/trace")
         timeout = self.config.get("timeout_seconds", 10)
 
+        # Use adaptive max_workers from cycle configuration
         configured_workers = self.config.get("max_workers")
         if isinstance(configured_workers, int) and configured_workers > 0:
             max_workers = configured_workers
 
-        # Limit to max_total and deduplicate
-        # CRITICAL: Dynamically adjust based on current memory
-        base_max_total = self.config.get("max_total", 800)
-        
-        # Further reduce if memory is already elevated
-        if psutil:
-            mem_percent = psutil.virtual_memory().percent
-            if mem_percent >= 80:
-                max_total = min(base_max_total, 400)  # Cut in half if memory high
-                self.logger.warning(f"Memory at {mem_percent:.1f}%, reducing max_total to {max_total}")
-            elif mem_percent >= 70:
-                max_total = min(base_max_total, 600)  # Reduce by 25%
-                self.logger.info(f"Memory at {mem_percent:.1f}%, reducing max_total to {max_total}")
-            else:
-                max_total = base_max_total
-        else:
-            max_total = base_max_total
-        
+        # Use adaptive max_total from cycle configuration (already set in run_cycle)
+        max_total = self.config.get("max_total", 800)
         deduped_configs = list(dict.fromkeys(list(configs)))[:max_total]
         
         # Check if we have any configs to validate
