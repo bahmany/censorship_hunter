@@ -29,6 +29,7 @@ except ImportError:
     PARAMIKO_AVAILABLE = False
 
 import os
+import sys
 import json
 import io
 
@@ -531,28 +532,33 @@ class TelegramScraper:
             if not await self.client.is_user_authorized():
                 phone = self.config.get("phone")
                 if not phone:
-                    self.logger.error("Phone number required for Telegram auth")
+                    self.logger.info("Phone number not set - Telegram scraping disabled")
+                    return False
+
+                # Only attempt interactive auth if stdin is a TTY (not background/piped)
+                if not sys.stdin or not sys.stdin.isatty():
+                    self.logger.info("Non-interactive mode - Telegram user auth skipped (use Bot API for reporting)")
                     return False
 
                 # Use interactive authentication
                 if self.telegram_auth:
                     if not await self.telegram_auth.authenticate(self.client, phone):
-                        self.logger.error("Telegram authentication failed")
+                        self.logger.info("Telegram authentication not completed")
                         return False
                 else:
                     # Fallback to basic authentication
-                    self.logger.warning("Interactive authentication not available, using basic auth")
+                    self.logger.info("Using basic Telegram auth")
                     await self.client.send_code_request(phone)
                     code = input("Enter the Telegram login code: ").strip()
                     if code:
                         try:
-                            await client.sign_in(phone=phone, code=code)
+                            await self.client.sign_in(phone=phone, code=code)
                         except SessionPasswordNeededError:
                             pwd = input("Enter Telegram 2FA password: ").strip()
                             if pwd:
-                                await client.sign_in(password=pwd)
+                                await self.client.sign_in(password=pwd)
                     else:
-                        self.logger.error("Telegram authentication failed")
+                        self.logger.info("Telegram authentication cancelled")
                         return False
 
             if await self.client.is_user_authorized():
@@ -748,8 +754,215 @@ class TelegramScraper:
         self.close_ssh_tunnel()
 
 
+class BotReporter:
+    """Send messages and files to Telegram via Bot API (HTTP).
+    
+    Uses TOKEN and CHAT_ID from environment - no Telethon, no SSH tunnel,
+    no user session needed. Works directly over the internet.
+    """
+
+    BOT_API_URL = "https://api.telegram.org/bot{token}/{method}"
+
+    def __init__(self):
+        self.logger = logging.getLogger(__name__)
+        self.token = os.getenv("TOKEN") or os.getenv("TELEGRAM_BOT_TOKEN")
+        self.chat_id = os.getenv("CHAT_ID") or os.getenv("TELEGRAM_GROUP_ID")
+        self.enabled = bool(self.token and self.chat_id)
+        if not self.enabled:
+            self.logger.info("Bot reporter disabled: TOKEN or CHAT_ID not set")
+
+    # ---- low-level helpers ------------------------------------------------
+
+    def _url(self, method: str) -> str:
+        return self.BOT_API_URL.format(token=self.token, method=method)
+
+    async def _post_json(self, method: str, data: dict) -> dict:
+        """POST JSON to Bot API and return response dict."""
+        import urllib.request
+        import urllib.error
+        url = self._url(method)
+        body = json.dumps(data).encode("utf-8")
+        req = urllib.request.Request(
+            url, data=body,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        loop = asyncio.get_event_loop()
+        try:
+            resp = await loop.run_in_executor(
+                None,
+                lambda: urllib.request.urlopen(req, timeout=30).read(),
+            )
+            return json.loads(resp)
+        except urllib.error.HTTPError as e:
+            err_body = e.read().decode(errors="ignore")
+            self.logger.info(f"Bot API {method} error {e.code}: {err_body[:200]}")
+            return {"ok": False, "description": err_body[:200]}
+        except Exception as e:
+            self.logger.info(f"Bot API {method} failed: {e}")
+            return {"ok": False, "description": str(e)}
+
+    async def _post_multipart(self, method: str, fields: dict,
+                               file_field: str, filename: str,
+                               file_bytes: bytes) -> dict:
+        """POST multipart/form-data (for file uploads)."""
+        import urllib.request
+        import urllib.error
+        boundary = "----HunterBotBoundary"
+        body_parts = []
+        for key, val in fields.items():
+            body_parts.append(
+                f"--{boundary}\r\n"
+                f"Content-Disposition: form-data; name=\"{key}\"\r\n\r\n"
+                f"{val}\r\n"
+            )
+        body_parts.append(
+            f"--{boundary}\r\n"
+            f"Content-Disposition: form-data; name=\"{file_field}\"; filename=\"{filename}\"\r\n"
+            f"Content-Type: application/octet-stream\r\n\r\n"
+        )
+        payload = "".join(body_parts).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
+
+        url = self._url(method)
+        req = urllib.request.Request(
+            url, data=payload,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        loop = asyncio.get_event_loop()
+        try:
+            resp = await loop.run_in_executor(
+                None,
+                lambda: urllib.request.urlopen(req, timeout=60).read(),
+            )
+            return json.loads(resp)
+        except Exception as e:
+            self.logger.info(f"Bot API file upload failed: {e}")
+            return {"ok": False, "description": str(e)}
+
+    # ---- public interface (same as TelegramReporter) ----------------------
+
+    async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
+        if not self.enabled:
+            return False
+        result = await self._post_json("sendMessage", {
+            "chat_id": self.chat_id,
+            "text": text,
+            "parse_mode": parse_mode,
+        })
+        ok = result.get("ok", False)
+        if ok:
+            self.logger.info("Bot: message sent to Telegram")
+        return ok
+
+    async def send_file(self, filename: str, content: bytes,
+                        caption: str = "") -> bool:
+        if not self.enabled:
+            return False
+        fields = {"chat_id": self.chat_id}
+        if caption:
+            fields["caption"] = caption
+        result = await self._post_multipart(
+            "sendDocument", fields, "document", filename, content,
+        )
+        ok = result.get("ok", False)
+        if ok:
+            self.logger.info(f"Bot: file '{filename}' sent to Telegram")
+        return ok
+
+    # ---- high-level reporting (called by orchestrator) --------------------
+
+    CONFIGS_PER_POST = 5  # each Telegram post = 5 URIs (tap to copy)
+
+    async def report_gold_configs(self, configs: List[Dict[str, Any]]):
+        """Send summary + copyable config batches to Telegram.
+
+        Format:
+          1) Summary post with tier/latency info
+          2) Multiple posts, each containing CONFIGS_PER_POST URIs inside
+             a single code block so the user can tap-to-copy the whole block
+        """
+        if not configs:
+            return
+
+        gold = [c for c in configs if c.get("tier") == "gold"]
+        silver = [c for c in configs if c.get("tier") != "gold"]
+
+        # --- summary message ---
+        import datetime
+        now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        summary = f"🏆 *Hunter — {now}*\n\n"
+        for i, cfg in enumerate(configs[:20], 1):
+            tier = "🥇" if cfg.get("tier") == "gold" else "🥈"
+            ps = cfg.get("ps", "—")
+            lat = cfg.get("latency_ms", 0)
+            summary += f"{tier} {ps}  `{lat:.0f}ms`\n"
+        parts = []
+        if gold:
+            parts.append(f"🥇 {len(gold)} gold")
+        if silver:
+            parts.append(f"🥈 {len(silver)} silver")
+        summary += f"\n{'  •  '.join(parts)}"
+        await self.send_message(summary)
+
+    async def report_config_files(
+        self,
+        gold_uris: List[str],
+        gemini_uris: Optional[List[str]] = None,
+        max_lines: int = 200,
+    ) -> None:
+        """Send configs as copyable code-block posts + npvt file.
+
+        Each post contains up to CONFIGS_PER_POST URIs in a <pre> block.
+        User taps the block → all URIs in that post are copied at once.
+        """
+        if not gold_uris:
+            return
+
+        uris = gold_uris[:max_lines]
+        batch = self.CONFIGS_PER_POST
+        total_posts = (len(uris) + batch - 1) // batch
+
+        for idx in range(0, len(uris), batch):
+            chunk = uris[idx : idx + batch]
+            post_num = idx // batch + 1
+            block = "\n".join(chunk)
+            # HTML <pre> so user can tap-to-copy the whole block
+            msg = (
+                f"📌 <b>{post_num}/{total_posts}</b>\n"
+                f"<pre>{block}</pre>"
+            )
+            await self.send_message(msg, parse_mode="HTML")
+            # small delay to keep order
+            await asyncio.sleep(0.3)
+
+        # --- npvt file with ALL configs ---
+        content = ("\n".join(uris) + "\n").encode("utf-8", errors="ignore")
+        await self.send_file(
+            filename="npvt.txt",
+            content=content,
+            caption=f"📂 HUNTER npvt — {len(uris)} validated configs",
+        )
+
+        # --- gemini file if present ---
+        if gemini_uris:
+            g_content = ("\n".join(gemini_uris[:max_lines]) + "\n").encode("utf-8", errors="ignore")
+            await self.send_file(
+                filename="npvt_gemini.txt",
+                content=g_content,
+                caption=f"♊ Gemini — {len(gemini_uris)} configs",
+            )
+
+    async def report_status(self, status: Dict[str, Any]):
+        report = "📊 *Hunter Status*\n\n"
+        report += f"Balancer: {'Running' if status.get('running') else 'Stopped'}\n"
+        report += f"Backends: {status.get('backends', 0)}\n"
+        report += f"Restarts: {status.get('stats', {}).get('restarts', 0)}\n"
+        await self.send_message(report)
+
+
 class TelegramReporter:
-    """Handles reporting validated proxy configs to Telegram."""
+    """Handles reporting validated proxy configs to Telegram (via Telethon user client)."""
 
     def __init__(self, scraper: TelegramScraper):
         self.scraper = scraper

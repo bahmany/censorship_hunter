@@ -22,7 +22,7 @@ try:
     from hunter.parsers import UniversalParser
     from hunter.testing.benchmark import ProxyBenchmark
     from hunter.proxy.load_balancer import MultiProxyServer
-    from hunter.telegram.scraper import TelegramScraper, TelegramReporter
+    from hunter.telegram.scraper import TelegramScraper, TelegramReporter, BotReporter
     from hunter.config.cache import SmartCache
     from hunter.security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
     from hunter.security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
@@ -38,7 +38,7 @@ except ImportError:
         from parsers import UniversalParser
         from testing.benchmark import ProxyBenchmark
         from proxy.load_balancer import MultiProxyServer
-        from telegram.scraper import TelegramScraper, TelegramReporter
+        from telegram.scraper import TelegramScraper, TelegramReporter, BotReporter
         from config.cache import SmartCache
         from security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
         from security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
@@ -56,6 +56,7 @@ except ImportError:
         MultiProxyServer = None
         TelegramScraper = None
         TelegramReporter = None
+        BotReporter = None
         SmartCache = None
         StealthObfuscationEngine = None
         ObfuscationConfig = None
@@ -117,7 +118,21 @@ class HunterOrchestrator:
         # Telegram (optional - works without credentials)
         self.telegram_scraper = None
         self.telegram_reporter = None
+        self.bot_reporter = None
         self.config_reporting_service = None
+        
+        # Bot API reporter (primary - uses TOKEN + CHAT_ID via HTTP, no SSH needed)
+        if BotReporter is not None:
+            try:
+                self.bot_reporter = BotReporter()
+                if self.bot_reporter.enabled:
+                    self.logger.info("Bot reporter initialized (Bot API)")
+                else:
+                    self.bot_reporter = None
+            except Exception as e:
+                self.logger.info(f"Bot reporter init skipped: {e}")
+        
+        # Telethon-based scraper/reporter (for scraping channels + fallback reporting)
         if TelegramScraper is not None:
             try:
                 self.telegram_scraper = TelegramScraper(config)
@@ -525,8 +540,14 @@ class HunterOrchestrator:
 
     async def report_status(self):
         """Report current status to Telegram."""
-        status = self.balancer.get_status()
-        await self.telegram_reporter.report_status(status)
+        reporter = self.bot_reporter or self.telegram_reporter
+        if reporter is None or self.balancer is None:
+            return
+        try:
+            status = self.balancer.get_status()
+            await reporter.report_status(status)
+        except Exception as e:
+            self.logger.info(f"Status report skipped: {e}")
 
     async def run_cycle(self):
         """Run one complete hunter cycle."""
@@ -674,27 +695,29 @@ class HunterOrchestrator:
             except Exception:
                 pass
 
-        # Report to Telegram (if available)
-        if self.telegram_reporter is not None:
+        # Report to Telegram (Bot API primary, Telethon fallback)
+        reporter = self.bot_reporter or self.telegram_reporter
+        all_validated = gold_configs + silver_configs
+        if reporter is not None and all_validated:
             try:
-                await self.telegram_reporter.report_gold_configs([
+                await reporter.report_gold_configs([
                     {
                         "ps": r.ps,
                         "latency_ms": r.latency_ms,
                         "region": r.region,
                         "tier": r.tier
-                    } for r in gold_configs
+                    } for r in all_validated
                 ])
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.info(f"Config report skipped: {e}")
 
             try:
-                await self.telegram_reporter.report_config_files(
-                    gold_uris=[r.uri for r in gold_configs],
+                await reporter.report_config_files(
+                    gold_uris=[r.uri for r in all_validated],
                     gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                self.logger.info(f"Config file report skipped: {e}")
 
         # Save to files
         self._save_to_files(gold_configs, silver_configs)
