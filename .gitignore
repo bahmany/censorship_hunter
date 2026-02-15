@@ -153,11 +153,31 @@ working_configs_cache.txt
 # Runtime and binaries
 bin/
 runtime/
-native/
 
-# Allow tracking and tooling access for the Android native project
-!native/android/
-!native/android/**
+# Android native project - keep source, ignore build artifacts
+native/android/.gradle/
+native/android/.idea/
+native/android/android-sdk/
+native/android/build/
+native/android/cmdline-tools/
+native/android/gradle/
+native/android/gradle-8.2/
+native/android/jdk-*/
+native/android/local-repo/
+native/android/temp_apk/
+*.log
+*.apk
+*.apk.idsig
+*.keystore
+*.zip
+*.jar
+native/android/local.properties
+native/android/build.log
+native/android/compile_errors.log
+native/android/dex_errors.log
+native/android/error.txt
+native/android/gradle_*.log
+native/android/temp_signed.*
 
 # Configs (may contain sensitive data)
 config/
