@@ -1,0 +1,21 @@
+# ninja log v5
+0	167	7928639705672348	json-populate-prefix/src/json-populate-stamp/json-populate-mkdir	e692801b7e55e054
+0	167	7928639705672348	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-mkdir	e692801b7e55e054
+168	99596	7928640699969224	json-populate-prefix/src/json-populate-stamp/json-populate-download	ec90523806dfc8d0
+168	99596	7928640699969224	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-download	ec90523806dfc8d0
+99596	99716	0	json-populate-prefix/src/json-populate-stamp/json-populate-update	9e51eb816e712db4
+99596	99716	0	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-update	9e51eb816e712db4
+99716	99768	7928640701696659	json-populate-prefix/src/json-populate-stamp/json-populate-patch	dfdaa2559c998f82
+99716	99768	7928640701696659	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-patch	dfdaa2559c998f82
+99768	99814	7928640702162585	json-populate-prefix/src/json-populate-stamp/json-populate-configure	25d7e4dc6dc95b1b
+99768	99814	7928640702162585	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-configure	25d7e4dc6dc95b1b
+99814	99860	7928640702622832	json-populate-prefix/src/json-populate-stamp/json-populate-build	713c47ccceb6dcff
+99814	99860	7928640702622832	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-build	713c47ccceb6dcff
+99860	99903	7928640703047965	json-populate-prefix/src/json-populate-stamp/json-populate-install	f6b266ff2555cd42
+99860	99903	7928640703047965	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-install	f6b266ff2555cd42
+99903	99948	7928640703498289	json-populate-prefix/src/json-populate-stamp/json-populate-test	72437b05227110e2
+99903	99948	7928640703498289	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-test	72437b05227110e2
+99948	100009	7928640704095152	CMakeFiles/json-populate-complete	10ba5c301e22f779
+99948	100009	7928640704095152	json-populate-prefix/src/json-populate-stamp/json-populate-done	10ba5c301e22f779
+99948	100009	7928640704095152	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/CMakeFiles/json-populate-complete	10ba5c301e22f779
+99948	100009	7928640704095152	D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/3y1g4b4b/arm64-v8a/_deps/json-subbuild/json-populate-prefix/src/json-populate-stamp/json-populate-done	10ba5c301e22f779

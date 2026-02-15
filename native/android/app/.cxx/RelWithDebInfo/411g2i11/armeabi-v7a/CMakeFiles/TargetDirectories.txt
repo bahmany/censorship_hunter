@@ -1,0 +1,5 @@
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/RelWithDebInfo/411g2i11/armeabi-v7a/CMakeFiles/hunter.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/RelWithDebInfo/411g2i11/armeabi-v7a/CMakeFiles/edit_cache.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/RelWithDebInfo/411g2i11/armeabi-v7a/CMakeFiles/rebuild_cache.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/RelWithDebInfo/411g2i11/armeabi-v7a/_deps/json-build/CMakeFiles/edit_cache.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/RelWithDebInfo/411g2i11/armeabi-v7a/_deps/json-build/CMakeFiles/rebuild_cache.dir

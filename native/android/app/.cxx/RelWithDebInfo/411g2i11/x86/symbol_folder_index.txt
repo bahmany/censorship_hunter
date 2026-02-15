@@ -1,0 +1,1 @@
+D:\projects\v2ray\pythonProject1\hunter\native\android\app\build\intermediates\cxx\RelWithDebInfo\411g2i11\obj\x86

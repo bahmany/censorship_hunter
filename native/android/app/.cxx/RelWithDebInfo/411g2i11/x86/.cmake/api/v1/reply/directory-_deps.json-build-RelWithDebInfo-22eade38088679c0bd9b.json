@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "_deps/json-build",
+		"source" : "D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/RelWithDebInfo/411g2i11/x86/_deps/json-src"
+	}
+}

@@ -1,0 +1,39 @@
+{
+  "buildFiles": [
+    "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\app\\.cxx\\Debug\\6v2t2e4i\\x86_64\\_deps\\json-src\\CMakeLists.txt",
+    "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\app\\src\\main\\cpp\\CMakeLists.txt"
+  ],
+  "cleanCommandsComponents": [
+    [
+      "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\android-sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+      "-C",
+      "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\app\\.cxx\\Debug\\6v2t2e4i\\x86_64",
+      "clean"
+    ]
+  ],
+  "buildTargetsCommandComponents": [
+    "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\android-sdk\\cmake\\3.22.1\\bin\\ninja.exe",
+    "-C",
+    "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\app\\.cxx\\Debug\\6v2t2e4i\\x86_64",
+    "{LIST_OF_TARGETS_TO_BUILD}"
+  ],
+  "libraries": {
+    "hunter::@6890427a1f51a3e7e1df": {
+      "toolchain": "toolchain",
+      "abi": "x86_64",
+      "artifactName": "hunter",
+      "output": "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\app\\build\\intermediates\\cxx\\Debug\\6v2t2e4i\\obj\\x86_64\\libhunter.so",
+      "runtimeFiles": []
+    }
+  },
+  "toolchains": {
+    "toolchain": {
+      "cCompilerExecutable": "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\android-sdk\\ndk\\26.1.10909125\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang.exe",
+      "cppCompilerExecutable": "D:\\projects\\v2ray\\pythonProject1\\hunter\\native\\android\\android-sdk\\ndk\\26.1.10909125\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe"
+    }
+  },
+  "cFileExtensions": [],
+  "cppFileExtensions": [
+    "cpp"
+  ]
+}

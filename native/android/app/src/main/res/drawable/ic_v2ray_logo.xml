@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- V2Ray inspired logo - Shield with V shape -->
+    
+    <!-- Outer Shield -->
+    <path
+        android:fillColor="#4A9EFF"
+        android:pathData="M54,10 L94,28 L94,54 C94,78 74,96 54,100 C34,96 14,78 14,54 L14,28 Z" />
+
+    <!-- Inner Shield (darker) -->
+    <path
+        android:fillColor="#1A1A24"
+        android:pathData="M54,18 L86,33 L86,54 C86,73 70,88 54,92 C38,88 22,73 22,54 L22,33 Z" />
+
+    <!-- V Shape - Main -->
+    <path
+        android:fillColor="#00E676"
+        android:pathData="M34,38 L54,72 L74,38 L66,38 L54,60 L42,38 Z" />
+
+    <!-- Ray Lines -->
+    <path
+        android:strokeColor="#4A9EFF"
+        android:strokeWidth="2"
+        android:pathData="M54,72 L54,82" />
+    
+    <path
+        android:strokeColor="#4A9EFF"
+        android:strokeWidth="2"
+        android:pathData="M54,72 L62,80" />
+    
+    <path
+        android:strokeColor="#4A9EFF"
+        android:strokeWidth="2"
+        android:pathData="M54,72 L46,80" />
+
+</vector>

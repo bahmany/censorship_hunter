@@ -1,0 +1,5 @@
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/6v2t2e4i/x86_64/CMakeFiles/hunter.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/6v2t2e4i/x86_64/CMakeFiles/edit_cache.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/6v2t2e4i/x86_64/CMakeFiles/rebuild_cache.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/6v2t2e4i/x86_64/_deps/json-build/CMakeFiles/edit_cache.dir
+D:/projects/v2ray/pythonProject1/hunter/native/android/app/.cxx/Debug/6v2t2e4i/x86_64/_deps/json-build/CMakeFiles/rebuild_cache.dir

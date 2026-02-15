@@ -1,0 +1,20 @@
+                        -HD:\projects\v2ray\pythonProject1\hunter\native\android\app\src\main\cpp
+-DCMAKE_SYSTEM_NAME=Android
+-DCMAKE_EXPORT_COMPILE_COMMANDS=ON
+-DCMAKE_SYSTEM_VERSION=26
+-DANDROID_PLATFORM=android-26
+-DANDROID_ABI=x86
+-DCMAKE_ANDROID_ARCH_ABI=x86
+-DANDROID_NDK=D:\projects\v2ray\pythonProject1\hunter\native\android\android-sdk\ndk\26.1.10909125
+-DCMAKE_ANDROID_NDK=D:\projects\v2ray\pythonProject1\hunter\native\android\android-sdk\ndk\26.1.10909125
+-DCMAKE_TOOLCHAIN_FILE=D:\projects\v2ray\pythonProject1\hunter\native\android\android-sdk\ndk\26.1.10909125\build\cmake\android.toolchain.cmake
+-DCMAKE_MAKE_PROGRAM=D:\projects\v2ray\pythonProject1\hunter\native\android\android-sdk\cmake\3.22.1\bin\ninja.exe
+-DCMAKE_CXX_FLAGS=-std=c++17
+-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=D:\projects\v2ray\pythonProject1\hunter\native\android\app\build\intermediates\cxx\Debug\3y1g4b4b\obj\x86
+-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=D:\projects\v2ray\pythonProject1\hunter\native\android\app\build\intermediates\cxx\Debug\3y1g4b4b\obj\x86
+-DCMAKE_BUILD_TYPE=Debug
+-BD:\projects\v2ray\pythonProject1\hunter\native\android\app\.cxx\Debug\3y1g4b4b\x86
+-GNinja
+-DANDROID_STL=c++_shared
+                        Build command args: []
+                        Version: 2

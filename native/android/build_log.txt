@@ -1,0 +1,13 @@
+Exception in thread "main" java.lang.RuntimeException: Could not load wrapper properties from 'D:\projects\v2ray\pythonProject1\hunter\native\android\gradle\wrapper\gradle-wrapper.properties'.
+	at org.gradle.wrapper.WrapperExecutor.<init>(WrapperExecutor.java:66)
+	at org.gradle.wrapper.WrapperExecutor.forWrapperPropertiesFile(WrapperExecutor.java:48)
+	at org.gradle.wrapper.GradleWrapperMain.main(GradleWrapperMain.java:62)
+Caused by: java.net.URISyntaxException: Illegal character in path at index 63: https://services.gradle.org/distributions/gradle-4.10.3-all.zip 
+	at java.base/java.net.URI$Parser.fail(URI.java:2913)
+	at java.base/java.net.URI$Parser.checkChars(URI.java:3084)
+	at java.base/java.net.URI$Parser.parseHierarchical(URI.java:3166)
+	at java.base/java.net.URI$Parser.parse(URI.java:3114)
+	at java.base/java.net.URI.<init>(URI.java:600)
+	at org.gradle.util.internal.WrapperDistributionUrlConverter.toUri(WrapperDistributionUrlConverter.java:31)
+	at org.gradle.wrapper.WrapperExecutor.<init>(WrapperExecutor.java:57)
+	... 2 more
