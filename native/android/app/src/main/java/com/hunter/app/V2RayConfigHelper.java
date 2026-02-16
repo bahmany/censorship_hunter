@@ -17,7 +17,7 @@ public class V2RayConfigHelper {
     private static final String TAG = "V2RayConfigHelper";
 
     /**
-     * Parse a V2Ray URI (vmess://, vless://, trojan://, ss://) into an XRay outbound JSON object.
+     * Parse a V2Ray URI (vmess://, vless://, trojan://, ss://, hy2://, hysteria2://) into an XRay outbound JSON object.
      * Returns null if the URI is unsupported or malformed.
      */
     public static JSONObject parseUriToOutbound(String uri) {
@@ -30,6 +30,10 @@ public class V2RayConfigHelper {
                 return parseTrojanUri(uri);
             } else if (uri.startsWith("ss://")) {
                 return parseShadowsocksUri(uri);
+            } else if (uri.startsWith("hy2://") || uri.startsWith("hysteria2://")) {
+                // Hysteria2 not supported by XRay core, skip
+                Log.w(TAG, "Hysteria2 protocol not supported by XRay");
+                return null;
             }
         } catch (Exception e) {
             Log.w(TAG, "Error parsing URI: " + e.getMessage());
@@ -88,28 +92,17 @@ public class V2RayConfigHelper {
 
             config.put("outbounds", outbounds);
 
-            // Routing
+            // Routing - simplified to reduce memory usage
             JSONObject routing = new JSONObject();
             routing.put("domainStrategy", "IPIfNonMatch");
             JSONArray rules = new JSONArray();
 
-            JSONObject blockAds = new JSONObject();
-            blockAds.put("type", "field");
-            blockAds.put("domain", new JSONArray().put("geosite:category-ads-all"));
-            blockAds.put("outboundTag", "block");
-            rules.put(blockAds);
-
-            JSONObject directIran = new JSONObject();
-            directIran.put("type", "field");
-            directIran.put("domain", new JSONArray().put("geosite:category-ir"));
-            directIran.put("outboundTag", "direct");
-            rules.put(directIran);
-
-            JSONObject directIranIP = new JSONObject();
-            directIranIP.put("type", "field");
-            directIranIP.put("ip", new JSONArray().put("geoip:ir").put("geoip:private"));
-            directIranIP.put("outboundTag", "direct");
-            rules.put(directIranIP);
+            // Only route private IPs directly to avoid loops
+            JSONObject directPrivate = new JSONObject();
+            directPrivate.put("type", "field");
+            directPrivate.put("ip", new JSONArray().put("192.168.0.0/16").put("172.16.0.0/12").put("10.0.0.0/8").put("127.0.0.0/8"));
+            directPrivate.put("outboundTag", "direct");
+            rules.put(directPrivate);
 
             routing.put("rules", rules);
             config.put("routing", routing);
@@ -332,23 +325,29 @@ public class V2RayConfigHelper {
         String password;
 
         if (methodHost.length == 2) {
-            String decoded = new String(android.util.Base64.decode(methodHost[0], android.util.Base64.NO_WRAP));
+            String decoded = new String(android.util.Base64.decode(methodHost[0], android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE));
             String[] methodPass = decoded.split(":", 2);
             if (methodPass.length < 2) return null;
             method = methodPass[0];
             password = methodPass[1];
-            String[] hostPort = methodHost[1].split(":");
+            String hostPortPart = methodHost[1];
+            int q = hostPortPart.indexOf('?');
+            if (q >= 0) hostPortPart = hostPortPart.substring(0, q);
+            String[] hostPort = hostPortPart.split(":");
             host = hostPort[0];
             port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
         } else {
-            String decoded = new String(android.util.Base64.decode(mainPart, android.util.Base64.NO_WRAP));
+            String decoded = new String(android.util.Base64.decode(mainPart, android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE));
             String[] methodRest = decoded.split(":", 2);
             if (methodRest.length < 2) return null;
             method = methodRest[0];
             String[] passHost = methodRest[1].split("@");
             if (passHost.length < 2) return null;
             password = passHost[0];
-            String[] hostPort = passHost[1].split(":");
+            String hostPortPart = passHost[1];
+            int q = hostPortPart.indexOf('?');
+            if (q >= 0) hostPortPart = hostPortPart.substring(0, q);
+            String[] hostPort = hostPortPart.split(":");
             host = hostPort[0];
             port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
         }

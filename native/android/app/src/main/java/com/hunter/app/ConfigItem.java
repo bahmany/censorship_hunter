@@ -1,31 +1,15 @@
 package com.hunter.app;
 
 public class ConfigItem {
-    private String ps;
-    private int latency;
-    private String uri;
-    private String protocol;
+    public String name;
+    public int latency;
+    public String uri;
+    public String protocol;
 
-    public ConfigItem(String ps, int latency, String uri, String protocol) {
-        this.ps = ps;
+    public ConfigItem(String name, int latency, String uri, String protocol) {
+        this.name = name;
         this.latency = latency;
         this.uri = uri;
         this.protocol = protocol;
-    }
-
-    public String getPs() {
-        return ps;
-    }
-
-    public int getLatency() {
-        return latency;
-    }
-
-    public String getUri() {
-        return uri;
-    }
-
-    public String getProtocol() {
-        return protocol;
     }
 }

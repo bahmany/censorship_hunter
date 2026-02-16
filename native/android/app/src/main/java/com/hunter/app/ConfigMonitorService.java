@@ -5,6 +5,7 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.Service;
 import android.content.Intent;
+import android.content.pm.ServiceInfo;
 import android.os.Build;
 import android.os.Handler;
 import android.os.HandlerThread;
@@ -41,7 +42,13 @@ public class ConfigMonitorService extends Service {
         super.onCreate();
 
         createNotificationChannel();
-        startForeground(NOTIFICATION_ID, createNotification("Starting monitor..."));
+        Notification notification = createNotification("Starting monitor...");
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION_ID, notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+        } else {
+            startForeground(NOTIFICATION_ID, notification);
+        }
 
         // Dedicated background thread for scheduling
         workerThread = new HandlerThread("ConfigMonitorWorker");

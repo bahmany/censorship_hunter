@@ -45,10 +45,10 @@ public class MainActivityTest {
     }
 
     @Test
-    public void testLogTextExists() {
+    public void testStatusDetailExists() {
         MainActivity activity = activityRule.getActivity();
-        assertNotNull("Log text should exist", 
-                activity.findViewById(R.id.log_text));
+        assertNotNull("Status detail should exist", 
+                activity.findViewById(R.id.status_detail));
     }
 
     @Test

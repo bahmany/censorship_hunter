@@ -27,6 +27,9 @@
 -keep class com.hunter.app.XRayManager$* { *; }
 -keep class com.hunter.app.V2RayConfigHelper { *; }
 
+-keep class engine.** { *; }
+-keep class go.** { *; }
+
 # OkHttp
 -dontwarn okhttp3.**
 -dontwarn okio.**

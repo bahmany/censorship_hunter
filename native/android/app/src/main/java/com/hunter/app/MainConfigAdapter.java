@@ -8,13 +8,15 @@ import android.widget.TextView;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.RecyclerView;
 
+import com.hunter.app.ConfigManager;
+
 import java.util.List;
 
-public class ConfigAdapter extends RecyclerView.Adapter<ConfigAdapter.ViewHolder> {
+public class MainConfigAdapter extends RecyclerView.Adapter<MainConfigAdapter.ViewHolder> {
 
-    private List<ConfigItem> configs;
+    private List<ConfigManager.ConfigItem> configs;
 
-    public ConfigAdapter(List<ConfigItem> configs) {
+    public MainConfigAdapter(List<ConfigManager.ConfigItem> configs) {
         this.configs = configs;
     }
 
@@ -22,13 +24,13 @@ public class ConfigAdapter extends RecyclerView.Adapter<ConfigAdapter.ViewHolder
     @Override
     public ViewHolder onCreateViewHolder(@NonNull ViewGroup parent, int viewType) {
         View view = LayoutInflater.from(parent.getContext())
-                .inflate(R.layout.item_config, parent, false);
+                .inflate(R.layout.item_main_config, parent, false);
         return new ViewHolder(view);
     }
 
     @Override
     public void onBindViewHolder(@NonNull ViewHolder holder, int position) {
-        ConfigItem item = configs.get(position);
+        ConfigManager.ConfigItem item = configs.get(position);
         holder.nameText.setText(item.name != null ? item.name : "Unknown");
         holder.protocolText.setText(item.protocol != null ? item.protocol : "Unknown");
         holder.latencyText.setText(item.latency >= 0 ? item.latency + "ms" : "--");
@@ -39,7 +41,7 @@ public class ConfigAdapter extends RecyclerView.Adapter<ConfigAdapter.ViewHolder
         return configs.size();
     }
 
-    public void updateConfigs(List<ConfigItem> newConfigs) {
+    public void updateConfigs(List<ConfigManager.ConfigItem> newConfigs) {
         this.configs = newConfigs;
         notifyDataSetChanged();
     }

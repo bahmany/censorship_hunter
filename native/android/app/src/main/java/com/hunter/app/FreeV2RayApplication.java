@@ -24,32 +24,45 @@ public class FreeV2RayApplication extends Application {
     public void onCreate() {
         super.onCreate();
         instance = this;
-        
-        // Initialize config manager (pure Java)
-        configManager = new ConfigManager(this);
-        configTester = new ConfigTester();
-        configBalancer = new ConfigBalancer();
-        xrayManager = new XRayManager(this);
-        
-        // Extract XRay binary from bundled assets on first run
-        if (xrayManager.needsUpdate()) {
-            xrayManager.ensureInstalled(new XRayManager.InstallCallback() {
-                @Override
-                public void onProgress(String message, int percent) {
-                    Log.i(TAG, "XRay: " + message + " (" + percent + "%)");
-                }
-                @Override
-                public void onComplete(String binaryPath) {
-                    Log.i(TAG, "XRay engine ready at: " + binaryPath);
-                }
-                @Override
-                public void onError(String error) {
-                    Log.e(TAG, "XRay install failed: " + error);
-                }
-            });
+
+        // Global crash handler for better debugging
+        final Thread.UncaughtExceptionHandler defaultHandler = Thread.getDefaultUncaughtExceptionHandler();
+        Thread.setDefaultUncaughtExceptionHandler((thread, throwable) -> {
+            Log.e(TAG, "FATAL CRASH in thread " + thread.getName(), throwable);
+            if (defaultHandler != null) {
+                defaultHandler.uncaughtException(thread, throwable);
+            }
+        });
+
+        try {
+            // Initialize config manager (pure Java)
+            configManager = new ConfigManager(this);
+            configTester = new ConfigTester();
+            configBalancer = new ConfigBalancer();
+            xrayManager = new XRayManager(this);
+
+            // Extract XRay binary from bundled assets on first run
+            if (xrayManager.needsUpdate()) {
+                xrayManager.ensureInstalled(new XRayManager.InstallCallback() {
+                    @Override
+                    public void onProgress(String message, int percent) {
+                        Log.i(TAG, "XRay: " + message + " (" + percent + "%)");
+                    }
+                    @Override
+                    public void onComplete(String binaryPath) {
+                        Log.i(TAG, "XRay engine ready at: " + binaryPath);
+                    }
+                    @Override
+                    public void onError(String error) {
+                        Log.e(TAG, "XRay install failed: " + error);
+                    }
+                });
+            }
+
+            Log.i(TAG, "Iranian Free V2Ray initialized");
+        } catch (Exception e) {
+            Log.e(TAG, "CRITICAL: Failed to initialize app", e);
         }
-        
-        Log.i(TAG, "Iranian Free V2Ray initialized");
     }
     
     public ConfigManager getConfigManager() {

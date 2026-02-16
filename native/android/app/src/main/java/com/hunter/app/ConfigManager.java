@@ -2,6 +2,7 @@ package com.hunter.app;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.util.Base64;
 import android.util.Log;
 
 import org.json.JSONArray;
@@ -11,6 +12,7 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.net.HttpURLConnection;
 import java.net.URL;
@@ -18,6 +20,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
@@ -46,7 +49,7 @@ public class ConfigManager {
     private static final int MAX_DOWNLOAD_BYTES = 512 * 1024; // 512KB per source
     private static final int MAX_CONCURRENT_DOWNLOADS = 6;
     private static final int TOP_CACHE_SIZE = 100;
-    private static final int MAX_MEMORY_CONFIGS = 3000; // Cap configs kept in RAM
+    private static final int MAX_MEMORY_CONFIGS = 100000; // Cap configs kept in RAM
 
     // Priority 1: Iran-specific Reality configs
     private static final String[] IRAN_PRIORITY_SOURCES = {
@@ -248,6 +251,16 @@ public class ConfigManager {
                     }
                 }
 
+                // Deduplicate by server address
+                LinkedHashMap<String, ConfigItem> serverMap = new LinkedHashMap<>();
+                for (ConfigItem item : newConfigs) {
+                    String key = getServerKey(item);
+                    if (key != null && !serverMap.containsKey(key)) {
+                        serverMap.put(key, item);
+                    }
+                }
+                newConfigs = new ArrayList<>(serverMap.values());
+
                 // Sort by protocol priority
                 Collections.sort(newConfigs, (a, b) -> {
                     int pa = getProtocolPriority(a.protocol);
@@ -284,6 +297,7 @@ public class ConfigManager {
                                    ConcurrentLinkedQueue<String> foundUris) {
         HttpURLConnection conn = null;
         BufferedReader reader = null;
+        InputStream rawStream = null;
         FileOutputStream fos = null;
         try {
             URL url = new URL(urlStr);
@@ -294,9 +308,15 @@ public class ConfigManager {
                 "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
             conn.setInstanceFollowRedirects(true);
 
-            if (conn.getResponseCode() != 200) return;
+            int code = conn.getResponseCode();
+            if (code == 200) {
+                rawStream = conn.getInputStream();
+            } else {
+                rawStream = conn.getErrorStream();
+                return;
+            }
 
-            reader = new BufferedReader(new InputStreamReader(conn.getInputStream()), 8192);
+            reader = new BufferedReader(new InputStreamReader(rawStream), 8192);
 
             // Cache raw source to file
             File cacheFile = new File(cacheDir, "source_" + sourceIndex + ".txt");
@@ -331,8 +351,8 @@ public class ConfigManager {
             // If content looked like base64, decode and extract
             if (mightBeBase64 && base64Buffer != null && base64Buffer.length() > 0) {
                 try {
-                    byte[] decoded = android.util.Base64.decode(
-                        base64Buffer.toString(), android.util.Base64.DEFAULT);
+                    byte[] decoded = Base64.decode(
+                        base64Buffer.toString(), Base64.DEFAULT);
                     base64Buffer = null; // Free memory immediately
                     String decodedStr = new String(decoded, "UTF-8");
                     decoded = null; // Free byte array
@@ -350,9 +370,9 @@ public class ConfigManager {
         } finally {
             // Close reader FIRST to release the input stream, preventing OkHttp leak
             try { if (reader != null) reader.close(); } catch (Exception ignored) {}
+            try { if (rawStream != null) rawStream.close(); } catch (Exception ignored) {}
             try { if (fos != null) fos.close(); } catch (Exception ignored) {}
             if (conn != null) {
-                try { conn.getInputStream().close(); } catch (Exception ignored) {}
                 conn.disconnect();
             }
         }
@@ -456,7 +476,7 @@ public class ConfigManager {
             String base64 = uri.substring(8);
             // Limit decode size to prevent OOM on malformed URIs
             if (base64.length() > 4096) base64 = base64.substring(0, 4096);
-            String json = new String(android.util.Base64.decode(base64, android.util.Base64.NO_WRAP));
+            String json = new String(Base64.decode(base64, Base64.NO_WRAP));
             JSONObject obj = new JSONObject(json);
             return obj.optString("ps", "VMess Server");
         } catch (Exception e) {
@@ -469,6 +489,41 @@ public class ConfigManager {
             int hashIndex = uri.lastIndexOf('#');
             if (hashIndex > 0 && hashIndex < uri.length() - 1) {
                 return java.net.URLDecoder.decode(uri.substring(hashIndex + 1), "UTF-8");
+            }
+        } catch (Exception ignored) {}
+        return null;
+    }
+
+    private String getServerKey(ConfigItem item) {
+        try {
+            String uri = item.uri;
+            if (uri.startsWith("vmess://")) {
+                // Parse vmess
+                String base64 = uri.substring(8);
+                if (base64.length() > 4096) return null;
+                String json = new String(Base64.decode(base64, Base64.NO_WRAP));
+                JSONObject obj = new JSONObject(json);
+                return obj.getString("add") + ":" + obj.getInt("port");
+            } else if (uri.startsWith("vless://") || uri.startsWith("trojan://") || uri.startsWith("ss://")) {
+                // Parse standard
+                String withoutScheme = uri.substring(uri.indexOf("://") + 3);
+                String[] parts = withoutScheme.split("@");
+                if (parts.length < 2) return null;
+                String[] hostParams = parts[1].split("\\?");
+                String[] hostPort = hostParams[0].split(":");
+                String host = hostPort[0];
+                int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
+                return host + ":" + port;
+            } else if (uri.startsWith("hysteria2://") || uri.startsWith("hy2://")) {
+                // Similar to vless
+                String withoutScheme = uri.substring(uri.indexOf("://") + 3);
+                String[] parts = withoutScheme.split("@");
+                if (parts.length < 2) return null;
+                String[] hostParams = parts[1].split("\\?");
+                String[] hostPort = hostParams[0].split(":");
+                String host = hostPort[0];
+                int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
+                return host + ":" + port;
             }
         } catch (Exception ignored) {}
         return null;

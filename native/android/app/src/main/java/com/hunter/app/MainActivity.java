@@ -1,8 +1,11 @@
 package com.hunter.app;
 
+import android.Manifest;
 import android.app.Activity;
 import android.content.Intent;
+import android.content.pm.PackageManager;
 import android.net.VpnService;
+import android.os.Build;
 import android.os.Bundle;
 import android.view.View;
 import android.widget.ImageButton;
@@ -14,12 +17,12 @@ import android.widget.Toast;
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.app.ActivityCompat;
+import androidx.core.content.ContextCompat;
 
 import com.google.android.material.button.MaterialButton;
 
-import org.json.JSONArray;
-import org.json.JSONObject;
-
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -29,9 +32,9 @@ import java.util.List;
 public class MainActivity extends AppCompatActivity {
 
     private MaterialButton connectButton;
-    private MaterialButton refreshButton, configsButton, shareButton;
+    private MaterialButton refreshButton, shareButton;
     private ProgressBar progressBar;
-    private TextView statusText, statusDetail, configCount, protocolText, connectionStatus;
+    private TextView statusText, statusDetail, configCount;
     private ImageView statusIcon;
     private ImageButton settingsButton;
 
@@ -56,9 +59,20 @@ public class MainActivity extends AppCompatActivity {
 
         initViews();
         setupListeners();
-        
+
+        // Request notification permission for Android 13+
+        requestNotificationPermission();
+
         // Get config manager from application
-        configManager = FreeV2RayApplication.getInstance().getConfigManager();
+        FreeV2RayApplication app = FreeV2RayApplication.getInstance();
+        if (app != null) {
+            configManager = app.getConfigManager();
+        }
+        if (configManager == null) {
+            Toast.makeText(this, "Initialization error", Toast.LENGTH_LONG).show();
+            return;
+        }
+
         updateConfigStats();
 
         // Start background monitor service
@@ -67,6 +81,16 @@ public class MainActivity extends AppCompatActivity {
         // Auto-refresh if no configs
         if (configManager.getConfigCount() == 0) {
             refreshConfigs();
+        }
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this,
+                    new String[]{Manifest.permission.POST_NOTIFICATIONS}, 100);
+            }
         }
     }
 
@@ -89,12 +113,9 @@ public class MainActivity extends AppCompatActivity {
         statusText = findViewById(R.id.status_text);
         statusDetail = findViewById(R.id.status_detail);
         configCount = findViewById(R.id.config_count);
-        protocolText = findViewById(R.id.protocol_text);
-        connectionStatus = findViewById(R.id.connection_status);
         statusIcon = findViewById(R.id.status_icon);
         settingsButton = findViewById(R.id.btn_settings);
         refreshButton = findViewById(R.id.btn_refresh);
-        configsButton = findViewById(R.id.btn_configs);
         shareButton = findViewById(R.id.btn_share);
     }
 
@@ -105,9 +126,6 @@ public class MainActivity extends AppCompatActivity {
             startActivity(new Intent(this, SettingsActivity.class)));
         
         refreshButton.setOnClickListener(v -> refreshConfigs());
-        
-        configsButton.setOnClickListener(v -> 
-            startActivity(new Intent(this, ConfigListActivity.class)));
         
         shareButton.setOnClickListener(v -> 
             startActivity(new Intent(this, ConfigShareActivity.class)));
@@ -216,7 +234,11 @@ public class MainActivity extends AppCompatActivity {
     private void startVpnService() {
         Intent intent = new Intent(this, com.hunter.app.VpnService.class);
         intent.setAction(com.hunter.app.VpnService.ACTION_START);
-        startService(intent);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
 
         // Check connection state after delay (xray needs time to start)
         connectButton.postDelayed(() -> {
@@ -244,8 +266,6 @@ public class MainActivity extends AppCompatActivity {
         statusText.setText("Connecting...");
         statusText.setTextColor(getColor(R.color.status_connecting));
         statusDetail.setText("Establishing connection...");
-        connectionStatus.setText("Connecting");
-        connectionStatus.setTextColor(getColor(R.color.status_connecting));
         statusIcon.setColorFilter(getColor(R.color.status_connecting));
     }
 
@@ -259,8 +279,6 @@ public class MainActivity extends AppCompatActivity {
         statusText.setText("Connected");
         statusText.setTextColor(getColor(R.color.status_connected));
         statusDetail.setText("VPN is active");
-        connectionStatus.setText("Active");
-        connectionStatus.setTextColor(getColor(R.color.status_connected));
         statusIcon.setImageResource(R.drawable.ic_vpn_on);
         statusIcon.clearColorFilter();
     }
@@ -275,8 +293,6 @@ public class MainActivity extends AppCompatActivity {
         statusText.setText("Disconnected");
         statusText.setTextColor(getColor(R.color.text_primary));
         statusDetail.setText("Tap to connect");
-        connectionStatus.setText("Ready");
-        connectionStatus.setTextColor(getColor(R.color.accent_green));
         statusIcon.setImageResource(R.drawable.ic_vpn_off);
         statusIcon.setColorFilter(getColor(R.color.accent_blue));
     }
@@ -291,22 +307,8 @@ public class MainActivity extends AppCompatActivity {
             } else {
                 configCount.setText(String.valueOf(total));
             }
-
-            // Show best protocol from top configs or all configs
-            List<ConfigManager.ConfigItem> topConfigs = configManager.getTopConfigs();
-            if (!topConfigs.isEmpty()) {
-                protocolText.setText(topConfigs.get(0).protocol);
-            } else {
-                List<ConfigManager.ConfigItem> all = configManager.getConfigs();
-                if (!all.isEmpty()) {
-                    protocolText.setText(all.get(0).protocol);
-                } else {
-                    protocolText.setText("--");
-                }
-            }
         } catch (Exception e) {
             configCount.setText("0");
-            protocolText.setText("--");
         }
     }
 
