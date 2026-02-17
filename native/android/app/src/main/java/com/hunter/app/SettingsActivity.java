@@ -33,7 +33,7 @@ public class SettingsActivity extends AppCompatActivity {
         setSupportActionBar(toolbar);
         if (getSupportActionBar() != null) {
             getSupportActionBar().setDisplayHomeAsUpEnabled(true);
-            getSupportActionBar().setTitle("تنظیمات");
+            getSupportActionBar().setTitle("Settings");
         }
 
         initViews();
@@ -66,8 +66,8 @@ public class SettingsActivity extends AppCompatActivity {
 
         whitelistSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
             prefs.edit().putBoolean("per_app_whitelist", isChecked).apply();
-            String mode = isChecked ? "فقط برنامه‌های انتخاب شده از VPN استفاده می‌کنند" 
-                                   : "همه برنامه‌ها به جز انتخاب شده‌ها از VPN استفاده می‌کنند";
+            String mode = isChecked ? "Only selected apps will use VPN" 
+                                   : "All apps except selected will use VPN";
             Toast.makeText(this, mode, Toast.LENGTH_SHORT).show();
         });
 
@@ -79,7 +79,7 @@ public class SettingsActivity extends AppCompatActivity {
 
         appSelectCard.setOnClickListener(v -> {
             if (!perAppSwitch.isChecked()) {
-                Toast.makeText(this, "ابتدا حالت انتخاب برنامه را فعال کنید", Toast.LENGTH_SHORT).show();
+                Toast.makeText(this, "First enable app selection mode", Toast.LENGTH_SHORT).show();
                 return;
             }
             startActivity(new Intent(this, AppSelectActivity.class));

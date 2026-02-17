@@ -33,7 +33,7 @@
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="تنظیمات VPN"
+                android:text="VPN Settings"
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:textColor="@color/accent_blue"
@@ -68,14 +68,14 @@
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="انتخاب برنامه‌ها"
+                                android:text="Select Apps"
                                 android:textSize="16sp"
                                 android:textColor="@color/text_primary" />
 
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="فقط برنامه‌های انتخاب شده از VPN استفاده کنند"
+                                android:text="Only selected apps will use VPN"
                                 android:textSize="12sp"
                                 android:textColor="@color/text_secondary" />
 
@@ -109,14 +109,14 @@
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="حالت لیست سفید"
+                                android:text="Whitelist Mode"
                                 android:textSize="16sp"
                                 android:textColor="@color/text_primary" />
 
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="روشن: فقط انتخاب شده‌ها | خاموش: همه به جز انتخاب شده‌ها"
+                                android:text="On: Only selected | Off: All except selected"
                                 android:textSize="12sp"
                                 android:textColor="@color/text_secondary" />
 
@@ -149,7 +149,7 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:padding="12dp"
-                            android:text="انتخاب برنامه‌ها"
+                            android:text="Manage Apps"
                             android:textColor="@color/text_primary"
                             android:textSize="14sp"
                             android:gravity="center" />
@@ -164,7 +164,7 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="24dp"
-                android:text="تنظیمات عمومی"
+                android:text="General Settings"
                 android:textSize="14sp"
                 android:textStyle="bold"
                 android:textColor="@color/accent_blue"
@@ -199,14 +199,14 @@
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="شروع خودکار"
+                                android:text="Auto Start"
                                 android:textSize="16sp"
                                 android:textColor="@color/text_primary" />
 
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="اجرا هنگام روشن شدن گوشی"
+                                android:text="Run when phone starts"
                                 android:textSize="12sp"
                                 android:textColor="@color/text_secondary" />
 
@@ -240,14 +240,14 @@
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="اتصال خودکار"
+                                android:text="Auto Connect"
                                 android:textSize="16sp"
                                 android:textColor="@color/text_primary" />
 
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="اتصال VPN هنگام اجرای برنامه"
+                                android:text="Connect VPN when app starts"
                                 android:textSize="12sp"
                                 android:textColor="@color/text_secondary" />
 

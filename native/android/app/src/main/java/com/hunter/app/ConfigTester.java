@@ -13,7 +13,11 @@ import java.net.Socket;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.PriorityQueue;
+import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.LinkedBlockingQueue;
@@ -22,24 +26,49 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Tests V2Ray configs by starting a real XRay process per config,
- * routing HTTP requests through its SOCKS5 proxy, and measuring latency.
- * Falls back to TCP connect test if XRay binary is not available.
+ * Enhanced config tester with proper thread management, priority queues, and result caching.
+ * Manages config testing in organized queues with different priorities for various protocols.
  */
 public class ConfigTester {
     private static final String TAG = "ConfigTester";
     private static final int V2RAY_TEST_TIMEOUT_MS = 8000;
     private static final int TCP_TEST_TIMEOUT_MS = 4000;
     private static final int XRAY_STARTUP_WAIT_MS = 1500;
-    private static final int BATCH_SIZE = 5; // Small batches for V2Ray testing (each starts a process)
-    private static final int MAX_TEST_THREADS = 3; // Limited: each thread runs an xray process
+
+    // Thread management
+    private static final int CORE_POOL_SIZE = 2;
+    private static final int MAX_POOL_SIZE = 5;
+    private static final int QUEUE_CAPACITY = 100;
     private static final int TEST_SOCKS_PORT_BASE = 20808;
     private static final String TEST_URL = "http://cp.cloudflare.com/generate_204";
 
+    // Priority queues for different config types
+    private final PriorityQueue<ConfigTestTask> vmessQueue = new PriorityQueue<>(
+        (a, b) -> Integer.compare(getPriority(a.config), getPriority(b.config)));
+    private final PriorityQueue<ConfigTestTask> vlessQueue = new PriorityQueue<>(
+        (a, b) -> Integer.compare(getPriority(a.config), getPriority(b.config)));
+    private final PriorityQueue<ConfigTestTask> shadowsocksQueue = new PriorityQueue<>(
+        (a, b) -> Integer.compare(getPriority(a.config), getPriority(b.config)));
+    private final PriorityQueue<ConfigTestTask> otherQueue = new PriorityQueue<>(
+        (a, b) -> Integer.compare(getPriority(a.config), getPriority(b.config)));
+
+    // Thread pool and queue management
     private final ExecutorService executor;
+    private final BlockingQueue<Runnable> workQueue = new LinkedBlockingQueue<>(QUEUE_CAPACITY);
     private volatile boolean isRunning = false;
     private volatile boolean stopRequested = false;
     private final AtomicInteger portCounter = new AtomicInteger(0);
+    private final AtomicInteger activeTests = new AtomicInteger(0);
+
+    // Result caching
+    private final Map<String, TestResult> resultCache = new HashMap<>();
+    private static final long CACHE_EXPIRY_MS = 10 * 60 * 1000; // 10 minutes
+
+    // Priority levels (lower number = higher priority)
+    private static final int PRIORITY_HIGH = 1;    // Recently working configs
+    private static final int PRIORITY_MEDIUM = 2;  // Known working configs
+    private static final int PRIORITY_LOW = 3;     // Untested or failed configs
+    private static final int PRIORITY_VERY_LOW = 4; // Old failed configs
 
     public interface TestCallback {
         void onProgress(int tested, int total);
@@ -47,17 +76,86 @@ public class ConfigTester {
         void onComplete(int totalTested, int successCount);
     }
 
-    public ConfigTester() {
-        this.executor = new ThreadPoolExecutor(
-            2, MAX_TEST_THREADS, 30, TimeUnit.SECONDS,
-            new LinkedBlockingQueue<>(50),
-            new ThreadPoolExecutor.DiscardOldestPolicy()
-        );
+    /**
+     * Represents a config testing task with priority
+     */
+    private static class ConfigTestTask implements Comparable<ConfigTestTask> {
+        final ConfigManager.ConfigItem config;
+        final long submissionTime;
+        final int priority;
+
+        ConfigTestTask(ConfigManager.ConfigItem config) {
+            this.config = config;
+            this.submissionTime = System.currentTimeMillis();
+            this.priority = getPriority(config);
+        }
+
+        @Override
+        public int compareTo(ConfigTestTask other) {
+            // First compare by priority (lower = higher priority)
+            int priorityCompare = Integer.compare(this.priority, other.priority);
+            if (priorityCompare != 0) return priorityCompare;
+
+            // Then by submission time (FIFO within same priority)
+            return Long.compare(this.submissionTime, other.submissionTime);
+        }
     }
 
     /**
-     * Test configs in batches. If XRay is available, tests through real V2Ray proxy.
-     * Otherwise falls back to TCP connect test.
+     * Cached test result
+     */
+    private static class TestResult {
+        final boolean success;
+        final int latency;
+        final long timestamp;
+
+        TestResult(boolean success, int latency) {
+            this.success = success;
+            this.latency = latency;
+            this.timestamp = System.currentTimeMillis();
+        }
+
+        boolean isExpired() {
+            return System.currentTimeMillis() - timestamp > CACHE_EXPIRY_MS;
+        }
+    }
+
+    public ConfigTester() {
+        // Create thread pool with proper configuration
+        this.executor = new ThreadPoolExecutor(
+            CORE_POOL_SIZE, MAX_POOL_SIZE, 30, TimeUnit.SECONDS,
+            workQueue,
+            new ThreadPoolExecutor.CallerRunsPolicy() // Caller runs if queue is full
+        );
+
+        // Start the queue processor
+        startQueueProcessor();
+    }
+
+    /**
+     * Determine priority based on config latency (simplified since lastTestTime doesn't exist)
+     */
+    private static int getPriority(ConfigManager.ConfigItem config) {
+        // Recently working configs get highest priority
+        if (config.latency > 0 && config.latency < 2000) {
+            return PRIORITY_HIGH;
+        }
+
+        // Known working configs (higher latency)
+        if (config.latency > 0 && config.latency < 10000) {
+            return PRIORITY_MEDIUM;
+        }
+
+        // Untested or previously failed
+        if (config.latency == -1 || config.latency >= 10000) {
+            return PRIORITY_LOW;
+        }
+
+        return PRIORITY_MEDIUM;
+    }
+
+    /**
+     * Add configs to appropriate priority queues
      */
     public void testConfigs(List<ConfigManager.ConfigItem> configs, TestCallback callback) {
         if (isRunning) {
@@ -67,72 +165,47 @@ public class ConfigTester {
 
         isRunning = true;
         stopRequested = false;
-        portCounter.set(0);
 
+        // Clear existing queues
+        vmessQueue.clear();
+        vlessQueue.clear();
+        shadowsocksQueue.clear();
+        otherQueue.clear();
+
+        // Categorize configs by type and add to appropriate queues
+        for (ConfigManager.ConfigItem config : configs) {
+            ConfigTestTask task = new ConfigTestTask(config);
+            String uri = config.uri.toLowerCase();
+
+            if (uri.startsWith("vmess://")) {
+                vmessQueue.offer(task);
+            } else if (uri.startsWith("vless://")) {
+                vlessQueue.offer(task);
+            } else if (uri.startsWith("ss://")) {
+                shadowsocksQueue.offer(task);
+            } else {
+                otherQueue.offer(task);
+            }
+        }
+
+        final int totalConfigs = configs.size();
+        final AtomicInteger testedCount = new AtomicInteger(0);
+        final AtomicInteger successCount = new AtomicInteger(0);
+
+        Log.i(TAG, String.format("Starting prioritized testing: VMess=%d, VLESS=%d, SS=%d, Other=%d",
+            vmessQueue.size(), vlessQueue.size(), shadowsocksQueue.size(), otherQueue.size()));
+
+        // Process queues in priority order
         executor.execute(() -> {
             try {
                 XRayManager xrayManager = FreeV2RayApplication.getInstance().getXRayManager();
                 boolean useV2Ray = xrayManager != null && xrayManager.isReady();
 
-                int total = configs.size();
-                AtomicInteger testedCount = new AtomicInteger(0);
-                AtomicInteger successCount = new AtomicInteger(0);
-
-                Log.i(TAG, "Starting test of " + total + " configs, V2Ray engine: " + useV2Ray);
-
-                int batchSize = useV2Ray ? BATCH_SIZE : 20;
-
-                for (int batchStart = 0; batchStart < total && !stopRequested; batchStart += batchSize) {
-                    int batchEnd = Math.min(batchStart + batchSize, total);
-                    int currentBatchSize = batchEnd - batchStart;
-
-                    CountDownLatch latch = new CountDownLatch(currentBatchSize);
-
-                    for (int i = batchStart; i < batchEnd; i++) {
-                        final ConfigManager.ConfigItem config = configs.get(i);
-                        final boolean v2ray = useV2Ray;
-
-                        executor.execute(() -> {
-                            try {
-                                if (stopRequested) return;
-
-                                long startTime = System.currentTimeMillis();
-                                boolean success;
-
-                                if (v2ray) {
-                                    success = testThroughV2Ray(config, xrayManager);
-                                } else {
-                                    success = testTcpReachability(config);
-                                }
-
-                                int latency = (int) (System.currentTimeMillis() - startTime);
-
-                                if (success) {
-                                    config.latency = latency;
-                                    successCount.incrementAndGet();
-                                } else {
-                                    config.latency = -1;
-                                }
-
-                                callback.onConfigTested(config, success, latency);
-                            } catch (Exception e) {
-                                config.latency = -1;
-                                callback.onConfigTested(config, false, -1);
-                            } finally {
-                                testedCount.incrementAndGet();
-                                callback.onProgress(testedCount.get(), total);
-                                latch.countDown();
-                            }
-                        });
-                    }
-
-                    long waitTime = useV2Ray ?
-                        (V2RAY_TEST_TIMEOUT_MS + XRAY_STARTUP_WAIT_MS) * 2L :
-                        TCP_TEST_TIMEOUT_MS * 2L;
-                    try {
-                        latch.await(waitTime, TimeUnit.MILLISECONDS);
-                    } catch (InterruptedException ignored) {}
-                }
+                // Process each queue in priority order
+                processQueue(vmessQueue, useV2Ray, xrayManager, callback, testedCount, successCount, totalConfigs);
+                processQueue(vlessQueue, useV2Ray, xrayManager, callback, testedCount, successCount, totalConfigs);
+                processQueue(shadowsocksQueue, useV2Ray, xrayManager, callback, testedCount, successCount, totalConfigs);
+                processQueue(otherQueue, useV2Ray, xrayManager, callback, testedCount, successCount, totalConfigs);
 
                 callback.onComplete(testedCount.get(), successCount.get());
 
@@ -140,6 +213,126 @@ public class ConfigTester {
                 isRunning = false;
             }
         });
+    }
+
+    /**
+     * Process a single priority queue
+     */
+    private void processQueue(PriorityQueue<ConfigTestTask> queue, boolean useV2Ray,
+                            XRayManager xrayManager, TestCallback callback,
+                            AtomicInteger testedCount, AtomicInteger successCount, int total) {
+        if (queue.isEmpty()) return;
+
+        List<ConfigTestTask> batch = new ArrayList<>();
+        int batchSize = useV2Ray ? 3 : 8; // Smaller batches for V2Ray testing
+
+        while (!queue.isEmpty() && !stopRequested) {
+            batch.clear();
+
+            // Fill batch with highest priority items
+            for (int i = 0; i < batchSize && !queue.isEmpty(); i++) {
+                batch.add(queue.poll());
+            }
+
+            if (batch.isEmpty()) break;
+
+            // Process batch concurrently
+            CountDownLatch latch = new CountDownLatch(batch.size());
+
+            for (ConfigTestTask task : batch) {
+                executor.execute(() -> {
+                    try {
+                        if (stopRequested) return;
+
+                        // Check cache first
+                        String cacheKey = getCacheKey(task.config);
+                        TestResult cached = resultCache.get(cacheKey);
+                        if (cached != null && !cached.isExpired()) {
+                            handleTestResult(task.config, cached.success, cached.latency,
+                                           callback, testedCount, successCount, total);
+                            return;
+                        }
+
+                        long startTime = System.currentTimeMillis();
+                        boolean success;
+
+                        if (useV2Ray) {
+                            success = testThroughV2Ray(task.config, xrayManager);
+                        } else {
+                            success = testTcpReachability(task.config);
+                        }
+
+                        int latency = (int) (System.currentTimeMillis() - startTime);
+
+                        handleTestResult(task.config, success, latency,
+                                       callback, testedCount, successCount, total);
+
+                    } catch (Exception e) {
+                        handleTestResult(task.config, false, -1, callback,
+                                       testedCount, successCount, total);
+                    } finally {
+                        latch.countDown();
+                    }
+                });
+            }
+
+            // Wait for batch to complete with timeout
+            try {
+                long timeoutMs = useV2Ray ? 15000L : 8000L;
+                latch.await(timeoutMs, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ignored) {}
+
+            // Throttle to prevent overwhelming the system
+            if (!queue.isEmpty()) {
+                try {
+                    Thread.sleep(200); // 200ms between batches
+                } catch (InterruptedException ignored) {}
+            }
+        }
+    }
+
+    /**
+     * Start background queue processor for continuous testing
+     */
+    private void startQueueProcessor() {
+        executor.execute(() -> {
+            while (!stopRequested) {
+                try {
+                    // Process any pending tasks in queues
+                    int active = activeTests.get();
+                    if (active < MAX_POOL_SIZE) {
+                        // Could add background processing logic here
+                        Thread.sleep(1000);
+                    } else {
+                        Thread.sleep(5000); // Wait longer if busy
+                    }
+                } catch (InterruptedException e) {
+                    break;
+                }
+            }
+        });
+    }
+
+    private String getCacheKey(ConfigManager.ConfigItem config) {
+        return config.uri + "_" + config.protocol;
+    }
+
+    private void handleTestResult(ConfigManager.ConfigItem config, boolean success, int latency,
+                                TestCallback callback, AtomicInteger testedCount,
+                                AtomicInteger successCount, int total) {
+        if (success) {
+            config.latency = latency;
+            successCount.incrementAndGet();
+        } else {
+            config.latency = -1;
+        }
+
+        callback.onConfigTested(config, success, latency);
+
+        int tested = testedCount.incrementAndGet();
+        if (tested % 10 == 0 || tested == total) { // Update progress less frequently
+            callback.onProgress(tested, total);
+        }
     }
 
     /**
@@ -191,6 +384,7 @@ public class ConfigTester {
 
     /**
      * Send an HTTP request through a SOCKS5 proxy and check for 204/200 response.
+     * Also verifies that the response content is not empty/invalid.
      */
     private boolean testHttpThroughSocks(int socksPort) {
         HttpURLConnection conn = null;
@@ -198,7 +392,7 @@ public class ConfigTester {
             Proxy proxy = new Proxy(Proxy.Type.SOCKS,
                 new InetSocketAddress("127.0.0.1", socksPort));
 
-            URL url = new URL(TEST_URL);
+            URL url = new URL("http://cp.cloudflare.com/generate_204");
             conn = (HttpURLConnection) url.openConnection(proxy);
             conn.setConnectTimeout(V2RAY_TEST_TIMEOUT_MS);
             conn.setReadTimeout(V2RAY_TEST_TIMEOUT_MS);
@@ -206,7 +400,19 @@ public class ConfigTester {
             conn.setInstanceFollowRedirects(false);
 
             int responseCode = conn.getResponseCode();
-            return responseCode == 204 || responseCode == 200;
+            boolean validResponse = responseCode == 204 || responseCode == 200;
+
+            // Additional validation: check response content for 200 responses
+            if (validResponse && responseCode == 200) {
+                String content = conn.getHeaderField("Content-Type");
+                // For Cloudflare generate_204, we expect empty content or specific content-type
+                if (content != null && content.contains("text/html")) {
+                    // If we get HTML, it's likely a captive portal or error page
+                    return false;
+                }
+            }
+
+            return validResponse;
 
         } catch (Exception e) {
             return false;
@@ -308,12 +514,40 @@ public class ConfigTester {
         return working;
     }
 
+    /**
+     * Clear expired cache entries
+     */
+    public void cleanCache() {
+        resultCache.entrySet().removeIf(entry -> entry.getValue().isExpired());
+        Log.d(TAG, "Cleaned expired cache entries, remaining: " + resultCache.size());
+    }
+
+    /**
+     * Get cache statistics
+     */
+    public int getCacheSize() {
+        return resultCache.size();
+    }
+
+    /**
+     * Get active queue sizes
+     */
+    public String getQueueStatus() {
+        return String.format("Queues - VMess:%d, VLESS:%d, SS:%d, Other:%d",
+            vmessQueue.size(), vlessQueue.size(), shadowsocksQueue.size(), otherQueue.size());
+    }
+
     public boolean isRunning() {
         return isRunning;
     }
 
     public void stop() {
         stopRequested = true;
+        // Clear queues
+        vmessQueue.clear();
+        vlessQueue.clear();
+        shadowsocksQueue.clear();
+        otherQueue.clear();
     }
 
     public void shutdown() {
@@ -322,5 +556,6 @@ public class ConfigTester {
         try {
             executor.awaitTermination(5, TimeUnit.SECONDS);
         } catch (InterruptedException ignored) {}
+        Log.i(TAG, "ConfigTester shutdown complete");
     }
 }

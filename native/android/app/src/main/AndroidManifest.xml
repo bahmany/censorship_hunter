@@ -37,6 +37,7 @@
         <activity android:name=".AppSelectActivity" android:exported="false" android:theme="@style/AppTheme" />
         <activity android:name=".ConfigListActivity" android:exported="false" android:theme="@style/AppTheme" />
         <activity android:name=".ConfigShareActivity" android:exported="false" android:theme="@style/AppTheme" />
+        <activity android:name=".AboutActivity" android:exported="false" android:theme="@style/AppTheme" />
 
         <service
             android:name=".VpnService"
@@ -52,6 +53,22 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="vpn_proxy_service" />
+        </service>
+
+        <service
+            android:name=".service.EnhancedVpnService"
+            android:permission="android.permission.BIND_VPN_SERVICE"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <intent-filter>
+                <action android:name="android.net.VpnService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON"
+                android:value="true" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="enhanced_vpn_service" />
         </service>
 
         <service

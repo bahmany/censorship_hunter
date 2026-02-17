@@ -162,12 +162,79 @@ public class ConfigManager {
         }
     }
 
+    /**
+     * Get configs with working ones prioritized at the top for faster connections
+     */
+    public List<ConfigItem> getPrioritizedConfigs() {
+        List<ConfigItem> result = new ArrayList<>();
+        
+        // Sort top configs by combined score (latency + telegram + instagram)
+        synchronized (topConfigs) {
+            topConfigs.sort((a, b) -> {
+                long scoreA = (long) a.latency + a.telegram_latency + a.instagram_latency;
+                long scoreB = (long) b.latency + b.telegram_latency + b.instagram_latency;
+                return Long.compare(scoreA, scoreB);
+            });
+            result.addAll(topConfigs);
+        }
+        
+        // Then add remaining configs
+        synchronized (configs) {
+            for (ConfigItem item : configs) {
+                // Skip if already in top configs
+                boolean alreadyInTop = false;
+                for (ConfigItem topItem : topConfigs) {
+                    if (topItem.uri.equals(item.uri)) {
+                        alreadyInTop = true;
+                        break;
+                    }
+                }
+                if (!alreadyInTop) {
+                    result.add(item);
+                }
+            }
+        }
+        
+        Log.i(TAG, "Returning " + result.size() + " configs (" + topConfigs.size() + " prioritized first)");
+        return result;
+    }
+
     public int getConfigCount() {
         return configs.size();
     }
 
     public int getTopConfigCount() {
         return topConfigs.size();
+    }
+
+    /**
+     * Add a config to the top configs cache (working configs prioritized)
+     */
+    public void addToTopConfigs(String uri, String name, String protocol, int latency, int telegramLatency, int instagramLatency) {
+        synchronized (topConfigs) {
+            // Remove if already exists
+            topConfigs.removeIf(item -> item.uri.equals(uri));
+            
+            // Add to top
+            ConfigItem item = new ConfigItem();
+            item.uri = uri;
+            item.name = name != null ? name : "Server";
+            item.protocol = protocol != null ? protocol : "Unknown";
+            item.latency = latency > 0 ? latency : -1;
+            item.telegram_latency = telegramLatency;
+            item.instagram_latency = instagramLatency;
+            
+            topConfigs.add(0, item); // Add to front
+            
+            // Keep only top 100
+            while (topConfigs.size() > TOP_CACHE_SIZE) {
+                topConfigs.remove(topConfigs.size() - 1);
+            }
+            
+            // Save to cache
+            saveTopConfigsToCache();
+            Log.i(TAG, "Added config to top cache: " + name + " (" + protocol + ")");
+        }
     }
 
     /**
@@ -416,12 +483,75 @@ public class ConfigManager {
     private boolean isValidUri(String uri) {
         if (uri == null || uri.length() < 10) return false;
         String lower = uri.toLowerCase();
-        return lower.startsWith("vmess://") ||
+        boolean validProtocol = lower.startsWith("vmess://") ||
                lower.startsWith("vless://") ||
                lower.startsWith("trojan://") ||
                lower.startsWith("ss://") ||
                lower.startsWith("hysteria2://") ||
                lower.startsWith("hy2://");
+        
+        if (!validProtocol) return false;
+        
+        // Filter out fake/test configs with localhost or private IPs
+        return !hasFakeHost(uri);
+    }
+    
+    private boolean hasFakeHost(String uri) {
+        try {
+            String host = null;
+            
+            if (uri.startsWith("vmess://")) {
+                String base64 = uri.substring(8);
+                if (base64.length() > 4096) return true; // Too long, likely fake
+                String json = new String(Base64.decode(base64, Base64.NO_WRAP));
+                JSONObject obj = new JSONObject(json);
+                host = obj.optString("add", "").toLowerCase();
+            } else {
+                // For other protocols, parse URI
+                int at = uri.indexOf('@');
+                if (at > 0) {
+                    int colon = uri.indexOf(':', at);
+                    if (colon > 0) {
+                        host = uri.substring(at + 1, colon).toLowerCase();
+                    } else {
+                        // Find end of host (next : or # or end)
+                        int end = uri.indexOf(':', at);
+                        if (end == -1) end = uri.indexOf('#', at);
+                        if (end == -1) end = uri.length();
+                        host = uri.substring(at + 1, end).toLowerCase();
+                    }
+                }
+            }
+            
+            if (host == null || host.isEmpty()) return true;
+            
+            // Filter out localhost, private IPs, and obvious test ranges
+            return host.equals("localhost") ||
+                   host.startsWith("127.") ||
+                   host.startsWith("192.168.") ||
+                   host.startsWith("10.") ||
+                   host.startsWith("172.16.") ||
+                   host.startsWith("172.17.") ||
+                   host.startsWith("172.18.") ||
+                   host.startsWith("172.19.") ||
+                   host.startsWith("172.20.") ||
+                   host.startsWith("172.21.") ||
+                   host.startsWith("172.22.") ||
+                   host.startsWith("172.23.") ||
+                   host.startsWith("172.24.") ||
+                   host.startsWith("172.25.") ||
+                   host.startsWith("172.26.") ||
+                   host.startsWith("172.27.") ||
+                   host.startsWith("172.28.") ||
+                   host.startsWith("172.29.") ||
+                   host.startsWith("172.30.") ||
+                   host.startsWith("172.31.") ||
+                   host.equals("0.0.0.0") ||
+                   host.startsWith("169.254."); // link-local
+                   
+        } catch (Exception e) {
+            return true; // Invalid URI, treat as fake
+        }
     }
 
     private int getProtocolPriority(String protocol) {
@@ -544,6 +674,8 @@ public class ConfigManager {
                     obj.put("ps", item.name);
                     obj.put("protocol", item.protocol);
                     obj.put("latency_ms", item.latency);
+                    obj.put("telegram_latency", item.telegram_latency);
+                    obj.put("instagram_latency", item.instagram_latency);
                     arr.put(obj);
                 }
             }
@@ -574,6 +706,8 @@ public class ConfigManager {
                     item.name = obj.optString("ps", "Server");
                     item.protocol = obj.optString("protocol", "Unknown");
                     item.latency = obj.optInt("latency_ms", -1);
+                    item.telegram_latency = obj.optInt("telegram_latency", Integer.MAX_VALUE);
+                    item.instagram_latency = obj.optInt("instagram_latency", Integer.MAX_VALUE);
                     topConfigs.add(item);
                 }
             }
@@ -669,5 +803,7 @@ public class ConfigManager {
         public String name;
         public String protocol;
         public volatile int latency;
+        public volatile int telegram_latency = Integer.MAX_VALUE;
+        public volatile int instagram_latency = Integer.MAX_VALUE;
     }
 }

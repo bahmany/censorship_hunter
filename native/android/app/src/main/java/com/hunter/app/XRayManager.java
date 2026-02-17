@@ -34,6 +34,7 @@ public class XRayManager {
     private final Context context;
     private final File xrayDir;
     private final File xrayBinary;
+    private final File packagedXrayBinary;
     private final ExecutorService executor;
     private volatile boolean isInstalling = false;
 
@@ -50,26 +51,94 @@ public class XRayManager {
         this.context = context.getApplicationContext();
         this.xrayDir = new File(context.getFilesDir(), XRAY_DIR);
         this.xrayBinary = new File(xrayDir, XRAY_BINARY);
+        String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
+        this.packagedXrayBinary = new File(nativeLibDir, "libxray.so");
         this.executor = new ThreadPoolExecutor(1, 1, 30, TimeUnit.SECONDS,
             new LinkedBlockingQueue<>(5));
 
         if (!xrayDir.exists()) xrayDir.mkdirs();
+
+        // Diagnostic logging for binary selection
+        Log.i(TAG, "nativeLibraryDir: " + nativeLibDir);
+        Log.i(TAG, "packagedXrayBinary: " + packagedXrayBinary.getAbsolutePath()
+            + " exists=" + packagedXrayBinary.exists()
+            + " canExec=" + packagedXrayBinary.canExecute()
+            + " size=" + packagedXrayBinary.length());
+        Log.i(TAG, "extractedXrayBinary: " + xrayBinary.getAbsolutePath()
+            + " exists=" + xrayBinary.exists()
+            + " canExec=" + xrayBinary.canExecute()
+            + " size=" + xrayBinary.length());
+        // List files in nativeLibraryDir to see what's actually there
+        try {
+            File nativeDir = new File(nativeLibDir);
+            String[] files = nativeDir.list();
+            if (files != null) {
+                Log.i(TAG, "nativeLibraryDir contents (" + files.length + " files): " + java.util.Arrays.toString(files));
+            } else {
+                Log.w(TAG, "nativeLibraryDir.list() returned null");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to list nativeLibraryDir", e);
+        }
     }
 
     /**
      * Check if xray binary is ready to use.
      */
     public boolean isReady() {
-        return xrayBinary.exists() && xrayBinary.canExecute() && xrayBinary.length() > 1000
-            && new File(xrayDir, "geoip.dat").exists()
+        File exec = getExecBinaryFile();
+        boolean execOk = exec != null && exec.exists() && exec.length() > 1000;
+        boolean geoOk = new File(xrayDir, "geoip.dat").exists()
             && new File(xrayDir, "geosite.dat").exists();
+        if (!execOk || !geoOk) {
+            Log.d(TAG, "isReady: execOk=" + execOk + " geoOk=" + geoOk
+                + " exec=" + (exec != null ? exec.getAbsolutePath() : "null"));
+        }
+        return execOk && geoOk;
     }
 
     /**
      * Get path to xray binary.
      */
     public String getBinaryPath() {
-        if (isReady()) return xrayBinary.getAbsolutePath();
+        if (!isReady()) return null;
+        File exec = getExecBinaryFile();
+        if (exec == null) return null;
+        return exec.getAbsolutePath();
+    }
+
+    private File getExecBinaryFile() {
+        // Prefer packaged binary from nativeLibraryDir (always has exec permission on Android)
+        if (packagedXrayBinary.exists() && packagedXrayBinary.length() > 1000) {
+            Log.d(TAG, "Using packaged libxray.so from nativeLibraryDir");
+            return packagedXrayBinary;
+        }
+        // Fallback to extracted binary in app files dir
+        if (xrayBinary.exists() && xrayBinary.length() > 1000) {
+            Log.d(TAG, "Using extracted xray from files dir");
+            return xrayBinary;
+        }
+        Log.w(TAG, "No xray binary found! packaged=" + packagedXrayBinary.getAbsolutePath()
+            + " exists=" + packagedXrayBinary.exists()
+            + ", extracted=" + xrayBinary.getAbsolutePath()
+            + " exists=" + xrayBinary.exists());
+        return xrayBinary; // return anyway, let caller handle the error
+    }
+
+    private File getFallbackExecBinaryFile(File current) {
+        if (current == null) return null;
+        if (current.equals(packagedXrayBinary)) {
+            if (xrayBinary.exists() && xrayBinary.length() > 1000) {
+                return xrayBinary;
+            }
+            return null;
+        }
+        if (current.equals(xrayBinary)) {
+            if (packagedXrayBinary.exists() && packagedXrayBinary.length() > 1000) {
+                return packagedXrayBinary;
+            }
+            return null;
+        }
         return null;
     }
 
@@ -117,7 +186,7 @@ public class XRayManager {
      */
     public void ensureInstalled(InstallCallback callback) {
         if (isReady() && !needsUpdate()) {
-            callback.onComplete(xrayBinary.getAbsolutePath());
+            callback.onComplete(getBinaryPath());
             return;
         }
 
@@ -136,16 +205,19 @@ public class XRayManager {
 
                 AssetManager assets = context.getAssets();
 
-                // Step 1: Extract xray binary from ZIP asset
-                callback.onProgress("Extracting xray binary...", 10);
-                InputStream zipStream = assets.open(ASSETS_DIR + "/" + zipName);
-                extractXrayFromZip(zipStream);
-                zipStream.close();
+                if (!(packagedXrayBinary.exists() && packagedXrayBinary.length() > 1000)) {
+                    // Step 1: Extract xray binary from ZIP asset
+                    callback.onProgress("Extracting xray binary...", 10);
+                    InputStream zipStream = assets.open(ASSETS_DIR + "/" + zipName);
+                    extractXrayFromZip(zipStream);
+                    zipStream.close();
 
-                // Make executable
-                xrayBinary.setExecutable(true, false);
-                xrayBinary.setReadable(true, false);
-                Log.i(TAG, "Extracted xray binary: " + xrayBinary.length() + " bytes");
+                    // Make executable (may still be blocked from exec on some devices; packagedXrayBinary is preferred)
+                    xrayBinary.setExecutable(true, false);
+                    xrayBinary.setReadable(true, false);
+                    xrayBinary.setWritable(true, false);
+                    Log.i(TAG, "Extracted xray binary: " + xrayBinary.length() + " bytes");
+                }
 
                 // Step 2: Copy geoip.dat from assets
                 callback.onProgress("Installing geoip.dat...", 40);
@@ -162,9 +234,9 @@ public class XRayManager {
                 vos.close();
 
                 callback.onProgress("V2Ray engine ready", 100);
-                Log.i(TAG, "XRay v" + XRAY_VERSION + " installed for " + detectedAbi
-                    + " at: " + xrayBinary.getAbsolutePath());
-                callback.onComplete(xrayBinary.getAbsolutePath());
+                String binPath = getBinaryPath();
+                Log.i(TAG, "XRay v" + XRAY_VERSION + " ready for " + detectedAbi + " at: " + binPath);
+                callback.onComplete(binPath);
 
             } catch (Exception e) {
                 Log.e(TAG, "Failed to install XRay from assets", e);
@@ -236,29 +308,71 @@ public class XRayManager {
         }
 
         try {
+            File exec = getExecBinaryFile();
+            if (exec == null) {
+                Log.e(TAG, "XRay exec binary not available");
+                return null;
+            }
+            Log.i(TAG, "Starting XRay using: " + exec.getAbsolutePath());
+            Log.i(TAG, "XRay config: " + configFile.getAbsolutePath());
+            Log.i(TAG, "XRay working dir: " + xrayDir.getAbsolutePath());
+            Log.i(TAG, "XRAY_LOCATION_ASSET: " + xrayDir.getAbsolutePath());
+            
             ProcessBuilder pb = new ProcessBuilder(
-                xrayBinary.getAbsolutePath(), "run", "-c", configFile.getAbsolutePath());
+                exec.getAbsolutePath(), "run", "-c", configFile.getAbsolutePath());
             pb.directory(xrayDir);
             // Tell xray where to find geoip.dat and geosite.dat
             pb.environment().put("XRAY_LOCATION_ASSET", xrayDir.getAbsolutePath());
             pb.redirectErrorStream(true);
             Process process = pb.start();
 
+            // Start background thread to continuously read and log XRay output
+            final String processTag = "XRay-" + configFile.getName();
+            Thread outputReader = new Thread(() -> {
+                try {
+                    java.io.BufferedReader reader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(process.getInputStream()));
+                    String line;
+                    while ((line = reader.readLine()) != null) {
+                        Log.i(processTag, line);
+                    }
+                } catch (java.io.InterruptedIOException e) {
+                    Log.i(processTag, "Output reader stopped (process terminated)");
+                } catch (Exception e) {
+                    Log.w(processTag, "Output reader stopped", e);
+                }
+            }, "XRayOutputReader");
+            outputReader.setDaemon(true);
+            outputReader.start();
+
             // Wait briefly to check if it started
             Thread.sleep(800);
             if (process.isAlive()) {
+                Log.i(TAG, "XRay process started successfully (PID would be available via reflection)");
                 return process;
             } else {
-                // Read error output
-                byte[] errBuf = new byte[1024];
-                int read = process.getInputStream().read(errBuf);
-                if (read > 0) {
-                    Log.e(TAG, "XRay start error: " + new String(errBuf, 0, read));
-                }
+                Log.e(TAG, "XRay process died immediately after start");
                 return null;
             }
         } catch (Exception e) {
             Log.e(TAG, "Failed to start XRay process", e);
+            try {
+                File exec = getExecBinaryFile();
+                File fallback = getFallbackExecBinaryFile(exec);
+                if (fallback != null) {
+                    Log.w(TAG, "Retrying XRay using fallback: " + fallback.getAbsolutePath());
+                    ProcessBuilder pb = new ProcessBuilder(
+                        fallback.getAbsolutePath(), "run", "-c", configFile.getAbsolutePath());
+                    pb.directory(xrayDir);
+                    pb.environment().put("XRAY_LOCATION_ASSET", xrayDir.getAbsolutePath());
+                    pb.redirectErrorStream(true);
+                    Process process = pb.start();
+                    Thread.sleep(800);
+                    if (process.isAlive()) {
+                        return process;
+                    }
+                }
+            } catch (Exception ignored) {}
             return null;
         }
     }

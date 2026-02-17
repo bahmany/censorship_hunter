@@ -29,6 +29,7 @@ public class ConfigMonitorService extends Service {
     private static final long REFRESH_INTERVAL = 20 * 60 * 1000; // 20 minutes
     private static final long TEST_INTERVAL = 3 * 60 * 1000;     // 3 minutes
     private static final long INITIAL_TEST_DELAY = 8000;          // 8 seconds
+    private static final long NOTIFICATION_THROTTLE_MS = 2000;     // 2 seconds minimum between notifications
 
     private HandlerThread workerThread;
     private Handler workerHandler;
@@ -36,6 +37,10 @@ public class ConfigMonitorService extends Service {
     private ConfigTester configTester;
     private ConfigBalancer configBalancer;
     private volatile boolean isDestroyed = false;
+    
+    // Notification rate limiting
+    private volatile long lastNotificationTime = 0;
+    private volatile String lastNotificationText = "";
 
     @Override
     public void onCreate() {
@@ -43,11 +48,17 @@ public class ConfigMonitorService extends Service {
 
         createNotificationChannel();
         Notification notification = createNotification("Starting monitor...");
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
-        } else {
-            startForeground(NOTIFICATION_ID, notification);
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE);
+            } else {
+                startForeground(NOTIFICATION_ID, notification);
+            }
+        } catch (Throwable t) {
+            Log.e(TAG, "startForeground failed", t);
+            stopSelf();
+            return;
         }
 
         // Dedicated background thread for scheduling
@@ -56,9 +67,19 @@ public class ConfigMonitorService extends Service {
         workerHandler = new Handler(workerThread.getLooper());
 
         FreeV2RayApplication app = FreeV2RayApplication.getInstance();
+        if (app == null) {
+            Log.e(TAG, "Application instance is null");
+            stopSelf();
+            return;
+        }
         configManager = app.getConfigManager();
         configTester = app.getConfigTester();
         configBalancer = app.getConfigBalancer();
+        if (configManager == null || configTester == null || configBalancer == null) {
+            Log.e(TAG, "Managers not ready");
+            stopSelf();
+            return;
+        }
 
         // Don't refresh immediately - MainActivity may already be refreshing
         // Wait a bit, then check if refresh is needed
@@ -97,7 +118,10 @@ public class ConfigMonitorService extends Service {
             @Override
             public void onProgress(String message, int current, int total) {
                 if (!isDestroyed) {
-                    updateNotification("Refreshing: " + current + "/" + total);
+                    // Update less frequently for refresh progress
+                    if (current % 50 == 0 || current == total) {
+                        updateNotification("Refreshing: " + current + "/" + total);
+                    }
                 }
             }
 
@@ -149,7 +173,10 @@ public class ConfigMonitorService extends Service {
             xrayManager.ensureInstalled(new XRayManager.InstallCallback() {
                 @Override
                 public void onProgress(String message, int percent) {
-                    updateNotification(message);
+                    // Only update on significant progress changes
+                    if (percent % 25 == 0 || percent == 100) {
+                        updateNotification(message);
+                    }
                 }
                 @Override
                 public void onComplete(String binaryPath) {
@@ -190,7 +217,8 @@ public class ConfigMonitorService extends Service {
         configTester.testConfigs(configs, new ConfigTester.TestCallback() {
             @Override
             public void onProgress(int tested, int total) {
-                if (!isDestroyed && tested % 10 == 0) {
+                // Update less frequently to reduce notification spam
+                if (!isDestroyed && tested % 25 == 0) {
                     updateNotification("Testing: " + tested + "/" + total);
                 }
             }
@@ -251,9 +279,18 @@ public class ConfigMonitorService extends Service {
 
     private void updateNotification(String text) {
         try {
+            // Rate limiting: only update if text changed or enough time passed
+            long currentTime = System.currentTimeMillis();
+            if (text.equals(lastNotificationText) && 
+                (currentTime - lastNotificationTime) < NOTIFICATION_THROTTLE_MS) {
+                return; // Skip duplicate notification within throttle period
+            }
+            
             NotificationManager manager = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             if (manager != null && !isDestroyed) {
                 manager.notify(NOTIFICATION_ID, createNotification(text));
+                lastNotificationTime = currentTime;
+                lastNotificationText = text;
             }
         } catch (Exception ignored) {}
     }

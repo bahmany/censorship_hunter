@@ -48,7 +48,7 @@ public class AppSelectActivity extends AppCompatActivity {
         setSupportActionBar(toolbar);
         if (getSupportActionBar() != null) {
             getSupportActionBar().setDisplayHomeAsUpEnabled(true);
-            getSupportActionBar().setTitle("انتخاب برنامه‌ها");
+            getSupportActionBar().setTitle("Select Apps");
         }
 
         recyclerView = findViewById(R.id.apps_recycler);

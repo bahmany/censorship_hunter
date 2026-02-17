@@ -61,7 +61,7 @@ public class MainActivityTest {
     @Test
     public void testVpnServiceNotActiveByDefault() {
         assertFalse("VPN should not be active by default", 
-                VpnService.isActive());
+                VpnState.isActive());
     }
 
     @Test

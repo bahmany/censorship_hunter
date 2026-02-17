@@ -1,18 +1,18 @@
 <resources>
     <string name="app_name">Iranian Free V2Ray</string>
-    <string name="app_name_fa">وی‌توری رایگان ایران</string>
-    <string name="status_idle">در انتظار...</string>
-    <string name="status_connecting">در حال اتصال...</string>
-    <string name="status_connected">متصل</string>
-    <string name="status_disconnected">قطع شده</string>
-    <string name="btn_start">شروع</string>
-    <string name="btn_stop">توقف</string>
-    <string name="btn_settings">تنظیمات</string>
-    <string name="btn_configs">کانفیگ‌ها</string>
-    <string name="settings_per_app">انتخاب برنامه‌ها</string>
-    <string name="settings_all_apps">همه برنامه‌ها</string>
-    <string name="telegram_setup">تنظیم تلگرام</string>
-    <string name="configs_found">کانفیگ یافت شد</string>
-    <string name="no_configs">کانفیگی یافت نشد</string>
-    <string name="loading_configs">در حال بارگذاری...</string>
+    <string name="app_name_fa">Iranian Free V2Ray</string>
+    <string name="status_idle">Idle...</string>
+    <string name="status_connecting">Connecting...</string>
+    <string name="status_connected">Connected</string>
+    <string name="status_disconnected">Disconnected</string>
+    <string name="btn_start">Start</string>
+    <string name="btn_stop">Stop</string>
+    <string name="btn_settings">Settings</string>
+    <string name="btn_configs">Configs</string>
+    <string name="settings_per_app">Select Apps</string>
+    <string name="settings_all_apps">All Apps</string>
+    <string name="telegram_setup">Telegram Setup</string>
+    <string name="configs_found">Configs Found</string>
+    <string name="no_configs">No Configs Found</string>
+    <string name="loading_configs">Loading...</string>
 </resources> 

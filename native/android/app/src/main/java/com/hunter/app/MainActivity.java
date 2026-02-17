@@ -2,7 +2,11 @@ package com.hunter.app;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.ActivityManager;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.pm.PackageManager;
 import android.net.VpnService;
 import android.os.Build;
@@ -19,6 +23,13 @@ import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.os.Handler;
+import android.os.Looper;
+import android.net.TrafficStats;
 
 import com.google.android.material.button.MaterialButton;
 
@@ -32,15 +43,35 @@ import java.util.List;
 public class MainActivity extends AppCompatActivity {
 
     private MaterialButton connectButton;
-    private MaterialButton refreshButton, shareButton;
+    private MaterialButton refreshButton, shareButton, switchButton;
     private ProgressBar progressBar;
+    private ProgressBar v2rayProgressBar;
     private TextView statusText, statusDetail, configCount;
+    private TextView progressLabel, progressDetail;
     private ImageView statusIcon;
-    private ImageButton settingsButton;
+    private ImageButton settingsButton, aboutButton;
+    private View progressCard;
+    private View speedTrafficCard;
+    private TextView downloadSpeed, uploadSpeed, totalTraffic, sessionTime;
 
     private ConfigManager configManager;
     private boolean isConnected = false;
     private boolean isConnecting = false;
+    private BroadcastReceiver progressReceiver;
+
+    // Speed and traffic monitoring
+    private Handler speedUpdateHandler;
+    private Runnable speedUpdateRunnable;
+    private long sessionStartTime = 0;
+    private long lastRxBytes = 0;
+    private long lastTxBytes = 0;
+    private long totalRxBytes = 0;
+    private long totalTxBytes = 0;
+
+    // Speed averaging for smoother display
+    private final int SPEED_HISTORY_SIZE = 5;
+    private final java.util.Queue<Long> rxSpeedHistory = new java.util.LinkedList<>();
+    private final java.util.Queue<Long> txSpeedHistory = new java.util.LinkedList<>();
 
     private final ActivityResultLauncher<Intent> vpnPermissionLauncher =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -59,6 +90,28 @@ public class MainActivity extends AppCompatActivity {
 
         initViews();
         setupListeners();
+
+        // Initialize progress receiver
+        progressReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if ("com.hunter.app.V2RAY_PROGRESS".equals(intent.getAction())) {
+                    String label = intent.getStringExtra("label");
+                    String detail = intent.getStringExtra("detail");
+                    int progress = intent.getIntExtra("progress", 0);
+                    int max = intent.getIntExtra("max", 100);
+                    boolean show = intent.getBooleanExtra("show", true);
+
+                    if (show) {
+                        showV2RayProgress(label, detail, progress, max);
+                    } else {
+                        hideV2RayProgress();
+                    }
+                }
+            }
+        };
+        LocalBroadcastManager.getInstance(this).registerReceiver(progressReceiver, 
+            new IntentFilter("com.hunter.app.V2RAY_PROGRESS"));
 
         // Request notification permission for Android 13+
         requestNotificationPermission();
@@ -94,8 +147,22 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    @Override
+    public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode == 100) {
+            startMonitorService();
+        }
+    }
+
     private void startMonitorService() {
         try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                        != PackageManager.PERMISSION_GRANTED) {
+                    return;
+                }
+            }
             Intent monitorIntent = new Intent(this, ConfigMonitorService.class);
             if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
                 startForegroundService(monitorIntent);
@@ -110,13 +177,28 @@ public class MainActivity extends AppCompatActivity {
     private void initViews() {
         connectButton = findViewById(R.id.connect_button);
         progressBar = findViewById(R.id.progress_bar);
+        v2rayProgressBar = findViewById(R.id.v2ray_progress_bar);
         statusText = findViewById(R.id.status_text);
         statusDetail = findViewById(R.id.status_detail);
         configCount = findViewById(R.id.config_count);
+        progressLabel = findViewById(R.id.progress_label);
+        progressDetail = findViewById(R.id.progress_detail);
         statusIcon = findViewById(R.id.status_icon);
         settingsButton = findViewById(R.id.btn_settings);
         refreshButton = findViewById(R.id.btn_refresh);
         shareButton = findViewById(R.id.btn_share);
+        switchButton = findViewById(R.id.btn_switch);
+        aboutButton = findViewById(R.id.btn_about);
+        progressCard = findViewById(R.id.progress_card);
+        speedTrafficCard = findViewById(R.id.speed_traffic_card);
+        downloadSpeed = findViewById(R.id.download_speed);
+        uploadSpeed = findViewById(R.id.upload_speed);
+        totalTraffic = findViewById(R.id.total_traffic);
+        sessionTime = findViewById(R.id.session_time);
+        
+        // Initialize switch button in disabled state
+        switchButton.setEnabled(false);
+        switchButton.setAlpha(0.5f);
     }
 
     private void setupListeners() {
@@ -125,10 +207,37 @@ public class MainActivity extends AppCompatActivity {
         settingsButton.setOnClickListener(v -> 
             startActivity(new Intent(this, SettingsActivity.class)));
         
+        aboutButton.setOnClickListener(v -> 
+            startActivity(new Intent(this, AboutActivity.class)));
+        
         refreshButton.setOnClickListener(v -> refreshConfigs());
+        
+        switchButton.setOnClickListener(v -> switchConfig());
         
         shareButton.setOnClickListener(v -> 
             startActivity(new Intent(this, ConfigShareActivity.class)));
+    }
+
+    private void switchConfig() {
+        if (!isConnected) {
+            Toast.makeText(this, "Switch config is only available when connected", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        if (isConnecting) {
+            Toast.makeText(this, "Please wait for current operation", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        
+        // Disconnect first
+        disconnectVpn();
+        
+        // Reconnect after a short delay to allow disconnect to complete
+        connectButton.postDelayed(() -> {
+            if (!isConnecting && !isConnected) {
+                connectVpn();
+            }
+        }, 1500);
     }
 
     private void refreshConfigs() {
@@ -182,11 +291,20 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        if (Build.VERSION.SDK_INT >= 33) {
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
+                    != PackageManager.PERMISSION_GRANTED) {
+                requestNotificationPermission();
+                Toast.makeText(this, "Please allow notifications to start VPN", Toast.LENGTH_SHORT).show();
+                return;
+            }
+        }
+
         // Check XRay engine readiness (binary is bundled in APK, just needs extraction on first run)
         XRayManager xrayManager = FreeV2RayApplication.getInstance().getXRayManager();
         if (xrayManager == null || !xrayManager.isReady()) {
             setConnectingState();
-            statusDetail.setText("در حال آماده‌سازی موتور V2Ray...");
+            statusDetail.setText("Preparing V2Ray engine...");
             if (xrayManager != null) {
                 xrayManager.ensureInstalled(new XRayManager.InstallCallback() {
                     @Override
@@ -196,7 +314,7 @@ public class MainActivity extends AppCompatActivity {
                     @Override
                     public void onComplete(String binaryPath) {
                         runOnUiThread(() -> {
-                            statusDetail.setText("موتور آماده، در حال اتصال...");
+                            statusDetail.setText("Engine ready, connecting...");
                             proceedWithVpnConnect();
                         });
                     }
@@ -204,15 +322,15 @@ public class MainActivity extends AppCompatActivity {
                     public void onError(String error) {
                         runOnUiThread(() -> {
                             setDisconnectedState();
-                            statusDetail.setText("خطا در نصب موتور: " + error);
+                            statusDetail.setText("Engine installation error: " + error);
                             Toast.makeText(MainActivity.this,
-                                "خطا در نصب موتور V2Ray", Toast.LENGTH_LONG).show();
+                                "V2Ray engine installation error", Toast.LENGTH_LONG).show();
                         });
                     }
                 });
             } else {
                 setDisconnectedState();
-                statusDetail.setText("موتور V2Ray در دسترس نیست");
+                statusDetail.setText("V2Ray engine not available");
             }
             return;
         }
@@ -232,30 +350,50 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startVpnService() {
-        Intent intent = new Intent(this, com.hunter.app.VpnService.class);
-        intent.setAction(com.hunter.app.VpnService.ACTION_START);
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
-            startForegroundService(intent);
-        } else {
-            startService(intent);
+        try {
+            Intent intent = new Intent(this, com.hunter.app.VpnService.class);
+            intent.setAction(com.hunter.app.VpnService.ACTION_START);
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                startForegroundService(intent);
+            } else {
+                startService(intent);
+            }
+        } catch (Throwable t) {
+            android.util.Log.e("MainActivity", "Failed to start VPN service", t);
+            setDisconnectedState();
+            statusDetail.setText("Failed to start VPN service");
+            return;
         }
 
-        // Check connection state after delay (xray needs time to start)
+        waitForVpnActive(System.currentTimeMillis());
+    }
+
+    private void waitForVpnActive(long startTimeMs) {
         connectButton.postDelayed(() -> {
-            if (com.hunter.app.VpnService.isActive()) {
+            if (!isConnecting) return;
+            if (VpnState.isActive()) {
                 setConnectedState();
-            } else {
-                setDisconnectedState();
-                statusDetail.setText("Connection failed - try again");
+                return;
             }
-        }, 5000);
+            if (System.currentTimeMillis() - startTimeMs > 60000) {
+                setDisconnectedState();
+                statusDetail.setText("Connection timeout - try again");
+                return;
+            }
+            waitForVpnActive(startTimeMs);
+        }, 1000);
     }
 
     private void disconnectVpn() {
-        Intent intent = new Intent(this, com.hunter.app.VpnService.class);
-        intent.setAction(com.hunter.app.VpnService.ACTION_STOP);
-        startService(intent);
-        setDisconnectedState();
+        try {
+            Intent intent = new Intent(this, com.hunter.app.VpnService.class);
+            intent.setAction(com.hunter.app.VpnService.ACTION_STOP);
+            startService(intent);
+        } catch (Throwable t) {
+            android.util.Log.w("MainActivity", "Failed to stop VPN service", t);
+        } finally {
+            setDisconnectedState();
+        }
     }
 
     private void setConnectingState() {
@@ -267,6 +405,10 @@ public class MainActivity extends AppCompatActivity {
         statusText.setTextColor(getColor(R.color.status_connecting));
         statusDetail.setText("Establishing connection...");
         statusIcon.setColorFilter(getColor(R.color.status_connecting));
+        
+        // Disable switch button during connection
+        switchButton.setEnabled(false);
+        switchButton.setAlpha(0.5f);
     }
 
     private void setConnectedState() {
@@ -281,6 +423,13 @@ public class MainActivity extends AppCompatActivity {
         statusDetail.setText("VPN is active");
         statusIcon.setImageResource(R.drawable.ic_vpn_on);
         statusIcon.clearColorFilter();
+
+        // Enable switch button when connected
+        switchButton.setEnabled(true);
+        switchButton.setAlpha(1.0f);
+
+        // Start speed monitoring
+        startSpeedMonitoring();
     }
 
     private void setDisconnectedState() {
@@ -295,6 +444,171 @@ public class MainActivity extends AppCompatActivity {
         statusDetail.setText("Tap to connect");
         statusIcon.setImageResource(R.drawable.ic_vpn_off);
         statusIcon.setColorFilter(getColor(R.color.accent_blue));
+
+        // Disable switch button when disconnected
+        switchButton.setEnabled(false);
+        switchButton.setAlpha(0.5f);
+
+        // Stop speed monitoring
+        stopSpeedMonitoring();
+    }
+
+    private void showV2RayProgress(String label, String detail, int progress, int max) {
+        runOnUiThread(() -> {
+            if (progressCard != null) {
+                progressCard.setVisibility(View.VISIBLE);
+                if (progressLabel != null) progressLabel.setText(label);
+                if (progressDetail != null) progressDetail.setText(detail);
+                if (v2rayProgressBar != null) {
+                    v2rayProgressBar.setMax(max);
+                    v2rayProgressBar.setProgress(progress);
+                }
+            }
+        });
+    }
+
+    private void hideV2RayProgress() {
+        runOnUiThread(() -> {
+            if (progressCard != null) {
+                progressCard.setVisibility(View.GONE);
+            }
+        });
+    }
+
+    private void updateV2RayProgress(String label, String detail, int progress) {
+        runOnUiThread(() -> {
+            if (progressLabel != null) progressLabel.setText(label);
+            if (progressDetail != null) progressDetail.setText(detail);
+            if (v2rayProgressBar != null) v2rayProgressBar.setProgress(progress);
+        });
+    }
+
+    private void startSpeedMonitoring() {
+        sessionStartTime = System.currentTimeMillis();
+        resetTrafficStats();
+
+        speedUpdateHandler = new Handler(Looper.getMainLooper());
+        speedUpdateRunnable = new Runnable() {
+            @Override
+            public void run() {
+                updateSpeedAndTraffic();
+                speedUpdateHandler.postDelayed(this, 2000); // Update every 2 seconds for smoother display
+            }
+        };
+        speedUpdateHandler.post(speedUpdateRunnable);
+
+        // Show speed/traffic card
+        if (speedTrafficCard != null) {
+            speedTrafficCard.setVisibility(View.VISIBLE);
+        }
+    }
+
+    private void stopSpeedMonitoring() {
+        if (speedUpdateHandler != null && speedUpdateRunnable != null) {
+            speedUpdateHandler.removeCallbacks(speedUpdateRunnable);
+        }
+
+        // Hide speed/traffic card
+        if (speedTrafficCard != null) {
+            speedTrafficCard.setVisibility(View.GONE);
+        }
+    }
+
+    private void resetTrafficStats() {
+        lastRxBytes = getTotalRxBytes();
+        lastTxBytes = getTotalTxBytes();
+        totalRxBytes = 0;
+        totalTxBytes = 0;
+    }
+
+    private void updateSpeedAndTraffic() {
+        long currentRxBytes = getTotalRxBytes();
+        long currentTxBytes = getTotalTxBytes();
+
+        // Calculate speeds (bytes per second)
+        long rxSpeed = currentRxBytes - lastRxBytes;
+        long txSpeed = currentTxBytes - lastTxBytes;
+
+        // Add to history for averaging
+        rxSpeedHistory.add(rxSpeed);
+        txSpeedHistory.add(txSpeed);
+        if (rxSpeedHistory.size() > SPEED_HISTORY_SIZE) {
+            rxSpeedHistory.poll();
+        }
+        if (txSpeedHistory.size() > SPEED_HISTORY_SIZE) {
+            txSpeedHistory.poll();
+        }
+
+        // Calculate average speeds
+        long avgRxSpeed = rxSpeedHistory.stream().mapToLong(Long::longValue).sum() / rxSpeedHistory.size();
+        long avgTxSpeed = txSpeedHistory.stream().mapToLong(Long::longValue).sum() / txSpeedHistory.size();
+
+        // Update totals
+        totalRxBytes += rxSpeed;
+        totalTxBytes += txSpeed;
+
+        // Update last values
+        lastRxBytes = currentRxBytes;
+        lastTxBytes = currentTxBytes;
+
+        // Format average speeds
+        String downloadSpeedStr = formatSpeed(avgRxSpeed);
+        String uploadSpeedStr = formatSpeed(avgTxSpeed);
+        String totalTrafficStr = formatTraffic(totalRxBytes + totalTxBytes);
+
+        // Update UI (remove session time for cleaner look)
+        runOnUiThread(() -> {
+            if (downloadSpeed != null) downloadSpeed.setText(downloadSpeedStr);
+            if (uploadSpeed != null) uploadSpeed.setText(uploadSpeedStr);
+            if (totalTraffic != null) totalTraffic.setText(totalTrafficStr);
+            // Hide session time to make it less timer-focused
+            if (sessionTime != null) sessionTime.setVisibility(View.GONE);
+        });
+    }
+
+    private long getTotalRxBytes() {
+        try {
+            return TrafficStats.getTotalRxBytes();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private long getTotalTxBytes() {
+        try {
+            return TrafficStats.getTotalTxBytes();
+        } catch (Exception e) {
+            return 0;
+        }
+    }
+
+    private String formatSpeed(long bytesPerSecond) {
+        if (bytesPerSecond < 1024) {
+            return bytesPerSecond + " B/s";
+        } else if (bytesPerSecond < 1024 * 1024) {
+            return String.format("%.1f KB/s", bytesPerSecond / 1024.0);
+        } else {
+            return String.format("%.1f MB/s", bytesPerSecond / (1024.0 * 1024.0));
+        }
+    }
+
+    private String formatTraffic(long totalBytes) {
+        if (totalBytes < 1024 * 1024) {
+            return String.format("%.1f KB", totalBytes / 1024.0);
+        } else {
+            return String.format("%.1f MB", totalBytes / (1024.0 * 1024.0));
+        }
+    }
+
+    private String formatSessionTime() {
+        if (sessionStartTime == 0) return "00:00:00";
+
+        long elapsed = System.currentTimeMillis() - sessionStartTime;
+        long seconds = elapsed / 1000;
+        long minutes = seconds / 60;
+        long hours = minutes / 60;
+
+        return String.format("%02d:%02d:%02d", hours % 24, minutes % 60, seconds % 60);
     }
 
     private void updateConfigStats() {
@@ -316,12 +630,20 @@ public class MainActivity extends AppCompatActivity {
     protected void onResume() {
         super.onResume();
         // Update VPN state
-        if (com.hunter.app.VpnService.isActive()) {
+        if (VpnState.isActive()) {
             setConnectedState();
         } else {
             setDisconnectedState();
         }
         updateConfigStats();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        if (progressReceiver != null) {
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(progressReceiver);
+        }
     }
 }
  
