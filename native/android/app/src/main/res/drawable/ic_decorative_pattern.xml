@@ -1,0 +1,28 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="400dp"
+    android:height="200dp"
+    android:viewportWidth="400"
+    android:viewportHeight="200">
+    <!-- Decorative background pattern based on the provided SVG -->
+    <path
+        android:fillColor="#FFF8E1"
+        android:pathData="M0,0h400v200h-400z"/>
+    <!-- Simplified decorative border elements -->
+    <path
+        android:fillColor="#D4AF37"
+        android:strokeColor="#B8860B"
+        android:strokeWidth="2"
+        android:pathData="M20,20 Q50,10 80,20 Q110,30 140,20 Q170,10 200,20 Q230,30 260,20 Q290,10 320,20 Q350,30 380,20 L380,40 L20,40 Z"/>
+    <path
+        android:fillColor="#D4AF37"
+        android:strokeColor="#B8860B"
+        android:strokeWidth="2"
+        android:pathData="M20,180 Q50,190 80,180 Q110,170 140,180 Q170,190 200,180 Q230,170 260,180 Q290,190 320,180 Q350,170 380,180 L380,160 L20,160 Z"/>
+    <!-- Center decorative element -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M190,80 Q200,60 210,80 Q220,100 210,120 Q200,140 190,120 Q180,100 190,80 Z"/>
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M185,85 Q195,75 205,85 Q195,95 185,85 Z"/>
+</vector>

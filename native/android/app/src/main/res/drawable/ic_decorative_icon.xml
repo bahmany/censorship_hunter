@@ -1,0 +1,22 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Professional decorative icon -->
+    <path
+        android:fillColor="#D4AF37"
+        android:pathData="M6,6 Q12,2 18,6 Q24,10 30,6 Q36,2 42,6 L42,12 L6,12 Z"/>
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M21,15 Q24,12 27,15 Q30,18 27,21 Q24,24 21,21 Q18,18 21,15 Z"/>
+    <path
+        android:fillColor="#B8860B"
+        android:pathData="M23,17 Q25,16 26,18 Q25,20 23,19 Q21,18 23,17 Z"/>
+    <!-- Border -->
+    <path
+        android:fillColor="#00000000"
+        android:strokeColor="#8B4513"
+        android:strokeWidth="1"
+        android:pathData="M6,6 L42,6 L42,42 L6,42 Z"/>
+</vector>

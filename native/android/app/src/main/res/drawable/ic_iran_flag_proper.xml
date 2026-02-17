@@ -1,0 +1,52 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="48dp"
+    android:viewportWidth="48"
+    android:viewportHeight="48">
+    <!-- Iranian Flag with proper proportions -->
+    <!-- Green stripe (top third) -->
+    <path
+        android:fillColor="#009900"
+        android:pathData="M0,0 L48,0 L48,16 L0,16 Z" />
+    <!-- White stripe (middle third) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M0,16 L48,16 L48,32 L0,32 Z" />
+    <!-- Red stripe (bottom third) -->
+    <path
+        android:fillColor="#CC0000"
+        android:pathData="M0,32 L48,32 L48,48 L0,48 Z" />
+
+    <!-- Lion and Sun emblem in the center -->
+    <!-- Sun rays -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M24,8 L26,6 L28,8 L26,10 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M24,40 L26,42 L28,40 L26,38 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M40,24 L42,22 L44,24 L42,26 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M8,24 L6,22 L4,24 L6,26 Z" />
+
+    <!-- Sun circle -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M18,18 L30,18 L30,30 L18,30 Z" />
+
+    <!-- Lion silhouette -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M21,25 L27,25 L26,27 L22,27 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M23,23 L25,23 L24.5,25 L23.5,25 Z" />
+
+    <!-- Sword -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M24,19 L24,21 L25,21 L25,19 Z" />
+</vector>

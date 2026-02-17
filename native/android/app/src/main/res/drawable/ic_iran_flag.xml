@@ -1,0 +1,67 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="48dp"
+    android:height="32dp"
+    android:viewportWidth="48"
+    android:viewportHeight="32">
+    <!-- Iranian Flag Background -->
+    <!-- Green stripe (top) -->
+    <path
+        android:fillColor="#009900"
+        android:pathData="M0,0h48v10.67h-48z" />
+    <!-- White stripe (middle) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M0,10.67h48v10.66h-48z" />
+    <!-- Red stripe (bottom) -->
+    <path
+        android:fillColor="#CC0000"
+        android:pathData="M0,21.33h48v10.67h-48z" />
+
+    <!-- Lion and Sun Emblem -->
+    <!-- Sun rays -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M24,6 L26,4 L28,6 L26,8 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M24,26 L26,28 L28,26 L26,24 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M38,16 L40,14 L42,16 L40,18 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M10,16 L8,14 L6,16 L8,18 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M35.5,8.5 L36.5,6.5 L38.5,7.5 L37.5,9.5 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M12.5,23.5 L11.5,25.5 L9.5,24.5 L10.5,22.5 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M35.5,23.5 L37.5,22.5 L38.5,24.5 L36.5,25.5 Z" />
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M12.5,8.5 L10.5,9.5 L9.5,7.5 L11.5,6.5 Z" />
+
+    <!-- Sun circle -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M24,16m-3,0a3,3 0,1,1 6,0a3,3 0,1,1 -6,0" />
+
+    <!-- Lion body (simplified) -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M22,17 L26,17 L25,19 L23,19 Z" />
+
+    <!-- Lion head (simplified) -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M23,15 L25,15 L24.5,17 L23.5,17 Z" />
+
+    <!-- Lion tail -->
+    <path
+        android:fillColor="#FFD700"
+        android:pathData="M26,18 L27,17 L28,18 L27,19 Z" />
+
+</vector>
