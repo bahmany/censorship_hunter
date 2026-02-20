@@ -50,6 +50,9 @@ android {
     }
     
     packagingOptions {
+        resources {
+            excludes += ['META-INF/INDEX.LIST', 'META-INF/io.netty.versions.properties']
+        }
         jniLibs {
             useLegacyPackaging = true
         }
@@ -68,12 +71,11 @@ dependencies {
     implementation 'androidx.activity:activity:1.8.2'
     implementation 'androidx.core:core:1.12.0'
     implementation 'androidx.coordinatorlayout:coordinatorlayout:1.2.0'
-    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-
     implementation 'com.ooimi.library:tun2socks:1.0.4'
     
-    // Note: libv2ray dependency removed - will use existing XRay process approach
-    // The enhanced architecture can still work with process-based XRay for now
+    implementation 'org.json:json:20231013'
+    implementation 'com.squareup.okhttp3:okhttp:4.12.0'
+    implementation 'io.netty:netty-all:4.1.94.Final'
     
     // Testing
     testImplementation 'junit:junit:4.13.2'

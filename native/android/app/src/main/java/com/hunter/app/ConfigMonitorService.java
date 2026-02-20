@@ -14,6 +14,7 @@ import android.util.Log;
 
 import androidx.core.app.NotificationCompat;
 
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -26,9 +27,9 @@ public class ConfigMonitorService extends Service {
     private static final String CHANNEL_ID = "config_monitor";
     private static final int NOTIFICATION_ID = 2;
 
-    private static final long REFRESH_INTERVAL = 20 * 60 * 1000; // 20 minutes
-    private static final long TEST_INTERVAL = 3 * 60 * 1000;     // 3 minutes
-    private static final long INITIAL_TEST_DELAY = 8000;          // 8 seconds
+    private static final long REFRESH_INTERVAL = 10 * 60 * 1000; // 10 minutes (reduced from 20)
+    private static final long TEST_INTERVAL = 90 * 1000;     // 90 seconds (reduced from 3 minutes)
+    private static final long INITIAL_TEST_DELAY = 3000;      // 3 seconds (reduced from 8)
     private static final long NOTIFICATION_THROTTLE_MS = 2000;     // 2 seconds minimum between notifications
 
     private HandlerThread workerThread;
@@ -36,6 +37,7 @@ public class ConfigMonitorService extends Service {
     private ConfigManager configManager;
     private ConfigTester configTester;
     private ConfigBalancer configBalancer;
+    private ProxyBalancer proxyBalancer;
     private volatile boolean isDestroyed = false;
     
     // Notification rate limiting
@@ -75,10 +77,17 @@ public class ConfigMonitorService extends Service {
         configManager = app.getConfigManager();
         configTester = app.getConfigTester();
         configBalancer = app.getConfigBalancer();
-        if (configManager == null || configTester == null || configBalancer == null) {
+        proxyBalancer = app.getProxyBalancer();
+        if (configManager == null || configTester == null || configBalancer == null || proxyBalancer == null) {
             Log.e(TAG, "Managers not ready");
             stopSelf();
             return;
+        }
+
+        // Start proxy balancers early to make them always active
+        if (!proxyBalancer.isRunning()) {
+            proxyBalancer.start();
+            Log.i(TAG, "Proxy balancers started early");
         }
 
         // Don't refresh immediately - MainActivity may already be refreshing
@@ -159,8 +168,8 @@ public class ConfigMonitorService extends Service {
             scheduleNextTest();
             return;
         }
-        if (configManager.isRefreshing()) {
-            Log.w(TAG, "Refresh in progress, postponing test");
+        if (configManager.isRefreshing() && configManager.getConfigCount() == 0) {
+            Log.w(TAG, "Refresh in progress and no cached configs, postponing test");
             workerHandler.postDelayed(this::doTest, 10000);
             return;
         }
@@ -204,27 +213,30 @@ public class ConfigMonitorService extends Service {
             return;
         }
 
-        // Limit test batch to avoid testing 15000+ configs
-        // Test top 200 by protocol priority (already sorted)
-        if (configs.size() > 200) {
-            configs = configs.subList(0, 200);
+        // Limit test batch to avoid testing too many configs
+        // Test top 50 by protocol priority (already sorted) - reduced from 200
+        if (configs.size() > 50) {
+            configs = configs.subList(0, 50);
         }
 
         final int totalToTest = configs.size();
         Log.i(TAG, "Starting health check: " + totalToTest + " configs");
         updateNotification("Testing " + totalToTest + " configs...");
 
+        // Keep reference to tested configs - config refresh may replace configManager's list
+        final List<ConfigManager.ConfigItem> testedConfigs = new ArrayList<>(configs);
+
         configTester.testConfigs(configs, new ConfigTester.TestCallback() {
             @Override
             public void onProgress(int tested, int total) {
                 // Update less frequently to reduce notification spam
-                if (!isDestroyed && tested % 25 == 0) {
+                if (!isDestroyed && tested % 15 == 0) { // Reduced from 25 for more frequent updates
                     updateNotification("Testing: " + tested + "/" + total);
                 }
             }
 
             @Override
-            public void onConfigTested(ConfigManager.ConfigItem config, boolean success, int latency) {
+            public void onConfigTested(ConfigManager.ConfigItem config, boolean success, int latency, boolean googleAccessible) {
                 // Individual results handled by latency field update
             }
 
@@ -234,15 +246,27 @@ public class ConfigMonitorService extends Service {
 
                 Log.i(TAG, "Health check: " + successCount + "/" + totalTested + " working");
 
-                // Get working configs sorted by latency
-                List<ConfigManager.ConfigItem> allConfigs = configManager.getConfigs();
-                List<ConfigManager.ConfigItem> working = configTester.getWorkingConfigs(allConfigs);
+                // Use the TESTED configs (which have latency set), not re-fetched configs
+                // Config refresh may have replaced configManager's list with fresh objects (latency=-1)
+                List<ConfigManager.ConfigItem> working = configTester.getWorkingConfigs(testedConfigs);
 
                 // Update balancer with working configs
                 configBalancer.updateConfigs(working);
 
+                // Update proxy balancer with tested configs
+                ProxyBalancer proxyBalancer = FreeV2RayApplication.getInstance().getProxyBalancer();
+                if (proxyBalancer != null) {
+                    proxyBalancer.updateConfigs(testedConfigs);
+                    Log.i(TAG, "Proxy balancer updated with " + testedConfigs.size() + " tested configs");
+                }
+
                 // Update top 100 cache
                 configManager.updateTopConfigs(working);
+
+                // Trigger immediate network condition check if we have good configs
+                if (successCount > 0 && working.size() > 0) {
+                    triggerNetworkConditionCheck();
+                }
 
                 updateNotification(successCount + " working / " +
                     configManager.getConfigCount() + " total");
@@ -255,6 +279,24 @@ public class ConfigMonitorService extends Service {
     private void scheduleNextTest() {
         if (!isDestroyed) {
             workerHandler.postDelayed(this::doTest, TEST_INTERVAL);
+        }
+    }
+
+    /**
+     * Trigger immediate network condition check when good configs are found
+     */
+    private void triggerNetworkConditionCheck() {
+        if (!isDestroyed) {
+            workerHandler.post(() -> {
+                try {
+                    // This would integrate with the network detection system
+                    // For now, we'll just log that we're triggering a check
+                    Log.i(TAG, "Triggering immediate network condition check");
+                    // TODO: Call actual network condition detection system
+                } catch (Exception e) {
+                    Log.w(TAG, "Error triggering network condition check", e);
+                }
+            });
         }
     }
 

@@ -15,6 +15,7 @@ public class FreeV2RayApplication extends Application {
     private ConfigTester configTester;
     private ConfigBalancer configBalancer;
     private XRayManager xrayManager;
+    private ProxyBalancer proxyBalancer;
     
     public static FreeV2RayApplication getInstance() {
         return instance;
@@ -40,6 +41,7 @@ public class FreeV2RayApplication extends Application {
             configTester = new ConfigTester();
             configBalancer = new ConfigBalancer();
             xrayManager = new XRayManager(this);
+            proxyBalancer = new ProxyBalancer();
 
             // Extract XRay binary from bundled assets on first run
             if (xrayManager.needsUpdate()) {
@@ -81,11 +83,16 @@ public class FreeV2RayApplication extends Application {
         return xrayManager;
     }
     
+    public ProxyBalancer getProxyBalancer() {
+        return proxyBalancer;
+    }
+    
     @Override
     public void onTerminate() {
-        if (configTester != null) configTester.shutdown();
+        if (configTester != null) configTester.stopTesting();
         if (configManager != null) configManager.shutdown();
         if (xrayManager != null) xrayManager.shutdown();
+        if (proxyBalancer != null) proxyBalancer.stop();
         super.onTerminate();
     }
 }

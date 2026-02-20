@@ -523,7 +523,7 @@ class TelegramScraper:
                 self.config.get("api_id"),
                 self.config.get("api_hash"),
                 proxy=proxy,
-                connection_retries=3,
+                connection_retries=1,
                 auto_reconnect=False,
             )
 
@@ -592,6 +592,8 @@ class TelegramScraper:
         configs: Set[str] = set()
         consecutive_errors = 0
         max_consecutive_errors = 3
+        last_flood_wait_seconds = None
+        consecutive_flood_waits = 0
 
         for channel in channels:
             # Check connection before each channel (standard pattern from old_hunter)
@@ -683,8 +685,21 @@ class TelegramScraper:
                 consecutive_errors = 0  # Reset on success
 
             except FloodWaitError as e:
-                self.logger.warning(f"Flood wait on {channel}: {e.seconds}s")
-                await asyncio.sleep(e.seconds)
+                self.logger.warning(f"Flood wait on {channel}: {e.seconds}s - skipping channel")
+                # Detect global account-level throttle: same wait time on multiple channels
+                if last_flood_wait_seconds == e.seconds:
+                    consecutive_flood_waits += 1
+                else:
+                    consecutive_flood_waits = 1
+                    last_flood_wait_seconds = e.seconds
+                if consecutive_flood_waits >= 3:
+                    self.logger.warning(
+                        f"Global account flood wait detected ({e.seconds}s on {consecutive_flood_waits} channels) - aborting scrape"
+                    )
+                    break
+                if e.seconds > 300:  # > 5 minutes: skip entirely, not worth waiting
+                    continue
+                await asyncio.sleep(min(e.seconds, 60))  # Cap wait at 60s
             except (ChannelPrivateError, UsernameNotOccupiedError, UsernameInvalidError) as e:
                 self.logger.warning(f"Skipping {channel}: {e}")
             except Exception as e:
@@ -699,11 +714,15 @@ class TelegramScraper:
                 if is_connection_error:
                     consecutive_errors += 1
                     self.logger.warning(f"Connection error for {channel}: {e}")
+                    # Don't attempt reconnect if SSH tunnel is down - just stop scraping
+                    if consecutive_errors >= 2:
+                        self.logger.warning("Too many connection errors - stopping scrape session")
+                        break
                     reconnected = await self.heartbeat.try_reconnect(self.client)
                     if reconnected:
                         consecutive_errors = 0
                 else:
-                    self.logger.error(f"Failed to scrape {channel}: {e}")
+                    self.logger.warning(f"Failed to scrape {channel}: {e}")
 
         return configs
 

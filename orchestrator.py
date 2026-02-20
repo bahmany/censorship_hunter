@@ -8,6 +8,7 @@ scraping, benchmarking, caching, and load balancing.
 import asyncio
 import logging
 import os
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import SimpleQueue
@@ -26,9 +27,11 @@ try:
     from hunter.config.cache import SmartCache
     from hunter.security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
     from hunter.security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
-    from hunter.core.utils import load_json, now_ts, save_json, write_lines
+    from hunter.core.utils import load_json, now_ts, read_lines, save_json, write_lines
     from hunter.telegram_config_reporter import ConfigReportingService
     from hunter.config.dns_servers import DNSManager, get_dns_config
+    from hunter.ui.progress import HunterUI, LiveStatus, ServiceManager
+    from hunter.ui.dashboard import HunterDashboard
 except ImportError:
     # Fallback for direct execution
     try:
@@ -42,9 +45,11 @@ except ImportError:
         from config.cache import SmartCache
         from security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
         from security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
-        from core.utils import load_json, now_ts, save_json, write_lines
+        from core.utils import load_json, now_ts, read_lines, save_json, write_lines
         from telegram_config_reporter import ConfigReportingService
         from config.dns_servers import DNSManager, get_dns_config
+        from ui.progress import HunterUI, LiveStatus, ServiceManager
+        from ui.dashboard import HunterDashboard
     except ImportError:
         # Final fallback - set to None if imports fail
         HunterConfig = None
@@ -69,6 +74,7 @@ except ImportError:
         ConfigReportingService = None
         DNSManager = None
         get_dns_config = None
+        HunterDashboard = None
 
 
 class HunterOrchestrator:
@@ -201,6 +207,9 @@ class HunterOrchestrator:
         self.validated_configs: List[Tuple[str, float]] = []
         self.last_cycle = 0
         self.cycle_count = 0
+        self._last_validated_count = 0
+        self._consecutive_scrape_failures = 0
+        self._last_good_configs: List[Tuple[str, float]] = []
         
         # DPI Evasion Orchestrator (with strict timeout)
         self.dpi_evasion: Optional[DPIEvasionOrchestrator] = None
@@ -256,103 +265,193 @@ class HunterOrchestrator:
             except Exception as e:
                 self.logger.info(f"Stealth engine start skipped: {e}")
         
+        # UI progress system
+        self.ui = HunterUI()
+        
+        # Real-time dashboard (replaces verbose console logging)
+        self.dashboard: Optional[Any] = None
+        if HunterDashboard is not None:
+            try:
+                self.dashboard = HunterDashboard()
+            except Exception:
+                pass
+        
         self.logger.info("Hunter Orchestrator initialized successfully")
 
     async def scrape_configs(self) -> List[str]:
         """Scrape proxy configurations from ALL sources in parallel.
         
-        Optimized for speed:
-        - Telegram authentication runs in parallel with config fetching
-        - All sources (Telegram, GitHub, anti-censorship, Iran priority) fetch simultaneously
-        - Non-blocking operations for maximum throughput
+        Memory-aware: caps per-source config count based on adaptive max_total
+        so we never accumulate 80K+ configs in RAM at 95% memory.
         """
+        import gc as _gc
         configs = []
         proxy_ports = [self.config.get("multiproxy_port", 10808)]
+        gemini_port = self.config.get("gemini_port", 10809)
+        if gemini_port not in proxy_ports and self.gemini_balancer:
+            proxy_ports.append(gemini_port)
         
-        # Create tasks for parallel execution
+        # Memory-aware caps: each source gets a share of max_total
+        max_total = self.config.get("max_total", 1000)
+        per_source_cap = max(100, max_total // 3)  # e.g. 80→26, 400→133, 1000→333
+        
+        # Build source list for progress tracker
+        source_names = []
         tasks = []
+        task_names = []
         
-        # 1. Telegram configs - run in parallel with other sources
+        # 1. Telegram configs — reduce limit under memory pressure
         telegram_channels = self.config.get("targets", [])
         if telegram_channels and self.telegram_scraper is not None:
             telegram_limit = self.config.get("telegram_limit", 50)
+            if max_total <= 150:
+                telegram_limit = min(telegram_limit, 10)
+            elif max_total <= 400:
+                telegram_limit = min(telegram_limit, 25)
+            source_names.append("Telegram")
+            task_names.append("Telegram")
             
-            async def fetch_telegram():
+            async def fetch_telegram(_lim=telegram_limit):
                 try:
-                    telegram_configs = await self.telegram_scraper.scrape_configs(telegram_channels, limit=telegram_limit)
-                    self.logger.info(f"Telegram sources: {len(telegram_configs)} configs")
+                    telegram_configs = await asyncio.wait_for(
+                        self.telegram_scraper.scrape_configs(telegram_channels, limit=_lim),
+                        timeout=120
+                    )
                     if isinstance(telegram_configs, set):
-                        return list(telegram_configs)
-                    return telegram_configs if isinstance(telegram_configs, list) else []
+                        return list(telegram_configs)[:per_source_cap]
+                    return (telegram_configs if isinstance(telegram_configs, list) else [])[:per_source_cap]
+                except asyncio.TimeoutError:
+                    self.logger.warning("Telegram scrape timed out after 120s")
+                    return []
                 except Exception as e:
                     self.logger.info(f"Telegram scrape skipped: {e}")
                     return []
             
             tasks.append(fetch_telegram())
         
-        # 2. GitHub configs - parallel fetch
+        # 2-4. HTTP config fetches — pass per_source_cap as max_configs
         if self.config_fetcher is not None:
-            async def fetch_github():
-                try:
-                    github_configs = self.config_fetcher.fetch_github_configs(proxy_ports)
-                    self.logger.info(f"GitHub sources: {len(github_configs)} configs")
-                    return list(github_configs)
-                except Exception as e:
-                    self.logger.info(f"GitHub fetch skipped: {e}")
-                    return []
+            loop = asyncio.get_running_loop()
             
-            tasks.append(fetch_github())
-            
-            # 3. Anti-censorship configs - parallel fetch
-            async def fetch_anti_censorship():
-                try:
-                    anti_censorship = self.config_fetcher.fetch_anti_censorship_configs(proxy_ports)
-                    self.logger.info(f"Anti-censorship sources: {len(anti_censorship)} configs")
-                    return list(anti_censorship)
-                except Exception as e:
-                    self.logger.info(f"Anti-censorship fetch skipped: {e}")
-                    return []
-            
-            tasks.append(fetch_anti_censorship())
-            
-            # 4. Iran priority configs - parallel fetch
-            async def fetch_iran_priority():
-                try:
-                    iran_priority = self.config_fetcher.fetch_iran_priority_configs(proxy_ports)
-                    self.logger.info(f"Iran priority sources: {len(iran_priority)} configs")
-                    return list(iran_priority)
-                except Exception as e:
-                    self.logger.info(f"Iran priority fetch skipped: {e}")
-                    return []
-            
-            tasks.append(fetch_iran_priority())
+            for name, method in [
+                ("GitHub", self.config_fetcher.fetch_github_configs),
+                ("AntiCensor", self.config_fetcher.fetch_anti_censorship_configs),
+                ("IranPriority", self.config_fetcher.fetch_iran_priority_configs),
+            ]:
+                source_names.append(name)
+                task_names.append(name)
+                
+                async def _fetch(m=method, n=name, cap=per_source_cap):
+                    try:
+                        result = await loop.run_in_executor(
+                            None, lambda: m(proxy_ports, max_configs=cap)
+                        )
+                        return list(result)[:cap]
+                    except Exception as e:
+                        self.logger.info(f"{n} fetch skipped: {e}")
+                        return []
+                
+                tasks.append(_fetch())
         
-        # Execute all tasks in parallel
-        self.logger.info(f"Fetching from {len(tasks)} sources in parallel...")
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        # Add cache sources to progress
+        source_names.extend(["Cache", "BalancerCache"])
         
-        # Collect all configs with detailed logging
-        for idx, result in enumerate(results):
-            if isinstance(result, list):
-                self.logger.debug(f"Task {idx} returned {len(result)} configs")
-                configs.extend(result)
-            elif isinstance(result, Exception):
-                self.logger.warning(f"Task {idx} failed: {result}")
+        # Execute all online tasks in parallel with progress tracking
+        if self.dashboard:
+            self.dashboard.update(phase="scraping")
+            for sn in source_names:
+                self.dashboard.source_update(sn, status="waiting")
+        with self.ui.scrape_progress(source_names) as tracker:
+            self.ui.status.update(phase="scraping")
+            
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Collect results and update progress per source
+            for idx, result in enumerate(results):
+                name = task_names[idx] if idx < len(task_names) else f"Source-{idx}"
+                if isinstance(result, list):
+                    configs.extend(result)
+                    tracker.source_done(name, count=len(result))
+                    if self.dashboard:
+                        self.dashboard.source_update(name, status="done", count=len(result))
+                elif isinstance(result, Exception):
+                    tracker.source_failed(name, reason=str(result)[:40])
+                    if self.dashboard:
+                        self.dashboard.source_update(name, status="failed")
+                else:
+                    tracker.source_failed(name, reason="unexpected")
+                    if self.dashboard:
+                        self.dashboard.source_update(name, status="failed")
+            
+            # Aggressive GC after fetching if memory is critical
+            try:
+                import psutil as _ps
+                if _ps.virtual_memory().percent >= 90:
+                    _gc.collect()
+                    self.logger.info("[Memory] GC after scrape phase")
+            except Exception:
+                pass
+            
+            # 5. Load cached working configs
+            cache_limit = min(500, per_source_cap)
+            cache_configs = []
+            if self.cache is not None:
+                try:
+                    cached = self.cache.load_cached_configs(max_count=cache_limit, working_only=True)
+                    if cached:
+                        cache_configs = list(cached) if isinstance(cached, set) else cached
+                        tracker.source_done("Cache", count=len(cache_configs))
+                        if self.dashboard:
+                            self.dashboard.source_update("Cache", status="done", count=len(cache_configs))
+                    else:
+                        tracker.source_done("Cache", count=0)
+                        if self.dashboard:
+                            self.dashboard.source_update("Cache", status="done", count=0)
+                except Exception as e:
+                    tracker.source_failed("Cache", reason=str(e)[:30])
+                    if self.dashboard:
+                        self.dashboard.source_update("Cache", status="failed")
             else:
-                self.logger.warning(f"Task {idx} returned unexpected type: {type(result)}")
-        
+                tracker.source_done("Cache", count=0)
+                if self.dashboard:
+                    self.dashboard.source_update("Cache", status="done", count=0)
+
+            # 6. Load balancer cache as last-resort source
+            balancer_uris = []
+            try:
+                bal_cache = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
+                balancer_uris = [uri for uri, _ in bal_cache]
+                tracker.source_done("BalancerCache", count=len(balancer_uris))
+                if self.dashboard:
+                    self.dashboard.source_update("BalancerCache", status="done", count=len(balancer_uris))
+            except Exception:
+                tracker.source_done("BalancerCache", count=0)
+                if self.dashboard:
+                    self.dashboard.source_update("BalancerCache", status="done", count=0)
+
         self.logger.info(f"Total raw configs after parallel fetch: {len(configs)}")
 
-        # 5. Load cached working configs if total is still low
-        if len(configs) < 500 and self.cache is not None:
-            try:
-                cached = self.cache.load_cached_configs(max_count=500, working_only=True)
-                if cached:
-                    configs.extend(cached)
-                    self.logger.info(f"Cached working configs: {len(cached)} added")
-            except Exception as e:
-                self.logger.info(f"Cache load skipped: {e}")
+        if len(configs) == 0:
+            self._consecutive_scrape_failures += 1
+            self.logger.warning(
+                f"[Resilience] All online sources failed (streak: {self._consecutive_scrape_failures}). "
+                f"Using cached configs as primary source."
+            )
+            configs.extend(cache_configs)
+            configs.extend(balancer_uris)
+        else:
+            self._consecutive_scrape_failures = 0
+            if len(configs) < 500:
+                configs.extend(cache_configs)
 
+        # Final cap: never return more than max_total * 2 (dedup happens later)
+        if len(configs) > max_total * 2:
+            import random as _rnd
+            _rnd.shuffle(configs)
+            configs = configs[:max_total * 2]
+            self.logger.info(f"Capped raw configs to {len(configs)} (max_total={max_total})")
+
+        self.logger.info(f"Total configs after cache merge: {len(configs)}")
         return configs
 
     def validate_configs(self, configs: Iterable[str], max_workers: int = 50) -> List[HunterBenchResult]:
@@ -410,15 +509,42 @@ class HunterOrchestrator:
         except Exception as e:
             self.logger.info(f"Thread pool start issue: {e}")
         
-        # Parse configurations for batch benchmarking
+        # Parse configurations with progress
         parsed_configs = []
-        for uri in limited_configs:
-            try:
-                parsed = self.parser.parse(uri)
-                if parsed:
-                    parsed_configs.append(parsed)
-            except Exception as e:
-                self.logger.debug(f"Failed to parse {uri}: {e}")
+        with self.ui.task_progress(len(limited_configs), f"Parsing {len(limited_configs)} configs") as pbar:
+            for uri in limited_configs:
+                try:
+                    parsed = self.parser.parse(uri)
+                    if parsed:
+                        parsed_configs.append(parsed)
+                except Exception as e:
+                    self.logger.debug(f"Failed to parse {uri}: {e}")
+                pbar.advance(1)
+        
+        # Pre-filter: remove configs that the balancer will reject (e.g. legacy SS ciphers)
+        # This avoids wasting benchmark time on configs XRay 25.x can't use in balancer mode
+        from hunter.proxy.load_balancer import XRAY_SUPPORTED_SS_CIPHERS
+        pre_filter_count = len(parsed_configs)
+        filtered_parsed = []
+        for parsed in parsed_configs:
+            proto = str(parsed.outbound.get("protocol", "") or "").lower()
+            if proto == "shadowsocks":
+                servers = parsed.outbound.get("settings", {}).get("servers", [])
+                dominated_by_legacy = False
+                for srv in servers:
+                    method = str(srv.get("method", "") or "").lower()
+                    if method and method not in XRAY_SUPPORTED_SS_CIPHERS:
+                        dominated_by_legacy = True
+                        break
+                if dominated_by_legacy:
+                    continue
+            filtered_parsed.append(parsed)
+        parsed_configs = filtered_parsed
+        if pre_filter_count != len(parsed_configs):
+            self.logger.info(
+                f"Pre-filter: {pre_filter_count} -> {len(parsed_configs)} "
+                f"(removed {pre_filter_count - len(parsed_configs)} unsupported SS ciphers)"
+            )
         
         # Prepare configs for batch benchmarking
         benchmark_configs = []
@@ -428,11 +554,51 @@ class HunterOrchestrator:
             socks_port = base_port + i
             benchmark_configs.append((parsed, socks_port))
         
+        # Attach UI callback to benchmarker for live progress updates
+        self.ui.status.update(phase="validating")
+        if self.dashboard:
+            self.dashboard.update(phase="validating")
+            self.dashboard.reset_bench(len(benchmark_configs))
+        self.benchmarker._ui_callback = None
+        bench_tracker = None
+        try:
+            bench_ctx = self.ui.benchmark_progress(len(benchmark_configs))
+            bench_tracker = bench_ctx.__enter__()
+            
+            def _on_result(parsed_cfg, latency, tier_str):
+                """Called by benchmarker for each completed config."""
+                name = getattr(parsed_cfg, 'ps', '') or ''
+                if latency:
+                    bench_tracker.tested(
+                        success=True,
+                        name=name,
+                        latency=latency,
+                        tier=tier_str
+                    )
+                    if self.dashboard:
+                        self.dashboard.bench_result(True, name=name, latency=latency, tier=tier_str)
+                else:
+                    bench_tracker.tested(success=False)
+                    if self.dashboard:
+                        self.dashboard.bench_result(False)
+            
+            self.benchmarker._ui_callback = _on_result
+        except Exception:
+            pass
+        
         # Use optimized batch benchmarking with adaptive thread management
-        self.logger.info(f"Starting batch benchmark of {len(benchmark_configs)} configs with adaptive thread pool")
+        self.logger.info(f"Starting batch benchmark of {len(benchmark_configs)} configs")
         results = self.benchmarker.benchmark_configs_batch(
             benchmark_configs, test_url, timeout
         )
+        
+        # Close progress bar
+        try:
+            if bench_tracker is not None:
+                bench_ctx.__exit__(None, None, None)
+            self.benchmarker._ui_callback = None
+        except Exception:
+            pass
         
         # Get performance metrics
         try:
@@ -483,21 +649,19 @@ class HunterOrchestrator:
         }
 
     async def update_balancer(self, configs: List[Tuple[str, float]]):
-        """Update load balancer with new configurations."""
-        # Apply stealth obfuscation to configs
-        obfuscated_configs = []
-        for uri, latency in configs:
-            protocol = uri.split('://')[0] if '://' in uri else 'unknown'
-            obfuscated_uri = self.stealth_engine.get_obfuscated_uri(uri, protocol)
-            obfuscated_configs.append((obfuscated_uri, latency))
+        """Update load balancer with new configurations.
         
-        self.balancer.update_available_configs(obfuscated_configs)
+        Note: DO NOT obfuscate URIs here - the balancer's _create_balanced_config
+        already applies outbound-level obfuscation. URI-level obfuscation corrupts
+        the URIs making them unparseable by the balancer.
+        """
+        self.balancer.update_available_configs(configs, trusted=True)
 
     async def update_gemini_balancer(self, configs: List[Tuple[str, float]]):
         """Update Gemini balancer with new configurations."""
         if not self.gemini_balancer:
             return
-        self.gemini_balancer.update_available_configs(configs)
+        self.gemini_balancer.update_available_configs(configs, trusted=True)
 
     def _balancer_cache_path(self, name: str = "HUNTER_balancer_cache.json") -> str:
         try:
@@ -513,9 +677,24 @@ class HunterOrchestrator:
     def _load_balancer_cache(self, name: str = "HUNTER_balancer_cache.json") -> List[Tuple[str, float]]:
         path = self._balancer_cache_path(name=name)
         payload = load_json(path, default={})
-        items = payload.get("configs") if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return []
+        items = payload.get("configs")
         if not isinstance(items, list):
             return []
+        # Age-awareness: warn if cache is stale but still use it
+        saved_at = payload.get("saved_at", 0)
+        if saved_at:
+            try:
+                age_hours = (time.time() - float(saved_at)) / 3600
+                if age_hours > 24:
+                    self.logger.warning(f"[Cache] {name} is {age_hours:.0f}h old - very stale, will still try")
+                elif age_hours > 6:
+                    self.logger.info(f"[Cache] {name} is {age_hours:.1f}h old - somewhat stale")
+                else:
+                    self.logger.info(f"[Cache] {name} is {age_hours:.1f}h old - fresh")
+            except Exception:
+                pass
         seed: List[Tuple[str, float]] = []
         for item in items:
             try:
@@ -525,6 +704,31 @@ class HunterOrchestrator:
             except Exception:
                 continue
         return seed
+
+    def _sync_dashboard_balancer(self):
+        """Push current balancer status to the dashboard."""
+        if not self.dashboard:
+            return
+        try:
+            if self.balancer:
+                st = self.balancer.get_status()
+                self.dashboard.update(
+                    bal_main_port=self.balancer.port,
+                    bal_main_backends=st.get("backends", 0),
+                    bal_main_status="OK" if st.get("running") else "down",
+                )
+        except Exception:
+            pass
+        try:
+            if self.gemini_balancer:
+                gs = self.gemini_balancer.get_status()
+                self.dashboard.update(
+                    bal_gemini_port=self.gemini_balancer.port,
+                    bal_gemini_backends=gs.get("backends", 0),
+                    bal_gemini_status="OK" if gs.get("running") else "down",
+                )
+        except Exception:
+            pass
 
     def _save_balancer_cache(self, configs: List[Tuple[str, float]], name: str = "HUNTER_balancer_cache.json") -> None:
         path = self._balancer_cache_path(name=name)
@@ -559,6 +763,11 @@ class HunterOrchestrator:
         
         self.cycle_count += 1
         cycle_start = time.time()
+        self.ui.status.update(cycle=self.cycle_count, phase="starting")
+        if self.dashboard:
+            self.dashboard.update(cycle=self.cycle_count, phase="starting")
+            self.dashboard.reset_sources()
+            self.dashboard.reset_bench(0)
 
         self.logger.info(f"Starting hunter cycle #{self.cycle_count}")
         
@@ -571,57 +780,68 @@ class HunterOrchestrator:
             mem_gb_used = mem.used / (1024**3)
             mem_gb_total = mem.total / (1024**3)
             
+            self.ui.status.update(memory_pct=mem_percent)
+            if self.dashboard:
+                self.dashboard.update(
+                    memory_pct=mem_percent,
+                    memory_used_gb=mem_gb_used,
+                    memory_total_gb=mem_gb_total,
+                )
             self.logger.info(
                 f"Memory status: {mem_percent:.1f}% used "
                 f"({mem_gb_used:.1f}GB / {mem_gb_total:.1f}GB)"
             )
             
-            # Aggressive cleanup if memory is high (silent)
-            if mem_percent >= 75:
-                gc.collect()
-                import time as time_module
-                time_module.sleep(0.5)
-                
-                mem_after = psutil.virtual_memory()
-                mem_percent = mem_after.percent
+            # Quick cleanup if memory is high (non-blocking)
+            if mem_percent >= 85:
+                gc.collect(0)
+                gc.collect(1)
+                mem_percent = psutil.virtual_memory().percent
             
-            # Adaptive configuration based on memory pressure (7 tiers - silent)
+            # Auto-tune based on CPU cores - XRay test processes are I/O bound, not RAM bound
+            cpu_cores = os.cpu_count() or 4
+            base_workers = max(4, cpu_cores)  # At least 4, scale with cores
+            
+            # Adaptive configuration based on memory pressure
+            # Workers are I/O bound (network tests), so we can run more than cores
             if mem_percent >= 95:
-                adaptive_max_total = 50
-                adaptive_max_workers = 2
-                adaptive_scan_limit = 10
+                adaptive_max_total = 80
+                adaptive_max_workers = max(4, base_workers // 2)
+                adaptive_scan_limit = 15
                 mode = "ULTRA-MINIMAL"
             elif mem_percent >= 90:
-                adaptive_max_total = 100
-                adaptive_max_workers = 3
-                adaptive_scan_limit = 15
+                adaptive_max_total = 150
+                adaptive_max_workers = max(6, base_workers)
+                adaptive_scan_limit = 25
                 mode = "MINIMAL"
             elif mem_percent >= 85:
-                adaptive_max_total = 150
-                adaptive_max_workers = 4
-                adaptive_scan_limit = 20
+                adaptive_max_total = 250
+                adaptive_max_workers = max(8, base_workers)
+                adaptive_scan_limit = 30
                 mode = "REDUCED"
             elif mem_percent >= 80:
-                adaptive_max_total = 200
-                adaptive_max_workers = 5
-                adaptive_scan_limit = 25
+                adaptive_max_total = 400
+                adaptive_max_workers = max(8, base_workers + 2)
+                adaptive_scan_limit = 35
                 mode = "CONSERVATIVE"
             elif mem_percent >= 70:
-                adaptive_max_total = 400
-                adaptive_max_workers = 8
-                adaptive_scan_limit = 30
+                adaptive_max_total = 600
+                adaptive_max_workers = max(10, base_workers + 4)
+                adaptive_scan_limit = 40
                 mode = "SCALED"
             elif mem_percent >= 60:
-                adaptive_max_total = 600
-                adaptive_max_workers = 10
-                adaptive_scan_limit = 40
+                adaptive_max_total = 800
+                adaptive_max_workers = max(12, base_workers * 2)
+                adaptive_scan_limit = 50
                 mode = "MODERATE"
             else:
-                adaptive_max_total = self.config.get("max_total", 800)
-                adaptive_max_workers = self.config.get("max_workers", 10)
+                adaptive_max_total = self.config.get("max_total", 1000)
+                adaptive_max_workers = max(12, base_workers * 2)
                 adaptive_scan_limit = self.config.get("scan_limit", 50)
                 mode = "NORMAL"
             
+            if self.dashboard:
+                self.dashboard.update(mode=mode)
             self.logger.info(
                 f"Cycle mode: {mode} (memory: {mem_percent:.1f}%, "
                 f"configs: {adaptive_max_total}, workers: {adaptive_max_workers})"
@@ -641,9 +861,19 @@ class HunterOrchestrator:
             original_max_workers = None
             original_scan_limit = None
 
+        # Reset HTTP session to free stale connections from previous cycle
+        if self.http_manager is not None:
+            try:
+                self.http_manager.reset_session()
+            except Exception:
+                pass
+
         # Scrape configs
         raw_configs = await self.scrape_configs()
         self.logger.info(f"Total raw configs: {len(raw_configs)}")
+
+        # GC after scrape phase - critical for high memory situations
+        gc.collect()
 
         # Cache new configs
         if self.cache is not None:
@@ -656,6 +886,10 @@ class HunterOrchestrator:
         validated = self.validate_configs(raw_configs)
         self.logger.info(f"Validated configs: {len(validated)}")
 
+        # Free raw configs to release memory immediately
+        del raw_configs
+        gc.collect()
+
         # Save working configs to cache for future cycles
         if validated and self.cache is not None:
             try:
@@ -664,34 +898,110 @@ class HunterOrchestrator:
             except Exception as e:
                 self.logger.info(f"Cache save skipped: {e}")
 
+        # Incremental balancer feeding: feed balancer NOW with gold/silver only
+        # Dead-tier configs are unreliable and cause XRay startup failures (code 23)
+        if validated and self.balancer is not None:
+            try:
+                usable = [(r.uri, r.latency_ms) for r in validated if r.tier in ("gold", "silver")]
+                if usable:
+                    early_configs = usable[:20]
+                    self.balancer.update_available_configs(early_configs, trusted=True)
+                    self.logger.info(f"[Incremental] Fed balancer with {len(early_configs)} gold/silver configs early")
+            except Exception:
+                pass
+
+        # Re-test cached configs every 3 cycles — skip when memory is critical
+        mem_now = psutil.virtual_memory().percent if psutil else 50
+        if self.cycle_count % 3 == 0 and mem_now < 90:
+            gold_file = str(self.config.get("gold_file", "") or "")
+            silver_file = str(self.config.get("silver_file", "") or "")
+            cached_uris = set()
+            for fpath in [gold_file, silver_file]:
+                if fpath:
+                    try:
+                        cached_uris.update(read_lines(fpath))
+                    except Exception:
+                        pass
+            # Also add balancer cache URIs
+            try:
+                bal_cache = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
+                cached_uris.update(uri for uri, _ in bal_cache)
+            except Exception:
+                pass
+            cached_uris.discard("")
+            # Remove already-validated URIs
+            validated_uris = {r.uri for r in validated}
+            retest_uris = [u for u in cached_uris if u not in validated_uris][:100]
+            if retest_uris:
+                self.logger.info(f"[Retest] Re-testing {len(retest_uris)} cached configs from previous cycles...")
+                retest_results = self.validate_configs(retest_uris)
+                if retest_results:
+                    self.logger.info(f"[Retest] {len(retest_results)} cached configs still working")
+                    validated.extend(retest_results)
+                    validated.sort(key=lambda r: r.latency_ms)
+                else:
+                    self.logger.warning("[Retest] No cached configs passed retest")
+
         # Tier configs
         tiered = self.tier_configs(validated)
         gold_configs = tiered["gold"]
         silver_configs = tiered["silver"]
 
         self.logger.info(f"Gold tier: {len(gold_configs)}, Silver tier: {len(silver_configs)}")
+        self.ui.status.update(
+            gold=len(gold_configs), silver=len(silver_configs),
+            phase="balancing"
+        )
+        if self.dashboard:
+            self.dashboard.update(
+                gold=len(gold_configs), silver=len(silver_configs),
+                phase="balancing"
+            )
 
         # Update balancer
         all_configs = [(r.uri, r.latency_ms) for r in gold_configs + silver_configs]
+        self._last_validated_count = len(all_configs)
+        if all_configs:
+            self._last_good_configs = all_configs[:200]  # Keep best 200 for resilience
+        
         if self.balancer is not None:
-            try:
-                await self.update_balancer(all_configs)
-            except Exception as e:
-                self.logger.info(f"Balancer update skipped: {e}")
+            if all_configs:
+                try:
+                    await self.update_balancer(all_configs)
+                except Exception as e:
+                    self.logger.info(f"Balancer update skipped: {e}")
+            elif self._last_good_configs:
+                # No new configs validated - re-feed last known good configs
+                self.logger.warning("[Resilience] No new configs, re-feeding last known good configs to balancer")
+                try:
+                    await self.update_balancer(self._last_good_configs)
+                except Exception as e:
+                    self.logger.info(f"Balancer resilience update skipped: {e}")
+        self._sync_dashboard_balancer()
         try:
-            self._save_balancer_cache(all_configs, name="HUNTER_balancer_cache.json")
+            if all_configs:
+                self._save_balancer_cache(all_configs, name="HUNTER_balancer_cache.json")
         except Exception:
             pass
 
+        # Feed gemini balancer: prefer name-matched, but fall back to ALL configs
         gemini_configs: List[Tuple[str, float]] = []
         if self.gemini_balancer:
+            # First try name-matched configs
             for r in gold_configs + silver_configs:
                 ps = (r.ps or "").lower()
                 if "gemini" in ps or "gmn" in ps:
                     gemini_configs.append((r.uri, r.latency_ms))
+            # If no name-matched, use ALL validated configs (different subset)
+            if not gemini_configs and all_configs:
+                # Use second half of configs for diversity (balancer uses first half via leastPing)
+                half = max(1, len(all_configs) // 2)
+                gemini_configs = all_configs[half:] if len(all_configs) > 3 else list(all_configs)
+                self.logger.info(f"[Gemini] No name-matched configs, using {len(gemini_configs)} from validated pool")
             try:
-                await self.update_gemini_balancer(gemini_configs)
-                self._save_balancer_cache(gemini_configs, name="HUNTER_gemini_balancer_cache.json")
+                if gemini_configs:
+                    await self.update_gemini_balancer(gemini_configs)
+                    self._save_balancer_cache(gemini_configs, name="HUNTER_gemini_balancer_cache.json")
             except Exception:
                 pass
 
@@ -747,31 +1057,95 @@ class HunterOrchestrator:
             except Exception:
                 pass
 
+    def _append_unique_lines(self, filepath: str, new_lines: List[str]) -> int:
+        """Append unique lines to file (like old_hunter.py). Returns count of new lines added."""
+        existing = set()
+        try:
+            lines = read_lines(filepath)
+            existing = set(lines)
+        except Exception:
+            pass
+        added = 0
+        try:
+            with open(filepath, "a", encoding="utf-8") as f:
+                for line in new_lines:
+                    if line and line not in existing:
+                        f.write(line + "\n")
+                        existing.add(line)
+                        added += 1
+        except Exception:
+            pass
+        return added
+
     def _save_to_files(self, gold: List[HunterBenchResult], silver: List[HunterBenchResult]):
-        """Save tiered configs to files."""
+        """Save tiered configs to files (append unique, building pool across cycles)."""
         gold_file = str(self.config.get("gold_file", "") or "")
         silver_file = str(self.config.get("silver_file", "") or "")
         try:
             if gold_file:
-                write_lines(gold_file, [r.uri for r in gold])
+                added = self._append_unique_lines(gold_file, [r.uri for r in gold])
+                if added:
+                    self.logger.info(f"Gold file: {added} new configs appended")
         except Exception:
             pass
         try:
             if silver_file:
-                write_lines(silver_file, [r.uri for r in silver])
+                added = self._append_unique_lines(silver_file, [r.uri for r in silver])
+                if added:
+                    self.logger.info(f"Silver file: {added} new configs appended")
         except Exception:
             pass
 
-    async def run_autonomous_loop(self):
-        """Main autonomous loop."""
-        sleep_seconds = self.config.get("sleep_seconds", 300)
+    def _compute_adaptive_sleep(self) -> int:
+        """Compute adaptive sleep based on cycle results.
+        
+        - Few/no validated configs → retry sooner (120s)
+        - Consecutive scrape failures → back off gradually (up to 600s)
+        - Good results → normal interval
+        """
+        base_sleep = self.config.get("sleep_seconds", 300)
+        
+        if self._consecutive_scrape_failures >= 3:
+            # Network is down, back off to avoid hammering
+            sleep = min(base_sleep * 2, 600)
+            self.logger.info(f"[Adaptive] Network issues (failures={self._consecutive_scrape_failures}), sleep={sleep}s")
+            return sleep
+        
+        if self._last_validated_count == 0:
+            # No configs validated - retry sooner
+            sleep = max(120, base_sleep // 3)
+            self.logger.info(f"[Adaptive] No validated configs, retry sooner: sleep={sleep}s")
+            return sleep
+        
+        if self._last_validated_count < 5:
+            # Very few configs - retry moderately soon
+            sleep = max(150, base_sleep // 2)
+            self.logger.info(f"[Adaptive] Few configs ({self._last_validated_count}), sleep={sleep}s")
+            return sleep
+        
+        self.logger.info(f"[Adaptive] Good cycle ({self._last_validated_count} configs), sleep={base_sleep}s")
+        return base_sleep
 
+    async def run_autonomous_loop(self):
+        """Main autonomous loop with adaptive sleep."""
         # Initial cycle
         await self.run_cycle()
 
         while True:
             try:
-                await asyncio.sleep(sleep_seconds)
+                sleep_seconds = self._compute_adaptive_sleep()
+                self.ui.status.update(phase="sleeping", next_in=sleep_seconds)
+                if self.dashboard:
+                    self.dashboard.update(phase="sleeping", next_in=sleep_seconds)
+                
+                # Countdown sleep so status bar shows remaining time
+                for remaining in range(sleep_seconds, 0, -5):
+                    self.ui.status.update(next_in=remaining)
+                    if self.dashboard:
+                        self.dashboard.update(next_in=remaining)
+                        if remaining % 30 == 0:
+                            self._sync_dashboard_balancer()
+                    await asyncio.sleep(min(5, remaining))
 
                 # Check if enough time has passed
                 if time.time() - self.last_cycle >= sleep_seconds:
@@ -785,23 +1159,52 @@ class HunterOrchestrator:
                 break
             except Exception as e:
                 self.logger.error(f"Error in autonomous loop: {e}")
-                await asyncio.sleep(60)  # Back off on error
+                backoff = min(60 * (self._consecutive_scrape_failures + 1), 300)
+                self.ui.status.update(phase="sleeping", next_in=backoff)
+                if self.dashboard:
+                    self.dashboard.update(phase="sleeping", next_in=backoff)
+                await asyncio.sleep(backoff)
 
     async def start(self):
         """Start the orchestrator."""
+        # Start real-time dashboard (replaces old status bar + verbose console logs)
+        if self.dashboard is not None:
+            self.dashboard.start()
+            self.ui.dashboard_active = True  # suppress old progress bars
+            # Attach dashboard log handler to root logger so events panel gets all logs
+            root = logging.getLogger()
+            root.addHandler(self.dashboard.log_handler)
+            # Remove console StreamHandlers to stop scrolling log spam
+            for h in list(root.handlers):
+                if isinstance(h, logging.StreamHandler) and not isinstance(h, logging.FileHandler):
+                    if h.stream in (sys.stderr, sys.stdout):
+                        root.removeHandler(h)
+        else:
+            # Fallback to old status bar if dashboard unavailable
+            self.ui.status.start()
+        
         # Start balancer
-        seed = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
-        self.balancer.start(initial_configs=seed if seed else None)
+        if self.balancer is not None:
+            seed = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
+            self.balancer.start(initial_configs=seed if seed else None)
+            self.ui.status.update(balancer=len(seed) if seed else 0)
+            self._sync_dashboard_balancer()
 
         if self.gemini_balancer:
             gemini_seed = self._load_balancer_cache(name="HUNTER_gemini_balancer_cache.json")
             self.gemini_balancer.start(initial_configs=gemini_seed if gemini_seed else None)
+            self._sync_dashboard_balancer()
 
         # Start autonomous loop
         await self.run_autonomous_loop()
 
     async def stop(self):
         """Stop the orchestrator."""
+        # Stop dashboard / status bar
+        if self.dashboard:
+            self.dashboard.stop()
+        self.ui.status.stop()
+        
         # Stop DPI evasion orchestrator
         if self.dpi_evasion:
             try:
@@ -811,11 +1214,14 @@ class HunterOrchestrator:
                 pass
         
         # Stop stealth engine
-        self.stealth_engine.stop()
-        self.balancer.stop()
+        if self.stealth_engine:
+            self.stealth_engine.stop()
+        if self.balancer:
+            self.balancer.stop()
         if self.gemini_balancer:
             self.gemini_balancer.stop()
-        await self.telegram_scraper.disconnect()
+        if self.telegram_scraper:
+            await self.telegram_scraper.disconnect()
 
     def get_stealth_metrics(self) -> Dict[str, Any]:
         """Get stealth obfuscation metrics."""

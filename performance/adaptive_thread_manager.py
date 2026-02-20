@@ -71,15 +71,16 @@ class AdaptiveThreadPool:
     def __init__(self, 
                  min_threads: int = 4,
                  max_threads: Optional[int] = None,
-                 target_cpu_utilization: float = 0.8,
-                 target_queue_size: int = 100,
+                 target_cpu_utilization: float = 0.85,
+                 target_queue_size: int = 200,
                  enable_work_stealing: bool = True,
                  enable_cpu_affinity: bool = False):
         self.logger = logging.getLogger(__name__)
         
-        # Thread pool configuration
-        self.min_threads = min_threads
-        self.max_threads = max_threads or min(multiprocessing.cpu_count() * 2, 32)
+        # Thread pool configuration - I/O bound tasks (network tests) benefit from more threads
+        cpu_count = multiprocessing.cpu_count() or 4
+        self.max_threads = max_threads or min(cpu_count * 4, 48)
+        self.min_threads = min(max(min_threads, cpu_count), self.max_threads)
         self.target_cpu_utilization = target_cpu_utilization
         self.target_queue_size = target_queue_size
         
@@ -103,11 +104,11 @@ class AdaptiveThreadPool:
         self.running = False
         self.shutdown_event = threading.Event()
         
-        # Performance optimization
-        self.memory_pressure_threshold = 0.85  # 85% memory usage
-        self.cpu_pressure_threshold = 0.9    # 90% CPU usage
+        # Performance optimization - XRay tests are I/O bound, tolerate higher memory
+        self.memory_pressure_threshold = 0.95  # 95% memory usage
+        self.cpu_pressure_threshold = 0.95     # 95% CPU usage
         
-        self.logger.info(f"AdaptiveThreadPool initialized: min={min_threads}, max={self.max_threads}")
+        self.logger.info(f"AdaptiveThreadPool initialized: min={self.min_threads}, max={self.max_threads}, cpu_cores={cpu_count}")
     
     def start(self):
         """Start the thread pool."""
@@ -487,14 +488,13 @@ class AdaptiveThreadPool:
         try:
             memory_percent = psutil.virtual_memory().percent
             
-            # More aggressive memory management
-            if memory_percent > 85:
-                self.logger.debug(f"Memory cleanup at {memory_percent:.1f}%")
-                
-                # Force garbage collection multiple times
+            # Light memory management - XRay tests are I/O bound, not RAM bound
+            if memory_percent > 90:
+                # Force garbage collection - only collect generation 0/1 to avoid
+                # destroying pending asyncio coroutines (Telethon) in generation 2
                 import gc
-                gc.collect()
-                gc.collect()  # Second pass for generational GC
+                gc.collect(0)
+                gc.collect(1)
                 
                 # Clear thread info for finished threads
                 finished_threads = [
@@ -504,19 +504,11 @@ class AdaptiveThreadPool:
                 for thread_id in finished_threads:
                     del self.thread_info[thread_id]
                 
-                # Clear any cached results in the queue
-                if hasattr(self, 'result_queue'):
-                    while not self.result_queue.empty():
-                        try:
-                            self.result_queue.get_nowait()
-                        except:
-                            break
-                
-                if memory_percent > 95:
+                if memory_percent > 98:
                     self.logger.debug(f"Reducing threads at {memory_percent:.1f}% memory")
-                    # Emergency: reduce thread count
+                    # Emergency only at 98%+: reduce by 1/4 not 1/2
                     if len(self.threads) > self.min_threads:
-                        self._remove_threads(max(1, len(self.threads) // 2))
+                        self._remove_threads(max(1, len(self.threads) // 4))
             
         except Exception as e:
             self.logger.debug(f"Memory optimization error: {e}")

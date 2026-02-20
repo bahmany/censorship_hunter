@@ -122,6 +122,40 @@ class ProxyTester:
             pass
         return None
     
+
+    def test_download_speed(self, socks_port: int, timeout_seconds: int = 8) -> float:
+        """Test download speed through proxy. Returns KB/s or 0 if failed."""
+        curl_cmd = "curl.exe" if sys.platform == "win32" else "curl"
+        test_urls = [
+            "https://cp.cloudflare.com/",
+            "https://www.google.com/generate_204",
+        ]
+        for url in test_urls:
+            try:
+                result = subprocess.run(
+                    [
+                        curl_cmd,
+                        "-x", f"socks5h://127.0.0.1:{socks_port}",
+                        "-s", "-o", "nul" if sys.platform == "win32" else "/dev/null",
+                        "-w", "%{size_download} %{time_total}",
+                        "-m", str(timeout_seconds),
+                        "--connect-timeout", "4",
+                        "-k",
+                        url
+                    ],
+                    capture_output=True, text=True, timeout=timeout_seconds + 3
+                )
+                if result.returncode == 0 and result.stdout.strip():
+                    parts = result.stdout.strip().split()
+                    if len(parts) >= 2:
+                        size_bytes = float(parts[0])
+                        time_total = float(parts[1])
+                        if time_total > 0 and size_bytes > 0:
+                            return (size_bytes / 1024.0) / time_total
+            except Exception:
+                continue
+        return 0.0
+
     def check_xray_path(self, xray_path: str) -> bool:
         """Check if xray executable is valid."""
         resolved = resolve_executable_path("xray", xray_path, [XRAY_PATH] + [
@@ -218,7 +252,7 @@ class XRayBenchmark:
                 stderr=subprocess.PIPE,
                 creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             )
-            time.sleep(2.0)
+            time.sleep(1.2)
             
             if process.poll() is not None:
                 return None
@@ -383,7 +417,7 @@ class MihomoBenchmark:
                     stderr=subprocess.PIPE,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                 )
-                time.sleep(2.0)
+                time.sleep(1.2)
                 
                 if process.poll() is not None:
                     return None
@@ -545,7 +579,7 @@ class SingBoxBenchmark:
                     stderr=subprocess.PIPE,
                     creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
                 )
-                time.sleep(2.0)
+                time.sleep(1.2)
                 
                 if process.poll() is not None:
                     return None
@@ -591,20 +625,21 @@ class ProxyBenchmark:
         self.logger = logging.getLogger(__name__)
         self.test_mode = os.getenv("HUNTER_TEST_MODE", "").lower() == "true"
         
-        # Initialize adaptive thread pool with REDUCED threads to prevent memory leak
-        # Memory-aware: 8 max threads instead of 32 to prevent 97% memory usage
-        cpu_count = multiprocessing.cpu_count()
+        # Initialize adaptive thread pool - XRay tests are I/O bound (spawn process + curl)
+        # Each test process uses ~50MB, so scale with both CPU and memory
+        cpu_count = multiprocessing.cpu_count() or 4
         memory_gb = psutil.virtual_memory().total / (1024**3)
         
-        # Calculate safe max_threads based on available memory
-        # Each thread can use ~500MB during benchmark (xray process + overhead)
-        safe_max_threads = max(4, min(int(memory_gb / 2), 8))  # Max 8 threads
+        # Scale threads: I/O bound work benefits from more threads than cores
+        # Cap by memory (each test ~50MB overhead) and reasonable upper bound
+        safe_max_threads = max(4, min(cpu_count, int(memory_gb / 1.5), 32))
+        safe_min_threads = max(2, safe_max_threads // 2)
         
         self.thread_pool = AdaptiveThreadPool(
-            min_threads=2,
+            min_threads=safe_min_threads,
             max_threads=safe_max_threads,
-            target_cpu_utilization=0.70,  # Lower CPU to reduce memory pressure
-            target_queue_size=50,         # Smaller queue to prevent memory buildup
+            target_cpu_utilization=0.85,
+            target_queue_size=100,
             enable_work_stealing=True,
             enable_cpu_affinity=False
         )
@@ -707,11 +742,27 @@ class ProxyBenchmark:
                         result = self.create_bench_result(parsed, latency)
                         chunk_results.append(result)
                         completed += 1
+                        # Notify UI callback if attached
+                        try:
+                            if hasattr(self, '_ui_callback') and self._ui_callback:
+                                self._ui_callback(parsed, latency, result.tier)
+                        except Exception:
+                            pass
                     else:
                         failed += 1
+                        try:
+                            if hasattr(self, '_ui_callback') and self._ui_callback:
+                                self._ui_callback(parsed, None, '')
+                        except Exception:
+                            pass
                 except Exception as e:
                     self.logger.debug(f"Benchmark task failed: {e}")
                     failed += 1
+                    try:
+                        if hasattr(self, '_ui_callback') and self._ui_callback:
+                            self._ui_callback(parsed, None, '')
+                    except Exception:
+                        pass
             
             all_results.extend(chunk_results)
             self.benchmark_count += len(chunk)
@@ -719,12 +770,25 @@ class ProxyBenchmark:
             # CRITICAL: Force garbage collection after each chunk
             gc.collect()
             
-            # Log chunk performance
+            # Log chunk performance with individual results
             mem_after = psutil.virtual_memory().percent
+            for r in chunk_results:
+                self.logger.info(
+                    f"  OK: {(r.ps or '')[:30]} | {r.latency_ms:.0f}ms | {r.tier} | {r.region}"
+                )
             self.logger.info(
                 f"Chunk {chunk_num}/{total_chunks} done: {completed} OK, {failed} failed, "
-                f"memory: {mem_after:.1f}%"
+                f"memory: {mem_after:.1f}%, total good so far: {len(all_results)}"
             )
+            
+            # Early-stop: if we have enough good configs, skip remaining chunks
+            gold_count = sum(1 for r in all_results if r.tier == "gold")
+            if gold_count >= 30 and len(all_results) >= 50:
+                self.logger.info(
+                    f"Early-stop: {gold_count} gold + {len(all_results)} total configs found, "
+                    f"skipping remaining {total_chunks - chunk_num} chunks"
+                )
+                break
             
             # Brief pause between chunks to let system stabilize
             if chunk_idx + chunk_size < total_configs:
@@ -733,12 +797,21 @@ class ProxyBenchmark:
         # Final cleanup
         gc.collect()
         
+        # Dedup results by signature (host:port:identity) - keep best latency
+        dedup = {}
+        for r in all_results:
+            key = f"{r.host}:{r.port}:{r.identity}"
+            if key not in dedup or r.latency_ms < dedup[key].latency_ms:
+                dedup[key] = r
+        all_results = sorted(dedup.values(), key=lambda r: r.latency_ms)
+        
         # Log final performance metrics
         metrics = self.thread_pool.get_metrics()
         elapsed_time = time.time() - self.start_time
         
         self.logger.info(
-            f"Batch benchmark completed: {len(all_results)} successful out of {total_configs} total"
+            f"Batch benchmark completed: {len(all_results)} unique configs "
+            f"(deduped from {len(dedup) + (total_configs - len(all_results))} tested)"
         )
         self.logger.info(
             f"Performance: {metrics.tasks_per_second:.1f} tasks/sec, "

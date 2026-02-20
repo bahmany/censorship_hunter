@@ -151,17 +151,25 @@ def resolve_ip(host: str) -> Optional[str]:
         return None
 
 
+_country_code_cache: Dict[str, Optional[str]] = {}
+
 def get_country_code(ip: Optional[str]) -> Optional[str]:
-    """Get country code for IP address."""
+    """Get country code for IP address (cached to avoid API hammering)."""
     if not ip or ip == "0.0.0.0":
         return None
+    if ip in _country_code_cache:
+        return _country_code_cache[ip]
     try:
         import requests
-        resp = requests.get(f"https://ipapi.co/{ip}/country_code/", timeout=5)
+        resp = requests.get(f"https://ipapi.co/{ip}/country_code/", timeout=3)
         if resp.status_code >= 400:
+            _country_code_cache[ip] = None
             return None
-        return resp.text.strip() or None
+        cc = resp.text.strip() or None
+        _country_code_cache[ip] = cc
+        return cc
     except Exception:
+        _country_code_cache[ip] = None
         return None
 
 

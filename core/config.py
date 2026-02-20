@@ -83,7 +83,7 @@ class HunterConfig:
             "multiproxy_port": int(os.getenv("HUNTER_MULTIPROXY_PORT", "10808")),
             "multiproxy_backends": int(os.getenv("HUNTER_MULTIPROXY_BACKENDS", "5")),
             "multiproxy_health_interval": int(os.getenv("HUNTER_MULTIPROXY_HEALTH_INTERVAL", "60")),
-            "gemini_balancer_enabled": os.getenv("HUNTER_GEMINI_BALANCER", "false").lower() == "true",
+            "gemini_balancer_enabled": os.getenv("HUNTER_GEMINI_BALANCER", "true").lower() == "true",
             "gemini_port": int(os.getenv("HUNTER_GEMINI_PORT", "10809")),
             
             # Connection Configuration

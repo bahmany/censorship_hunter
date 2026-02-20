@@ -805,5 +805,6 @@ public class ConfigManager {
         public volatile int latency;
         public volatile int telegram_latency = Integer.MAX_VALUE;
         public volatile int instagram_latency = Integer.MAX_VALUE;
+        public boolean googleAccessible;
     }
 }

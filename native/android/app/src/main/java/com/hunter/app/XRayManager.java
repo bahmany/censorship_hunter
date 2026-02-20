@@ -87,7 +87,7 @@ public class XRayManager {
      */
     public boolean isReady() {
         File exec = getExecBinaryFile();
-        boolean execOk = exec != null && exec.exists() && exec.length() > 1000;
+        boolean execOk = exec != null && exec.exists() && exec.length() > 1000 && exec.canExecute();
         boolean geoOk = new File(xrayDir, "geoip.dat").exists()
             && new File(xrayDir, "geosite.dat").exists();
         if (!execOk || !geoOk) {
@@ -109,12 +109,12 @@ public class XRayManager {
 
     private File getExecBinaryFile() {
         // Prefer packaged binary from nativeLibraryDir (always has exec permission on Android)
-        if (packagedXrayBinary.exists() && packagedXrayBinary.length() > 1000) {
+        if (packagedXrayBinary.exists() && packagedXrayBinary.length() > 1000 && packagedXrayBinary.canExecute()) {
             Log.d(TAG, "Using packaged libxray.so from nativeLibraryDir");
             return packagedXrayBinary;
         }
         // Fallback to extracted binary in app files dir
-        if (xrayBinary.exists() && xrayBinary.length() > 1000) {
+        if (xrayBinary.exists() && xrayBinary.length() > 1000 && xrayBinary.canExecute()) {
             Log.d(TAG, "Using extracted xray from files dir");
             return xrayBinary;
         }
@@ -205,7 +205,7 @@ public class XRayManager {
 
                 AssetManager assets = context.getAssets();
 
-                if (!(packagedXrayBinary.exists() && packagedXrayBinary.length() > 1000)) {
+                if (!(packagedXrayBinary.exists() && packagedXrayBinary.length() > 1000 && packagedXrayBinary.canExecute())) {
                     // Step 1: Extract xray binary from ZIP asset
                     callback.onProgress("Extracting xray binary...", 10);
                     InputStream zipStream = assets.open(ASSETS_DIR + "/" + zipName);
@@ -313,6 +313,7 @@ public class XRayManager {
                 Log.e(TAG, "XRay exec binary not available");
                 return null;
             }
+            
             Log.i(TAG, "Starting XRay using: " + exec.getAbsolutePath());
             Log.i(TAG, "XRay config: " + configFile.getAbsolutePath());
             Log.i(TAG, "XRay working dir: " + xrayDir.getAbsolutePath());
@@ -351,7 +352,48 @@ public class XRayManager {
                 Log.i(TAG, "XRay process started successfully (PID would be available via reflection)");
                 return process;
             } else {
-                Log.e(TAG, "XRay process died immediately after start");
+                // Log exit code and any remaining output for debugging
+                try {
+                    int exitCode = process.exitValue();
+                    Log.e(TAG, "XRay process died immediately after start, exit code: " + exitCode);
+                    
+                    // Read any remaining error output
+                    java.io.BufferedReader errorReader = new java.io.BufferedReader(
+                        new java.io.InputStreamReader(process.getInputStream()));
+                    StringBuilder errorOutput = new StringBuilder();
+                    String line;
+                    while ((line = errorReader.readLine()) != null) {
+                        errorOutput.append(line).append("\n");
+                    }
+                    if (errorOutput.length() > 0) {
+                        Log.e(TAG, "XRay error output: " + errorOutput.toString());
+                    }
+                    
+                    // Log the config that caused the issue (avoid logging full config to prevent OOM)
+                    Log.e(TAG, "Config that caused failure: " + configFile.getAbsolutePath() + " (" + configFile.length() + " bytes)");
+                    try {
+                        java.io.BufferedReader configReader = new java.io.BufferedReader(new java.io.FileReader(configFile));
+                        StringBuilder configPrefix = new StringBuilder();
+                        String configLine;
+                        int lines = 0;
+                        int chars = 0;
+                        while ((configLine = configReader.readLine()) != null) {
+                            configPrefix.append(configLine).append("\n");
+                            lines++;
+                            chars += configLine.length();
+                            if (lines >= 40 || chars >= 4096) {
+                                break;
+                            }
+                        }
+                        configReader.close();
+                        if (configPrefix.length() > 0) {
+                            Log.e(TAG, "Config prefix (first ~4KB):\n" + configPrefix);
+                        }
+                    } catch (Exception ignored) {}
+                    
+                } catch (Exception e) {
+                    Log.e(TAG, "Failed to get XRay exit info", e);
+                }
                 return null;
             }
         } catch (Exception e) {

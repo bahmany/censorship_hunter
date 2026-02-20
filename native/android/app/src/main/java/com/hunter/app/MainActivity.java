@@ -43,7 +43,7 @@ import java.util.List;
 public class MainActivity extends AppCompatActivity {
 
     private MaterialButton connectButton;
-    private MaterialButton refreshButton, shareButton, switchButton;
+    private MaterialButton refreshButton, shareButton, switchButton, exitButton;
     private ProgressBar progressBar;
     private ProgressBar v2rayProgressBar;
     private TextView statusText, statusDetail, configCount;
@@ -58,6 +58,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean isConnected = false;
     private boolean isConnecting = false;
     private BroadcastReceiver progressReceiver;
+    private BroadcastReceiver vpnStatusReceiver;
 
     // Speed and traffic monitoring
     private Handler speedUpdateHandler;
@@ -112,6 +113,35 @@ public class MainActivity extends AppCompatActivity {
         };
         LocalBroadcastManager.getInstance(this).registerReceiver(progressReceiver, 
             new IntentFilter("com.hunter.app.V2RAY_PROGRESS"));
+
+        // VPN status receiver - updates UI based on VpnService state changes
+        vpnStatusReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (com.hunter.app.VpnService.BROADCAST_STATUS.equals(intent.getAction())) {
+                    String status = intent.getStringExtra("status");
+                    String detail = intent.getStringExtra("detail");
+                    boolean connecting = intent.getBooleanExtra("isConnecting", false);
+                    boolean connected = intent.getBooleanExtra("isConnected", false);
+                    
+                    runOnUiThread(() -> {
+                        if (connected) {
+                            setConnectedState();
+                            if (detail != null) statusDetail.setText(detail);
+                        } else if (connecting) {
+                            setConnectingState();
+                            if (status != null) statusText.setText(status);
+                            if (detail != null) statusDetail.setText(detail);
+                        } else {
+                            setDisconnectedState();
+                            if (detail != null) statusDetail.setText(detail);
+                        }
+                    });
+                }
+            }
+        };
+        LocalBroadcastManager.getInstance(this).registerReceiver(vpnStatusReceiver,
+            new IntentFilter(com.hunter.app.VpnService.BROADCAST_STATUS));
 
         // Request notification permission for Android 13+
         requestNotificationPermission();
@@ -188,6 +218,7 @@ public class MainActivity extends AppCompatActivity {
         refreshButton = findViewById(R.id.btn_refresh);
         shareButton = findViewById(R.id.btn_share);
         switchButton = findViewById(R.id.btn_switch);
+        exitButton = findViewById(R.id.btn_exit);
         aboutButton = findViewById(R.id.btn_about);
         progressCard = findViewById(R.id.progress_card);
         speedTrafficCard = findViewById(R.id.speed_traffic_card);
@@ -216,6 +247,8 @@ public class MainActivity extends AppCompatActivity {
         
         shareButton.setOnClickListener(v -> 
             startActivity(new Intent(this, ConfigShareActivity.class)));
+        
+        exitButton.setOnClickListener(v -> exitApp());
     }
 
     private void switchConfig() {
@@ -638,11 +671,33 @@ public class MainActivity extends AppCompatActivity {
         updateConfigStats();
     }
 
+    private void exitApp() {
+        // Stop VPN service completely
+        try {
+            Intent intent = new Intent(this, com.hunter.app.VpnService.class);
+            intent.setAction(com.hunter.app.VpnService.ACTION_EXIT);
+            startService(intent);
+        } catch (Throwable t) {
+            android.util.Log.w("MainActivity", "Failed to send exit to VPN service", t);
+        }
+        
+        // Stop monitor service
+        try {
+            stopService(new Intent(this, ConfigMonitorService.class));
+        } catch (Throwable ignored) {}
+        
+        // Finish activity
+        finishAffinity();
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
         if (progressReceiver != null) {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(progressReceiver);
+        }
+        if (vpnStatusReceiver != null) {
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(vpnStatusReceiver);
         }
     }
 }

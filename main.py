@@ -57,11 +57,13 @@ if sys.platform == "win32":
 try:
     from hunter.orchestrator import HunterOrchestrator
     from hunter.core.config import HunterConfig
+    from hunter.ui.progress import HunterUI, ServiceManager
 except ImportError:
     # Fallback for direct execution
     try:
         from orchestrator import HunterOrchestrator
         from core.config import HunterConfig
+        from ui.progress import HunterUI, ServiceManager
     except ImportError:
         print("Error: Required modules not found. Please run from the correct directory.")
         sys.exit(1)
@@ -98,8 +100,8 @@ class _NoisyNetworkLogFilter(logging.Filter):
             if "[WinError 10053]" in msg and "connection was aborted" in msg.lower():
                 return False
             
-            # Suppress noisy Telethon reconnect/download messages
-            if record.levelno <= logging.INFO:
+            # Suppress noisy Telethon reconnect/download messages (INFO and WARNING)
+            if record.levelno <= logging.WARNING:
                 _NOISY_SUBSTRINGS = (
                     "Closing current connection to begin reconnect",
                     "Disconnecting borrowed sender for DC",
@@ -112,6 +114,10 @@ class _NoisyNetworkLogFilter(logging.Filter):
                     "Exporting auth for new borrowed sender",
                     "Automatic reconnection failed",
                     "Got a request to send a request to DC",
+                    "Attempt ",
+                    "at connecting failed",
+                    "Connection refused by destination",
+                    "Automatic reconnection",
                 )
                 for sub in _NOISY_SUBSTRINGS:
                     if sub in msg:
@@ -140,19 +146,39 @@ def setup_logging():
     logger.setLevel(logging.INFO)
     logger.addHandler(console_handler)
     
+    # File handler: persist all logs even after dashboard removes console handlers
+    try:
+        runtime_dir = Path(__file__).parent / "runtime"
+        runtime_dir.mkdir(exist_ok=True)
+        file_handler = logging.FileHandler(
+            str(runtime_dir / "hunter.log"), encoding="utf-8", mode="a"
+        )
+        file_handler.setLevel(logging.INFO)
+        file_handler.setFormatter(logging.Formatter(
+            '%(asctime)s | %(levelname)-7s | %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        ))
+        file_handler.addFilter(_NoisyNetworkLogFilter())
+        logger.addHandler(file_handler)
+    except Exception:
+        pass
+    
     # Suppress noisy Telethon internal loggers at source
     logging.getLogger("telethon").setLevel(logging.WARNING)
-    logging.getLogger("telethon.network").setLevel(logging.WARNING)
+    logging.getLogger("telethon.network").setLevel(logging.ERROR)
+    logging.getLogger("telethon.network.mtproto").setLevel(logging.ERROR)
+    logging.getLogger("telethon.network.connection").setLevel(logging.ERROR)
     logging.getLogger("telethon.client.downloads").setLevel(logging.WARNING)
     logging.getLogger("telethon.client.uploads").setLevel(logging.WARNING)
 
 
 def print_banner():
-    """Print startup banner"""
-    print("=" * 60)
-    print("  HUNTER - Advanced V2Ray Proxy Hunting System")
-    print("  Autonomous censorship circumvention tool")
-    print("=" * 60)
+    """Print startup banner using HunterUI."""
+    ui = HunterUI()
+    ui.print_banner()
+    # Check tools in bin/
+    bin_dir = str(Path(__file__).parent / "bin")
+    ui.print_tools_check(bin_dir)
 
 
 def check_and_cleanup_memory(logger):
@@ -200,6 +226,87 @@ def print_config_info(config: HunterConfig):
     print(f"Iran Priority Sources: {len(config.get('targets', []))} Reality-focused sources")
     print(f"ADEE: {'ENABLED' if config.get('adee_enabled') else 'DISABLED'}")
     print()
+
+
+def kill_existing_hunter_processes(logger):
+    """Kill any existing Hunter and XRay processes before starting."""
+    import subprocess
+    killed_count = 0
+    
+    try:
+        if sys.platform == "win32":
+            # Kill Python processes related to Hunter
+            try:
+                result = subprocess.run(
+                    ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV", "/NH"],
+                    capture_output=True, text=True, timeout=5
+                )
+                for line in result.stdout.splitlines():
+                    if "python" in line.lower():
+                        parts = line.replace('"', '').split(',')
+                        if len(parts) >= 2:
+                            pid = parts[1].strip()
+                            try:
+                                # Check if it's a Hunter process by checking command line
+                                cmd_result = subprocess.run(
+                                    ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/FORMAT:LIST"],
+                                    capture_output=True, text=True, timeout=3
+                                )
+                                if "hunter" in cmd_result.stdout.lower() or "pythonProject1" in cmd_result.stdout:
+                                    subprocess.run(["taskkill", "/F", "/PID", pid], 
+                                                 capture_output=True, timeout=3)
+                                    killed_count += 1
+                            except:
+                                pass
+            except:
+                pass
+            
+            # Kill XRay processes
+            try:
+                subprocess.run(["taskkill", "/F", "/IM", "xray.exe"], 
+                             capture_output=True, timeout=3)
+                killed_count += 1
+            except:
+                pass
+        else:
+            # Linux/Mac
+            try:
+                result = subprocess.run(
+                    ["pgrep", "-f", "hunter"],
+                    capture_output=True, text=True, timeout=3
+                )
+                for pid in result.stdout.strip().split('\n'):
+                    if pid:
+                        try:
+                            subprocess.run(["kill", "-9", pid], timeout=2)
+                            killed_count += 1
+                        except:
+                            pass
+            except:
+                pass
+            
+            try:
+                subprocess.run(["pkill", "-9", "xray"], timeout=3)
+                killed_count += 1
+            except:
+                pass
+        
+        if killed_count > 0:
+            logger.info(f"Killed {killed_count} existing Hunter/XRay process(es)")
+            import time
+            time.sleep(2)  # Wait for processes to fully terminate
+        
+        # Remove PID file if exists
+        runtime_dir = Path(__file__).parent / "runtime"
+        pid_file = runtime_dir / "hunter_service.pid"
+        if pid_file.exists():
+            try:
+                pid_file.unlink()
+            except:
+                pass
+                
+    except Exception as e:
+        logger.warning(f"Error killing existing processes: {e}")
 
 
 def load_env_files():
@@ -296,6 +403,9 @@ async def main():
     setup_logging()
 
     logger = logging.getLogger(__name__)
+    
+    # Kill any existing Hunter/XRay processes before starting
+    kill_existing_hunter_processes(logger)
 
     try:
         loop = asyncio.get_running_loop()
@@ -325,6 +435,14 @@ async def main():
         runtime_dir.mkdir(exist_ok=True)
         logger.info(f"Runtime directory: {runtime_dir}")
         
+        # Service management: check for existing instance, register PID
+        svc = ServiceManager(str(runtime_dir))
+        if svc.is_running():
+            logger.warning("Another Hunter instance is already running. Exiting.")
+            return 1
+        svc.register()
+        svc.setup_signal_handlers()
+        
         # Load configuration with secrets file
         config = HunterConfig(secrets_file="hunter_secrets.env")
         print_config_info(config)
@@ -336,14 +454,15 @@ async def main():
             for error in errors:
                 logger.error(f"  - {error}")
             logger.error("Please fix configuration issues and try again.")
+            svc.unregister()
             return 1
 
         # Create and start orchestrator
         logger.info("Initializing Hunter Orchestrator...")
         orchestrator = HunterOrchestrator(config)
 
-        logger.info("Starting autonomous hunting loop...")
-        await orchestrator.run_autonomous_loop()
+        logger.info("Starting autonomous hunting service...")
+        await orchestrator.start()
 
     except KeyboardInterrupt:
         logger.info("Shutting down gracefully...")

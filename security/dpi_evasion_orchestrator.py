@@ -545,15 +545,26 @@ class DPIEvasionOrchestrator:
         for t in threads:
             t.join(timeout=3.0)
         
-        self.state.network_type = results.get("type", NetworkType.UNKNOWN)
-        self.state.detected_isp = results.get("isp", "unknown")
-        self.state.network_condition = results.get("condition", NetworkCondition.NORMAL)
+        new_type = results.get("type", NetworkType.UNKNOWN)
+        new_isp = results.get("isp", "unknown")
+        new_condition = results.get("condition", NetworkCondition.NORMAL)
         
-        self.logger.info(
-            f"Network detected: type={self.state.network_type.value}, "
-            f"condition={self.state.network_condition.value}, "
-            f"isp={self.state.detected_isp}"
+        changed = (
+            new_type != self.state.network_type or
+            new_condition != self.state.network_condition or
+            new_isp != self.state.detected_isp
         )
+        
+        self.state.network_type = new_type
+        self.state.detected_isp = new_isp
+        self.state.network_condition = new_condition
+        
+        if changed:
+            self.logger.info(
+                f"Network detected: type={new_type.value}, "
+                f"condition={new_condition.value}, "
+                f"isp={new_isp}"
+            )
     
     def _detect_isp(self) -> str:
         """Attempt to detect the ISP."""
@@ -707,7 +718,7 @@ class DPIEvasionOrchestrator:
         """Background loop that adapts strategy based on conditions."""
         while self._running:
             try:
-                time.sleep(300)  # Re-evaluate every 5 minutes
+                time.sleep(60)  # Re-evaluate every 60 seconds (was 5 minutes)
                 
                 if not self._running:
                     break

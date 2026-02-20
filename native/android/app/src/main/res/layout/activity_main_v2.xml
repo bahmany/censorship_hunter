@@ -487,18 +487,40 @@
 
         </LinearLayout>
 
-        <!-- Share Button -->
-        <com.google.android.material.button.MaterialButton
-            android:id="@+id/btn_share"
-            style="@style/Widget.Material3.Button.OutlinedButton"
+        <LinearLayout
             android:layout_width="match_parent"
-            android:layout_height="56dp"
+            android:layout_height="wrap_content"
             android:layout_marginTop="8dp"
-            android:text="Share Working Configs"
-            android:textColor="@color/text_primary"
-            app:icon="@drawable/ic_share"
-            app:iconTint="@color/accent_green"
-            app:strokeColor="@color/accent_green" />
+            android:orientation="horizontal">
+
+            <!-- Share Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_share"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:layout_marginEnd="8dp"
+                android:text="Share Configs"
+                android:textColor="@color/text_primary"
+                app:icon="@drawable/ic_share"
+                app:iconTint="@color/accent_green"
+                app:strokeColor="@color/accent_green" />
+
+            <!-- Exit Button -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_exit"
+                style="@style/Widget.Material3.Button.OutlinedButton"
+                android:layout_width="0dp"
+                android:layout_height="56dp"
+                android:layout_weight="1"
+                android:text="Exit"
+                android:textColor="@color/accent_red"
+                app:icon="@drawable/ic_exit"
+                app:iconTint="@color/accent_red"
+                app:strokeColor="@color/accent_red" />
+
+        </LinearLayout>
 
     </LinearLayout>
 
