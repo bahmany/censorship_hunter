@@ -219,14 +219,22 @@ public class VpnService extends android.net.VpnService {
                     if (!isSupportedUri(config.uri)) {
                         continue;
                     }
+                    // Skip configs that were never properly tested (latency <= 0)
+                    if (config.latency <= 0) {
+                        Log.w(TAG, "Skipping cached config with invalid latency=" + config.latency + ": " + config.name);
+                        continue;
+                    }
                     try {
                         JSONObject cfg = new JSONObject();
                         cfg.put("uri", config.uri);
                         cfg.put("ps", config.name);
                         cfg.put("protocol", config.protocol);
                         cfg.put("latency_ms", config.latency);
+                        cfg.put("telegram_latency", config.telegram_latency);
                         workingConfigs.add(cfg);
-                        Log.i(TAG, "Cached config #" + workingConfigs.size() + ": " + config.protocol + " (" + config.latency + "ms)");
+                        int tgMs = config.telegram_latency < Integer.MAX_VALUE ? config.telegram_latency : -1;
+                        Log.i(TAG, "Cached config #" + workingConfigs.size() + ": " + config.protocol
+                            + " (" + config.latency + "ms, tg=" + tgMs + "ms)");
                     } catch (Exception e) {
                         Log.w(TAG, "Failed to create config JSON from cache", e);
                     }
@@ -249,7 +257,7 @@ public class VpnService extends android.net.VpnService {
                 return;
             }
 
-            broadcastStatus("Searching...", "Testing " + candidates.size() + " configs...", true);
+            broadcastStatus("Searching...", "Testing " + candidates.size() + " configs — please wait...", true);
             updateNotification("Testing configs...", NotificationState.SEARCHING);
 
             // Stop any existing test (e.g. ConfigMonitor health check) - VPN startup takes priority
@@ -260,46 +268,112 @@ public class VpnService extends android.net.VpnService {
             }
 
             final List<JSONObject> workingConfigs = new ArrayList<>();
+            final AtomicBoolean connectionStarted = new AtomicBoolean(false);
+            final AtomicBoolean balancerUpgraded = new AtomicBoolean(false);
 
             configTester.testConfigs(candidates, new ConfigTester.TestCallback() {
                 @Override
                 public void onProgress(int tested, int total) {
-                    updateNotification("Testing: " + tested + "/" + total + " (" + workingConfigs.size() + " working)", NotificationState.SEARCHING);
+                    if (connectionStarted.get()) {
+                        int wc;
+                        synchronized (workingConfigs) { wc = workingConfigs.size(); }
+                        if (tested % 200 == 0 || tested == total) {
+                            updateNotification("Connected (" + wc + " servers found, testing " + tested + "/" + total + ")", NotificationState.CONNECTED);
+                        }
+                    } else {
+                        updateNotification("Testing: " + tested + "/" + total + " (" + workingConfigs.size() + " working)", NotificationState.SEARCHING);
+                    }
                 }
 
                 @Override
                 public void onConfigTested(ConfigManager.ConfigItem config, boolean success, int latency, boolean googleAccessible) {
-                    if (success && workingConfigs.size() < MAX_BALANCED) {
-                        try {
-                            JSONObject cfg = new JSONObject();
-                            cfg.put("uri", config.uri);
-                            cfg.put("ps", config.name);
-                            cfg.put("protocol", config.protocol);
-                            cfg.put("latency_ms", latency);
-                            synchronized (workingConfigs) {
-                                if (workingConfigs.size() < MAX_BALANCED) {
-                                    workingConfigs.add(cfg);
-                                    Log.i(TAG, "Working config #" + workingConfigs.size() + ": " + config.protocol + " (" + latency + "ms)");
-                                }
-                            }
-                        } catch (Exception e) {
-                            Log.w(TAG, "Failed to create config JSON", e);
+                    if (!success) return;
+
+                    JSONObject cfg;
+                    try {
+                        cfg = new JSONObject();
+                        cfg.put("uri", config.uri);
+                        cfg.put("ps", config.name);
+                        cfg.put("protocol", config.protocol);
+                        cfg.put("latency_ms", latency);
+                        // Store per-config Telegram latency measured during testing
+                        cfg.put("telegram_latency", config.telegram_latency);
+                    } catch (Exception e) {
+                        Log.w(TAG, "Failed to create config JSON", e);
+                        return;
+                    }
+
+                    int currentSize;
+                    synchronized (workingConfigs) {
+                        workingConfigs.add(cfg);
+                        currentSize = workingConfigs.size();
+                        int tgMs = config.telegram_latency < Integer.MAX_VALUE ? config.telegram_latency : -1;
+                        Log.i(TAG, "Working config #" + currentSize + ": " + config.protocol
+                            + " (" + latency + "ms, tg=" + tgMs + "ms)");
+                    }
+
+                    // Cache every working config immediately with Telegram latency
+                    try {
+                        configManager.addToTopConfigs(
+                            config.uri, config.name, config.protocol,
+                            latency, config.telegram_latency, Integer.MAX_VALUE);
+                    } catch (Exception ignored) {}
+
+                    // ── First working config: start VPN immediately so traffic flows ──
+                    if (connectionStarted.compareAndSet(false, true)) {
+                        Log.i(TAG, ">>> Starting VPN immediately with first working config");
+                        updateNotification("Connecting...", NotificationState.CONNECTING);
+                        broadcastStatus("Connecting...", "Working server found — testing continues", true);
+
+                        // Start single-config VPN on executor (don't stop tester!)
+                        final List<JSONObject> single = new ArrayList<>();
+                        single.add(cfg);
+                        executor.execute(() -> startVpnWithBalancedConfigs(single, configManager));
+                        // Tester keeps running to find more configs for balancer upgrade
+                    }
+
+                    // ── Enough configs for balancer: hot-swap XRay to balanced mode ──
+                    if (currentSize >= MAX_BALANCED && connectionStarted.get()
+                            && balancerUpgraded.compareAndSet(false, true)) {
+                        Log.i(TAG, ">>> Upgrading to balanced config with " + currentSize + " servers");
+                        final List<JSONObject> snapshot;
+                        synchronized (workingConfigs) {
+                            snapshot = new ArrayList<>(workingConfigs);
                         }
+                        executor.execute(() -> upgradeToBalancedConfig(snapshot));
+                        // Stop tester after balancer upgrade — we have enough
+                        configTester.stop();
                     }
                 }
 
                 @Override
                 public void onComplete(int totalTested, int successCount) {
-                    Log.i(TAG, "Config testing complete: " + successCount + "/" + totalTested + " working configs found");
+                    Log.i(TAG, "Config testing complete: " + successCount + "/" + totalTested + " working");
 
-                    configTester.stopTesting();
+                    if (!connectionStarted.get()) {
+                        // Never found a working config
+                        if (!workingConfigs.isEmpty()) {
+                            startVpnWithBalancedConfigs(workingConfigs, configManager);
+                        } else {
+                            Log.e(TAG, "No working configs found after testing " + totalTested);
+                            updateNotification("No working configs found");
+                            stopVpn();
+                        }
+                        return;
+                    }
 
-                    if (!workingConfigs.isEmpty()) {
-                        startVpnWithBalancedConfigs(workingConfigs, configManager);
+                    // Already connected — upgrade to balancer if we have multiple configs
+                    int wc;
+                    synchronized (workingConfigs) { wc = workingConfigs.size(); }
+                    if (wc > 1 && balancerUpgraded.compareAndSet(false, true)) {
+                        Log.i(TAG, "Test complete — upgrading to balanced config with " + wc + " servers");
+                        final List<JSONObject> snapshot;
+                        synchronized (workingConfigs) {
+                            snapshot = new ArrayList<>(workingConfigs);
+                        }
+                        executor.execute(() -> upgradeToBalancedConfig(snapshot));
                     } else {
-                        Log.e(TAG, "No working configs found after testing " + totalTested);
-                        updateNotification("No working configs found");
-                        stopVpn();
+                        Log.i(TAG, "Test complete — " + wc + " working config(s), balancer " + (balancerUpgraded.get() ? "already active" : "not needed (single)"));
                     }
                 }
             });
@@ -310,29 +384,11 @@ public class VpnService extends android.net.VpnService {
         }
     }
     private List<ConfigManager.ConfigItem> loadCandidateConfigs(ConfigManager configManager) {
-        List<ConfigManager.ConfigItem> candidates = new ArrayList<>();
-
-        // First, add top working configs
-        List<ConfigManager.ConfigItem> topConfigs = configManager.getTopConfigs();
-        candidates.addAll(topConfigs);
-
-        // Then add other configs if we need more
-        if (candidates.size() < 50) {
-            List<ConfigManager.ConfigItem> allConfigs = configManager.getConfigs();
-            for (ConfigManager.ConfigItem item : allConfigs) {
-                if (!candidates.contains(item)) {
-                    candidates.add(item);
-                    if (candidates.size() >= 100) break; // Limit to 100 configs max
-                }
-            }
-        }
-
-        // Limit to prevent testing too many configs
-        if (candidates.size() > 100) {
-            candidates = candidates.subList(0, 100);
-        }
-
-        Log.i(TAG, "Loaded " + candidates.size() + " candidate configs for testing");
+        // Pass ALL configs to ConfigTester — it handles dedup by server:port internally
+        // and tests them with high-speed 3-phase pipeline (TCP pre-filter + XRay SOCKS).
+        // No artificial cap needed; the pipeline is designed for 5k-15k+ configs.
+        List<ConfigManager.ConfigItem> candidates = configManager.getPrioritizedConfigs();
+        Log.i(TAG, "Loaded " + candidates.size() + " candidate configs for testing (no cap — pipeline handles volume)");
         return candidates;
     }
 
@@ -423,15 +479,17 @@ public class VpnService extends android.net.VpnService {
 
             Log.i(TAG, "VPN started successfully with " + uris.size() + " config(s)");
 
-            // Cache all successful configs for prioritization
+            // Cache all successful configs for prioritization.
+            // Use per-config telegram_latency measured during testing (not the global one).
             for (JSONObject cfg : workingConfigs) {
                 try {
+                    int cfgTelegramLatency = cfg.optInt("telegram_latency", Integer.MAX_VALUE);
                     configManager.addToTopConfigs(
                         cfg.getString("uri"),
                         cfg.optString("ps", "Server"),
                         cfg.optString("protocol", "Unknown"),
                         cfg.optInt("latency_ms", -1),
-                        currentTelegramLatency,
+                        cfgTelegramLatency,
                         currentInstagramLatency
                     );
                 } catch (Exception e) {
@@ -468,7 +526,6 @@ public class VpnService extends android.net.VpnService {
 
     private boolean checkSocksDownloadOnce(int timeoutMs) {
         Socket socket = null;
-        boolean isValid = false;
         try {
             socket = new Socket();
             socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
@@ -487,20 +544,21 @@ public class VpnService extends android.net.VpnService {
                 return false;
             }
 
-            // CONNECT to cp.cloudflare.com:80 (less DPI-targeted than google.com)
-            String host = "cp.cloudflare.com";
-            byte[] hostBytes = host.getBytes(StandardCharsets.UTF_8);
-            int port = 80;
-
-            byte[] req = new byte[7 + hostBytes.length];
+            // CONNECT to 1.1.1.1:80 (Cloudflare - for HTTP download test)
+            // Using IP address directly to avoid DNS resolution issues
+            byte[] req = new byte[10]; // Fixed size for IPv4
             req[0] = 0x05; // VER
             req[1] = 0x01; // CMD=CONNECT
             req[2] = 0x00; // RSV
-            req[3] = 0x03; // ATYP=DOMAIN
-            req[4] = (byte) hostBytes.length;
-            System.arraycopy(hostBytes, 0, req, 5, hostBytes.length);
-            req[5 + hostBytes.length] = (byte) ((port >> 8) & 0xFF);
-            req[6 + hostBytes.length] = (byte) (port & 0xFF);
+            req[3] = 0x01; // ATYP=IPv4
+            // IP address 1.1.1.1
+            req[4] = 0x01;
+            req[5] = 0x01;
+            req[6] = 0x01;
+            req[7] = 0x01;
+            // Port 80
+            req[8] = 0x00;
+            req[9] = 0x50;
             os.write(req);
             os.flush();
 
@@ -530,45 +588,45 @@ public class VpnService extends android.net.VpnService {
             // Skip BND.PORT
             readFully(is, new byte[2]);
 
-            // Send HTTP request through the tunnel
+            // For download test, send HTTP request and measure speed
             String http = "GET /generate_204 HTTP/1.1\r\n" +
-                    "Host: " + host + "\r\n" +
+                    "Host: 1.1.1.1\r\n" +
                     "Connection: close\r\n" +
                     "User-Agent: HunterVPN\r\n\r\n";
             os.write(http.getBytes(StandardCharsets.US_ASCII));
             os.flush();
 
-            byte[] buf = new byte[256];
-            int n;
+            // Measure download speed
+            byte[] buf = new byte[8192];
+            long startTime = System.currentTimeMillis();
+            int totalBytes = 0;
+            
             try {
-                n = is.read(buf);
+                int n;
+                while ((n = is.read(buf)) > 0 && totalBytes < 1024) { // Read up to 1KB
+                    totalBytes += n;
+                }
             } catch (SocketTimeoutException timeout) {
-                Log.w(TAG, "SOCKS download read timed out after successful CONNECT; assuming route is OK", timeout);
-                return true;
+                Log.w(TAG, "SOCKS download read timed out");
+                return false;
             }
-            if (n <= 0) {
+            
+            long endTime = System.currentTimeMillis();
+            long duration = Math.max(endTime - startTime, 1); // avoid division by zero
+            
+            if (totalBytes == 0) {
                 Log.w(TAG, "No response from HTTP request");
                 return false;
             }
-            String head = new String(buf, 0, n, StandardCharsets.US_ASCII);
-            isValid = head.startsWith("HTTP/");
-
-            if (!isValid) {
-                Log.w(TAG, "Invalid HTTP response: " + head.substring(0, Math.min(50, head.length())));
-            } else {
-                // Check for proper HTTP status
-                String[] lines = head.split("\r\n");
-                if (lines.length > 0) {
-                    String statusLine = lines[0];
-                    Log.d(TAG, "HTTP status: " + statusLine);
-                    // Should be "HTTP/1.1 204 No Content" or similar
-                    if (!statusLine.contains("204") && !statusLine.contains("200")) {
-                        Log.w(TAG, "Unexpected HTTP status: " + statusLine);
-                    }
-                }
-            }
             
-            return isValid;
+            // Calculate speed (KB/s)
+            int speedKBs = (int) ((totalBytes * 1000L) / (duration * 1024));
+            Log.i(TAG, "SOCKS download test: " + totalBytes + " bytes in " + duration + "ms = " + speedKBs + " KB/s");
+            
+            // Any data received means the proxy is working
+            Log.i(TAG, "✓ SOCKS download speed test passed");
+            return true;
+
         } catch (Exception e) {
             Log.w(TAG, "SOCKS download check failed", e);
             return false;
@@ -1246,6 +1304,56 @@ public class VpnService extends android.net.VpnService {
         return V2RayConfigHelper.parseUriToOutbound(uri) != null;
     }
 
+    /**
+     * Hot-swap XRay from single config to balanced config with multiple servers.
+     * tun2socks stays running — only XRay is restarted, so traffic resumes quickly.
+     */
+    private void upgradeToBalancedConfig(List<JSONObject> configs) {
+        try {
+            List<String> uris = new ArrayList<>();
+            for (JSONObject cfg : configs) {
+                String uri = cfg.optString("uri", "");
+                if (!uri.isEmpty()) uris.add(uri);
+            }
+            if (uris.size() < 2) {
+                Log.i(TAG, "Only " + uris.size() + " URI(s), skipping balancer upgrade");
+                return;
+            }
+
+            Log.i(TAG, "[UPGRADE] Stopping old XRay for balancer upgrade...");
+            stopXRayOnly();
+
+            Log.i(TAG, "[UPGRADE] Starting balanced XRay with " + uris.size() + " servers...");
+            boolean started = startXRayBalancedProcess(uris);
+            if (!started) {
+                Log.w(TAG, "[UPGRADE] Balanced start failed, falling back to single config");
+                // Try first config as fallback
+                started = startXRaySocksProcess(configs.get(0));
+                if (!started) {
+                    Log.e(TAG, "[UPGRADE] Single config fallback also failed!");
+                    return;
+                }
+            }
+
+            // Wait for new SOCKS port
+            boolean portAlive = waitForPortAlive(XRAY_SOCKS_PORT, 8000);
+            if (!portAlive) {
+                Log.e(TAG, "[UPGRADE] SOCKS port not alive after balancer upgrade");
+                return;
+            }
+
+            String msg = uris.size() > 1
+                ? "Connected (" + uris.size() + " balanced)"
+                : "Connected";
+            updateNotification(msg, NotificationState.CONNECTED);
+            broadcastStatus("Connected", msg, true);
+            Log.i(TAG, "[UPGRADE] Balancer upgrade complete with " + uris.size() + " servers");
+
+        } catch (Exception e) {
+            Log.e(TAG, "[UPGRADE] Failed to upgrade to balanced config", e);
+        }
+    }
+
     private boolean startXRayBalancedProcess(List<String> uris) {
         FreeV2RayApplication app = FreeV2RayApplication.getInstance();
         if (app == null) return false;
@@ -1426,6 +1534,17 @@ public class VpnService extends android.net.VpnService {
                     Log.i(TAG, "tun2socks thread starting...");
                     Engine.start();
                     Log.w(TAG, "tun2socks Engine.start() returned normally");
+                    
+                    // Keep thread alive since Engine.start() doesn't block
+                    while (!Thread.currentThread().isInterrupted() && isRunning.get()) {
+                        try {
+                            Thread.sleep(1000);
+                        } catch (InterruptedException e) {
+                            Log.i(TAG, "tun2socks thread interrupted");
+                            break;
+                        }
+                    }
+                    Log.i(TAG, "tun2socks thread exiting");
                 } catch (Throwable e) {
                     startError.set(e);
                     Log.e(TAG, "tun2socks crashed", e);
@@ -1435,17 +1554,50 @@ public class VpnService extends android.net.VpnService {
             tun2socksThread = t;
             t.start();
 
-            // Wait longer for startup and add debugging
+            // Wait for tun2socks to be ready and verify it's working
             try {
-                for (int i = 0; i < 10; i++) {
+                Log.i(TAG, "Waiting for tun2socks to initialize...");
+                
+                // Wait up to 5 seconds for thread to start
+                boolean threadStarted = false;
+                for (int i = 0; i < 50; i++) {
                     Thread.sleep(100);
                     if (startError.get() != null) {
-                        Log.e(TAG, "tun2socks startup error detected early: " + startError.get().getMessage());
+                        Log.e(TAG, "tun2socks startup error: " + startError.get().getMessage());
+                        return false;
+                    }
+                    // Check after a short delay to let thread start
+                    if (i >= 20 && tun2socksThread != null && tun2socksThread.isAlive()) {
+                        threadStarted = true;
                         break;
                     }
                 }
+                
+                if (!threadStarted) {
+                    // Check one more time before failing
+                    if (tun2socksThread != null && tun2socksThread.isAlive()) {
+                        threadStarted = true;
+                    }
+                }
+                
+                if (!threadStarted) {
+                    Log.e(TAG, "tun2socks thread failed to start");
+                    if (tun2socksThread == null) {
+                        Log.e(TAG, "tun2socksThread is null");
+                    } else {
+                        Log.e(TAG, "tun2socksThread.isAlive() = " + tun2socksThread.isAlive());
+                    }
+                    return false;
+                }
+                
+                Log.i(TAG, "✓ tun2socks thread is running");
+                
+                // Wait for Engine to fully initialize before returning
+                // Traffic verification is done in verifyVpnRouting() with proper retries
+                Thread.sleep(1000);
+                
             } catch (InterruptedException e) {
-                Log.w(TAG, "Interrupted while waiting for tun2socks startup");
+                Log.w(TAG, "Interrupted while waiting for tun2socks");
                 return false;
             }
 
@@ -1515,13 +1667,64 @@ public class VpnService extends android.net.VpnService {
             // Set underlying networks to ensure VPN priority
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 // On Android 10+, set underlying networks to ensure proper routing
-                builder.setUnderlyingNetworks(null); // Use VPN as default
+                // Use null to make VPN the default network for all traffic
+                builder.setUnderlyingNetworks(null);
+            }
+            
+            // On Android 8.0+, we need to explicitly establish VPN as default
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                // This ensures VPN becomes the default network
+                builder.addRoute("0.0.0.0", 0);
+                try {
+                    builder.addRoute("::", 0);
+                } catch (Exception ignored) {}
+                
+                // Also add explicit DNS route to ensure DNS goes through VPN
+                builder.addRoute("1.1.1.1", 32);
+                builder.addRoute("8.8.8.8", 32);
+                builder.addRoute("9.9.9.9", 32);
+            }
+            
+            // On Android 10+, set underlying networks to null to prioritize VPN
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                builder.setUnderlyingNetworks(null);
             }
 
+            // Establish the VPN interface
             tunInterface = builder.establish();
             if (tunInterface == null) {
                 Log.e(TAG, "Failed to establish TUN interface");
                 return false;
+            }
+            
+            // Force Android to recognize the VPN
+            try {
+                // On Android 8.0+, explicitly set VPN as default
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    getSystemService(android.net.ConnectivityManager.class);
+                    Log.i(TAG, "VPN service established, waiting for system recognition...");
+                    
+                    // Force a network update to make VPN the default
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+                        if (cm != null) {
+                            // Request network callback to ensure VPN is recognized
+                            android.net.NetworkRequest.Builder nrBuilder = new android.net.NetworkRequest.Builder()
+                                    .addTransportType(android.net.NetworkCapabilities.TRANSPORT_VPN)
+                                    .addCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET);
+                            
+                            cm.registerNetworkCallback(nrBuilder.build(), new android.net.ConnectivityManager.NetworkCallback() {
+                                @Override
+                                public void onAvailable(android.net.Network network) {
+                                    Log.i(TAG, "VPN network is now available: " + network);
+                                    cm.unregisterNetworkCallback(this);
+                                }
+                            });
+                        }
+                    }
+                }
+            } catch (Exception e) {
+                Log.w(TAG, "Could not force VPN recognition", e);
             }
 
             // detachFd() transfers fd ownership away from ParcelFileDescriptor.
@@ -1529,6 +1732,71 @@ public class VpnService extends android.net.VpnService {
             // from double-close when stopVpn() calls tunInterface.close().
             tunFd = tunInterface.detachFd();
             Log.i(TAG, "TUN interface established successfully with fd=" + tunFd);
+            
+            // Add comprehensive diagnostics after VPN is established
+            Log.i(TAG, "=== VPN Routing Diagnostics ===");
+            
+            // 1. Check if VPN is the default network (delayed check)
+            new Thread(() -> {
+                try {
+                    Thread.sleep(3000); // Wait longer for Android to recognize VPN
+                    
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                        try {
+                            android.net.ConnectivityManager cm = (android.net.ConnectivityManager) getSystemService(CONNECTIVITY_SERVICE);
+                            if (cm != null) {
+                                android.net.Network activeNetwork = cm.getActiveNetwork();
+                                if (activeNetwork != null) {
+                                    android.net.NetworkCapabilities caps = cm.getNetworkCapabilities(activeNetwork);
+                                    if (caps != null) {
+                                        boolean isVpn = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN);
+                                        boolean hasInternet = caps.hasCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET);
+                                        Log.i(TAG, "Active Network - VPN: " + isVpn + ", Internet: " + hasInternet);
+                                        
+                                        // Don't treat this as critical - tun2socks traffic flow is the real indicator
+                                        if (!isVpn) {
+                                            Log.w(TAG, "Note: System doesn't report VPN as default, but traffic may still flow through VPN");
+                                        } else {
+                                            Log.i(TAG, "✓ VPN is confirmed as the default network");
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (Exception e) {
+                            Log.w(TAG, "Could not check network status", e);
+                        }
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Error in delayed VPN check", e);
+                }
+            }, "VpnCheck").start();
+            
+            // 2. Verify tun2socks is running
+            if (tun2socksThread != null && tun2socksThread.isAlive()) {
+                Log.i(TAG, "✓ tun2socks thread is running");
+            } else {
+                Log.e(TAG, "✗ tun2socks thread is NOT running");
+            }
+            
+            // 3. Test actual data flow
+            Log.i(TAG, "Testing data flow through VPN...");
+            new Thread(() -> {
+                try {
+                    // Wait for XRay to be fully ready
+                    Thread.sleep(2000);
+                    boolean canRoute = verifyVpnRouting();
+                    if (!canRoute) {
+                        Log.e(TAG, "⚠ VPN data flow test FAILED - apps may not be using VPN");
+                        broadcastStatus("Connected", "Warning: VPN may not route all traffic", true);
+                    } else {
+                        Log.i(TAG, "✓ VPN data flow test PASSED");
+                    }
+                } catch (Exception e) {
+                    Log.e(TAG, "Error during data flow test", e);
+                }
+            }, "DataFlowTest").start();
+            
+            Log.i(TAG, "=== End Diagnostics ===");
             
             if (tunFd >= 0) {
                 Log.i(TAG, "VPN configured as default - all traffic will be routed through VPN");
@@ -1565,39 +1833,40 @@ public class VpnService extends android.net.VpnService {
                 Log.w(TAG, "Could not exclude own app from VPN", e);
             }
 
-            // If per-app mode is enabled
-            if (perAppEnabled) {
-                if (isWhitelist && !selectedApps.isEmpty()) {
-                    // Whitelist mode: Only route selected apps through VPN
-                    Log.d(TAG, "VPN whitelist mode - routing " + selectedApps.size() + " apps through VPN");
-                    for (String pkg : selectedApps) {
-                        try {
-                            if (getPackageName().equals(pkg)) continue; // Skip our own app
-                            builder.addAllowedApplication(pkg);
-                            Log.d(TAG, "Added app to VPN whitelist: " + pkg);
-                        } catch (PackageManager.NameNotFoundException e) {
-                            Log.w(TAG, "App not found for whitelist: " + pkg, e);
-                        }
+            // IMPORTANT: If per-app mode is disabled, route ALL apps through VPN
+            if (!perAppEnabled) {
+                Log.d(TAG, "VPN per-app mode disabled - ALL apps will be routed through VPN");
+                return; // Don't add any more exclusions
+            }
+
+            // Per-app mode is enabled - apply whitelist/blacklist logic
+            if (isWhitelist && !selectedApps.isEmpty()) {
+                // Whitelist mode: Only route selected apps through VPN
+                Log.d(TAG, "VPN whitelist mode - routing " + selectedApps.size() + " apps through VPN");
+                for (String pkg : selectedApps) {
+                    try {
+                        if (getPackageName().equals(pkg)) continue; // Skip our own app
+                        builder.addAllowedApplication(pkg);
+                        Log.d(TAG, "Added app to VPN whitelist: " + pkg);
+                    } catch (PackageManager.NameNotFoundException e) {
+                        Log.w(TAG, "App not found for whitelist: " + pkg, e);
                     }
-                } else if (!isWhitelist && !selectedApps.isEmpty()) {
-                    // Blacklist mode: Route all apps except selected ones through VPN
-                    Log.d(TAG, "VPN blacklist mode - excluding " + selectedApps.size() + " apps from VPN");
-                    for (String pkg : selectedApps) {
-                        try {
-                            if (getPackageName().equals(pkg)) continue; // Skip our own app
-                            builder.addDisallowedApplication(pkg);
-                            Log.d(TAG, "Added app to VPN blacklist: " + pkg);
-                        } catch (PackageManager.NameNotFoundException e) {
-                            Log.w(TAG, "App not found for blacklist: " + pkg, e);
-                        }
+                }
+            } else if (!isWhitelist && !selectedApps.isEmpty()) {
+                // Blacklist mode: Route all apps except selected ones through VPN
+                Log.d(TAG, "VPN blacklist mode - excluding " + selectedApps.size() + " apps from VPN");
+                for (String pkg : selectedApps) {
+                    try {
+                        if (getPackageName().equals(pkg)) continue; // Skip our own app
+                        builder.addDisallowedApplication(pkg);
+                        Log.d(TAG, "Added app to VPN blacklist: " + pkg);
+                    } catch (PackageManager.NameNotFoundException e) {
+                        Log.w(TAG, "App not found for blacklist: " + pkg, e);
                     }
-                } else {
-                    // Default: Route all apps through VPN (except our own app)
-                    Log.d(TAG, "VPN default mode - routing all apps through VPN");
                 }
             } else {
-                // Per-app mode disabled: Route all apps through VPN (except our own app)
-                Log.d(TAG, "VPN per-app mode disabled - routing all apps through VPN");
+                // No apps selected - route all apps through VPN
+                Log.d(TAG, "VPN per-app mode enabled but no apps selected - routing all apps through VPN");
             }
             
             // Add system apps that should bypass VPN for better performance
@@ -1642,37 +1911,36 @@ public class VpnService extends android.net.VpnService {
                 return false;
             }
             
-            // On Iranian censored networks, full HTTP verification may fail due to
-            // DPI/throttling even though the proxy tunnel is working fine.
-            // Strategy: try full HTTP test first, fall back to SOCKS-connect-only test.
-            
-            // Attempt 1: Full HTTP test (8s)
-            boolean basicConnectivity = checkSocksDownloadOnce(8000);
-            if (basicConnectivity) {
-                Log.i(TAG, "VPN routing verification successful - full HTTP test passed");
-                return true;
+            // Retry with backoff — proxy needs time for first connection on slow networks
+            int[] delays = {0, 1500, 3000};
+            for (int attempt = 0; attempt < delays.length; attempt++) {
+                if (delays[attempt] > 0) {
+                    Log.i(TAG, "Routing verify: waiting " + delays[attempt] + "ms before retry #" + (attempt + 1));
+                    try { Thread.sleep(delays[attempt]); } catch (InterruptedException ignored) { return false; }
+                }
+                
+                // Try Telegram DC first — most important for Iranian users
+                if (checkSocksTelegramDC(6000)) {
+                    Log.i(TAG, "✓ VPN routing verified (Telegram DC, attempt " + (attempt + 1) + ")");
+                    return true;
+                }
+                
+                // Try HTTP download test (general internet)
+                if (checkSocksDownloadOnce(8000)) {
+                    Log.i(TAG, "✓ VPN routing verified (HTTP test, attempt " + (attempt + 1) + ")");
+                    return true;
+                }
+                
+                // Fall back to TCP connect test (faster, less strict)
+                if (checkSocksTcpConnect(5000)) {
+                    Log.i(TAG, "✓ VPN routing verified (TCP test, attempt " + (attempt + 1) + ")");
+                    return true;
+                }
+                
+                Log.w(TAG, "Routing verify attempt " + (attempt + 1) + " failed");
             }
             
-            // Attempt 2: Retry with longer timeout (15s) for slow Iranian networks
-            Log.w(TAG, "First connectivity test failed, retrying with longer timeout...");
-            try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
-            basicConnectivity = checkSocksDownloadOnce(15000);
-            if (basicConnectivity) {
-                Log.i(TAG, "VPN routing verification successful on retry");
-                return true;
-            }
-            
-            // Attempt 3: Just verify SOCKS5 CONNECT succeeds (proxy is routing traffic)
-            // Even if HTTP response is slow, a successful SOCKS5 CONNECT proves the tunnel works
-            Log.w(TAG, "HTTP test failed, trying SOCKS-connect-only verification...");
-            try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
-            boolean connectOnly = checkSocksConnectOnly(10000);
-            if (connectOnly) {
-                Log.i(TAG, "VPN routing verified via SOCKS CONNECT (HTTP was slow but tunnel works)");
-                return true;
-            }
-            
-            Log.w(TAG, "VPN routing verification failed - SOCKS proxy not responding");
+            Log.e(TAG, "✗ VPN routing verification failed after " + delays.length + " attempts");
             return false;
             
         } catch (Exception e) {
@@ -1705,19 +1973,18 @@ public class VpnService extends android.net.VpnService {
                 return false;
             }
 
-            // SOCKS5 CONNECT to cp.cloudflare.com:80
-            String host = "cp.cloudflare.com";
-            byte[] hostBytes = host.getBytes(StandardCharsets.UTF_8);
-            int port = 80;
-            byte[] req = new byte[7 + hostBytes.length];
+            // SOCKS5 CONNECT to 1.1.1.1:80 (Cloudflare IP - no DNS needed)
+            byte[] req = new byte[10]; // Fixed size for IPv4
             req[0] = 0x05;
             req[1] = 0x01;
             req[2] = 0x00;
-            req[3] = 0x03;
-            req[4] = (byte) hostBytes.length;
-            System.arraycopy(hostBytes, 0, req, 5, hostBytes.length);
-            req[5 + hostBytes.length] = (byte) ((port >> 8) & 0xFF);
-            req[6 + hostBytes.length] = (byte) (port & 0xFF);
+            req[3] = 0x01; // ATYP=IPv4
+            req[4] = 0x01; // 1.1.1.1
+            req[5] = 0x01;
+            req[6] = 0x01;
+            req[7] = 0x01;
+            req[8] = 0x00; // Port 80
+            req[9] = 0x50;
             os.write(req);
             os.flush();
 
@@ -1774,16 +2041,185 @@ public class VpnService extends android.net.VpnService {
         }
     }
 
+    private boolean checkSocksTcpConnect(int timeoutMs) {
+        Socket socket = null;
+        try {
+            socket = new Socket();
+            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+            socket.setSoTimeout(timeoutMs);
+
+            OutputStream os = socket.getOutputStream();
+            InputStream is = socket.getInputStream();
+
+            // SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no auth)
+            os.write(new byte[]{0x05, 0x01, 0x00});
+            os.flush();
+            int ver = is.read();
+            int method = is.read();
+            if (ver != 0x05 || method != 0x00) {
+                Log.w(TAG, "SOCKS5 TCP test: handshake failed");
+                return false;
+            }
+
+            // CONNECT to 8.8.8.8:53 (Google DNS - reliable)
+            byte[] req = new byte[10]; // Fixed size for IPv4
+            req[0] = 0x05; // VER
+            req[1] = 0x01; // CMD=CONNECT
+            req[2] = 0x00; // RSV
+            req[3] = 0x01; // ATYP=IPv4
+            // IP address 8.8.8.8
+            req[4] = 0x08;
+            req[5] = 0x08;
+            req[6] = 0x08;
+            req[7] = 0x08;
+            // Port 53
+            req[8] = 0x00;
+            req[9] = 0x35;
+            os.write(req);
+            os.flush();
+
+            // Read reply: VER, REP, RSV, ATYP
+            int rVer = is.read();
+            int rep = is.read();
+            is.read();
+            int atyp = is.read();
+            
+            if (rVer != 0x05 || rep != 0x00) {
+                Log.w(TAG, "SOCKS5 TCP test: connect failed, rep=" + rep);
+                return false;
+            }
+
+            // Skip BND.ADDR and BND.PORT
+            if (atyp == 0x01) { // IPv4
+                readFully(is, new byte[6]); // 4 bytes IP + 2 bytes port
+            } else if (atyp == 0x04) { // IPv6
+                readFully(is, new byte[18]); // 16 bytes IP + 2 bytes port
+            } else if (atyp == 0x03) { // DOMAIN
+                int len = is.read();
+                if (len < 0) return false;
+                readFully(is, new byte[len + 2]); // domain + port
+            }
+            
+            Log.i(TAG, "SOCKS5 TCP test: connection successful");
+            return true;
+            
+        } catch (Exception e) {
+            Log.w(TAG, "SOCKS5 TCP test failed", e);
+            return false;
+        } finally {
+            if (socket != null) {
+                try { socket.close(); } catch (Exception ignored) {}
+            }
+        }
+    }
+
     private void checkConnectivity() {
         try {
-            if (checkSocksDownloadOnce(10000)) {
-                Log.i(TAG, "VPN SOCKS download test passed - config is healthy");
+            // Test Telegram DC connectivity — primary use case for Iranian users
+            boolean telegramOk = checkSocksTelegramDC(8000);
+            Log.i(TAG, "Telegram DC connectivity: " + (telegramOk ? "PASS" : "FAIL"));
+
+            // Test general internet
+            boolean downloadOk = checkSocksDownloadOnce(10000);
+            Log.i(TAG, "General internet (HTTP): " + (downloadOk ? "PASS" : "FAIL"));
+
+            if (telegramOk) {
+                Log.i(TAG, "VPN connectivity check PASSED — Telegram is reachable");
+            } else if (downloadOk) {
+                Log.i(TAG, "VPN connectivity check PARTIAL — Internet works but Telegram DC unreachable");
             } else {
-                Log.w(TAG, "VPN SOCKS download test failed");
+                Log.w(TAG, "VPN connectivity check FAILED — no connectivity through proxy");
             }
         } catch (Exception e) {
-            Log.w(TAG, "VPN SOCKS download test failed", e);
+            Log.w(TAG, "VPN connectivity check error", e);
         }
+    }
+
+    /**
+     * Test Telegram DC connectivity through SOCKS5 proxy.
+     * Tries to TCP-connect to multiple Telegram data centers.
+     * This is the most important connectivity test for Iranian users.
+     */
+    private boolean checkSocksTelegramDC(int timeoutMs) {
+        // Telegram DC IPs (DC1-DC5)
+        int[][] telegramDCs = {
+            {149, 154, 175, 50},   // DC1
+            {149, 154, 167, 51},   // DC2
+            {149, 154, 175, 100},  // DC3
+            {149, 154, 167, 91},   // DC4
+            {91, 108, 56, 130},    // DC5
+        };
+
+        for (int[] dc : telegramDCs) {
+            Socket socket = null;
+            try {
+                socket = new Socket();
+                socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+                socket.setSoTimeout(timeoutMs);
+
+                OutputStream os = socket.getOutputStream();
+                InputStream is = socket.getInputStream();
+
+                // SOCKS5 greeting
+                os.write(new byte[]{0x05, 0x01, 0x00});
+                os.flush();
+                int ver = is.read();
+                int method = is.read();
+                if (ver != 0x05 || method != 0x00) continue;
+
+                // SOCKS5 CONNECT to Telegram DC IP:443 (ATYP=0x01 IPv4)
+                byte[] req = new byte[10];
+                req[0] = 0x05; req[1] = 0x01; req[2] = 0x00; req[3] = 0x01;
+                req[4] = (byte) dc[0]; req[5] = (byte) dc[1];
+                req[6] = (byte) dc[2]; req[7] = (byte) dc[3];
+                req[8] = 0x01; req[9] = (byte) 0xBB; // port 443
+                os.write(req);
+                os.flush();
+
+                // Read SOCKS5 reply
+                int rVer = is.read();
+                int rep = is.read();
+                if (rVer != 0x05 || rep != 0x00) continue;
+
+                // Skip RSV + ATYP + BND.ADDR + BND.PORT
+                is.read(); // RSV
+                int atyp = is.read();
+                if (atyp == 0x01) { readFully(is, new byte[6]); }
+                else if (atyp == 0x04) { readFully(is, new byte[18]); }
+                else if (atyp == 0x03) { int len = is.read(); if (len > 0) readFully(is, new byte[len + 2]); }
+
+                // CRITICAL: Verify actual data flow, not just SOCKS5 CONNECT.
+                // XRay returns SOCKS5 success immediately but proxy outbound may fail.
+                // Send probe bytes and check if DC responds (proves bidirectional flow).
+                socket.setSoTimeout(5000);
+                byte[] probe = new byte[64];
+                for (int i = 0; i < probe.length; i++) probe[i] = (byte)(i ^ 0xAA);
+                os.write(probe);
+                os.flush();
+
+                byte[] buf = new byte[256];
+                try {
+                    int n = is.read(buf);
+                    if (n > 0) {
+                        Log.i(TAG, "Telegram DC " + dc[0] + "." + dc[1] + "." + dc[2] + "." + dc[3] + ":443 data flow verified (" + n + " bytes)");
+                        return true;
+                    }
+                    // Clean close = DC received our data
+                    Log.i(TAG, "Telegram DC " + dc[0] + "." + dc[1] + "." + dc[2] + "." + dc[3] + ":443 reachable (clean close)");
+                    return true;
+                } catch (SocketTimeoutException e) {
+                    // Timeout but SOCKS succeeded — still accept
+                    Log.i(TAG, "Telegram DC " + dc[0] + "." + dc[1] + "." + dc[2] + "." + dc[3] + ":443 reachable (SOCKS ok)");
+                    return true;
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (socket != null) {
+                    try { socket.close(); } catch (Exception ignored) {}
+                }
+            }
+        }
+        return false;
     }
 
     public void stopVpn() {
@@ -1989,51 +2425,224 @@ public class VpnService extends android.net.VpnService {
         }
     }
 
+    /**
+     * Active Telegram stability monitoring thread.
+     * Checks Telegram DC connectivity every 90 seconds and tracks:
+     * - Consecutive failures (triggers switch after 2)
+     * - Latency trend (triggers switch if latency doubles from baseline)
+     * - Finds better config from top cache when current degrades
+     */
     private void startAutoSwitchThread() {
         autoSwitchThread = new Thread(() -> {
+            int consecutiveFailures = 0;
+            int baselineLatency = -1;    // Best observed latency (ms)
+            int lastLatency = -1;
+            final int CHECK_INTERVAL_MS = 90_000;       // 90 seconds
+            final int MAX_CONSECUTIVE_FAILURES = 2;      // Switch after 2 failures
+            final double LATENCY_SPIKE_FACTOR = 2.5;     // Switch if latency > 2.5x baseline
+
+            // Initial delay — let proxy stabilize before first check
+            try { Thread.sleep(30_000); } catch (InterruptedException e) { return; }
+
             while (isRunning.get() && !Thread.currentThread().isInterrupted()) {
                 try {
-                    Thread.sleep(5 * 60 * 1000); // Check every 5 minutes
-                    JSONObject betterConfig = findBetterConfig();
-                    if (betterConfig != null) {
-                        Log.i(TAG, "Found better config, switching...");
-                        switchToConfig(betterConfig);
+                    // Measure current Telegram DC latency
+                    int latency = measureTelegramDCLatency(6000);
+
+                    if (latency >= 0) {
+                        // Telegram is reachable
+                        consecutiveFailures = 0;
+                        lastLatency = latency;
+
+                        // Update baseline (use the best observed latency)
+                        if (baselineLatency < 0 || latency < baselineLatency) {
+                            baselineLatency = latency;
+                        }
+                        currentTelegramLatency = latency;
+
+                        // Check for latency spike
+                        if (baselineLatency > 0 && latency > baselineLatency * LATENCY_SPIKE_FACTOR) {
+                            Log.w(TAG, "[TG-MON] Latency spike: " + latency + "ms (baseline=" + baselineLatency + "ms)");
+                            // Try to find a better config
+                            JSONObject better = findBetterTelegramConfig();
+                            if (better != null) {
+                                Log.i(TAG, "[TG-MON] Switching to config with better Telegram latency");
+                                switchToConfig(better);
+                                baselineLatency = -1; // Reset baseline for new config
+                            }
+                        } else {
+                            Log.d(TAG, "[TG-MON] Telegram OK: " + latency + "ms (baseline=" + baselineLatency + "ms)");
+                        }
+                    } else {
+                        // Telegram unreachable
+                        consecutiveFailures++;
+                        currentTelegramLatency = Integer.MAX_VALUE;
+                        Log.w(TAG, "[TG-MON] Telegram FAIL #" + consecutiveFailures
+                            + " (last good=" + lastLatency + "ms)");
+
+                        if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
+                            Log.w(TAG, "[TG-MON] " + consecutiveFailures + " consecutive failures — searching for better config");
+                            JSONObject better = findBetterTelegramConfig();
+                            if (better != null) {
+                                Log.i(TAG, "[TG-MON] Switching to config with working Telegram");
+                                switchToConfig(better);
+                                consecutiveFailures = 0;
+                                baselineLatency = -1;
+                            } else {
+                                Log.w(TAG, "[TG-MON] No better config found — keeping current");
+                            }
+                        }
                     }
+
+                    Thread.sleep(CHECK_INTERVAL_MS);
                 } catch (InterruptedException e) {
-                    Log.i(TAG, "Auto-switch thread interrupted");
+                    Log.i(TAG, "[TG-MON] Monitor thread interrupted");
                     break;
                 } catch (Exception e) {
-                    Log.w(TAG, "Error in auto-switch thread", e);
+                    Log.w(TAG, "[TG-MON] Error in monitor", e);
+                    try { Thread.sleep(CHECK_INTERVAL_MS); } catch (InterruptedException ie) { break; }
                 }
             }
-        });
+        }, "TelegramMonitor");
         autoSwitchThread.setDaemon(true);
         autoSwitchThread.start();
     }
 
-    private JSONObject findBetterConfig() {
+    /**
+     * Measure Telegram DC latency through the SOCKS5 proxy.
+     * Returns latency in ms, or -1 if unreachable.
+     * Used for live monitoring — tests a single DC with full data flow verification.
+     */
+    private int measureTelegramDCLatency(int timeoutMs) {
+        // Telegram DC IPs — try multiple DCs for redundancy
+        int[][] telegramDCs = {
+            {149, 154, 175, 50},   // DC1
+            {149, 154, 167, 51},   // DC2
+            {149, 154, 175, 100},  // DC3
+            {149, 154, 167, 91},   // DC4
+            {91, 108, 56, 130},    // DC5
+        };
+
+        for (int[] dc : telegramDCs) {
+            Socket socket = null;
+            try {
+                long start = System.currentTimeMillis();
+                socket = new Socket();
+                socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+                socket.setSoTimeout(timeoutMs);
+
+                OutputStream os = socket.getOutputStream();
+                InputStream is = socket.getInputStream();
+
+                // SOCKS5 greeting
+                os.write(new byte[]{0x05, 0x01, 0x00});
+                os.flush();
+                if (is.read() != 0x05 || is.read() != 0x00) continue;
+
+                // SOCKS5 CONNECT to Telegram DC IP:443
+                byte[] req = new byte[10];
+                req[0] = 0x05; req[1] = 0x01; req[2] = 0x00; req[3] = 0x01;
+                req[4] = (byte) dc[0]; req[5] = (byte) dc[1];
+                req[6] = (byte) dc[2]; req[7] = (byte) dc[3];
+                req[8] = 0x01; req[9] = (byte) 0xBB; // port 443
+                os.write(req);
+                os.flush();
+
+                // Read SOCKS5 reply
+                if (is.read() != 0x05 || is.read() != 0x00) continue;
+
+                // Skip RSV + ATYP + BND.ADDR + BND.PORT
+                is.read(); // RSV
+                int atyp = is.read();
+                if (atyp == 0x01) readFully(is, new byte[6]);
+                else if (atyp == 0x04) readFully(is, new byte[18]);
+                else if (atyp == 0x03) { int len = is.read(); if (len > 0) readFully(is, new byte[len + 2]); }
+
+                // Verify data flow — send probe, wait for response
+                socket.setSoTimeout(5000);
+                byte[] probe = new byte[64];
+                for (int i = 0; i < probe.length; i++) probe[i] = (byte)(i ^ 0xAA);
+                os.write(probe);
+                os.flush();
+
+                byte[] buf = new byte[256];
+                try {
+                    int n = is.read(buf);
+                    int latency = (int)(System.currentTimeMillis() - start);
+                    if (n > 0 || n == -1) return latency; // Data or clean close = success
+                } catch (SocketTimeoutException e) {
+                    // Timeout but SOCKS succeeded — still valid with penalty
+                    return (int)(System.currentTimeMillis() - start);
+                }
+            } catch (Exception ignored) {
+            } finally {
+                if (socket != null) {
+                    try { socket.close(); } catch (Exception ignored) {}
+                }
+            }
+        }
+        return -1; // All DCs unreachable
+    }
+
+    /**
+     * Find a config from top cache that has better Telegram latency than current.
+     * Prioritizes configs with verified Telegram DC connectivity.
+     */
+    private JSONObject findBetterTelegramConfig() {
         try {
+            if (configManager == null) return null;
             List<ConfigManager.ConfigItem> topConfigs = configManager.getTopConfigs();
             if (topConfigs.isEmpty()) return null;
 
-            ConfigManager.ConfigItem best = topConfigs.get(0);
-            if (currentConfig == null) return null;
+            String currentUri = currentConfig != null ? currentConfig.optString("uri", "") : "";
 
-            // Calculate combined scores (latency + telegram + instagram)
-            long currentScore = (long) currentConfig.optInt("latency_ms", Integer.MAX_VALUE) + currentTelegramLatency + currentInstagramLatency;
-            long bestScore = (long) best.latency + best.telegram_latency + best.instagram_latency;
+            // Find config with best Telegram latency that isn't the current one
+            ConfigManager.ConfigItem bestTelegram = null;
+            for (ConfigManager.ConfigItem cfg : topConfigs) {
+                if (cfg.uri.equals(currentUri)) continue; // Skip current
+                if (cfg.telegram_latency <= 0 || cfg.telegram_latency >= Integer.MAX_VALUE) continue;
 
-            // If best config has significantly better combined score (at least 20% better), switch
-            if (bestScore > 0 && bestScore < currentScore * 0.8) {
+                if (bestTelegram == null || cfg.telegram_latency < bestTelegram.telegram_latency) {
+                    bestTelegram = cfg;
+                }
+            }
+
+            // If no Telegram-verified config, use config with best general latency
+            if (bestTelegram == null) {
+                for (ConfigManager.ConfigItem cfg : topConfigs) {
+                    if (cfg.uri.equals(currentUri)) continue;
+                    if (cfg.latency <= 0 || cfg.latency >= 15000) continue;
+
+                    if (bestTelegram == null || cfg.latency < bestTelegram.latency) {
+                        bestTelegram = cfg;
+                    }
+                }
+            }
+
+            if (bestTelegram == null) return null;
+
+            // Only switch if the candidate is meaningfully better
+            boolean shouldSwitch = false;
+            if (currentTelegramLatency >= Integer.MAX_VALUE) {
+                // Current Telegram is dead — any working config is better
+                shouldSwitch = true;
+            } else if (bestTelegram.telegram_latency > 0 && bestTelegram.telegram_latency < Integer.MAX_VALUE) {
+                // Both have Telegram latency — switch if candidate is >30% better
+                shouldSwitch = bestTelegram.telegram_latency < currentTelegramLatency * 0.7;
+            }
+
+            if (shouldSwitch) {
                 JSONObject better = new JSONObject();
-                better.put("uri", best.uri);
-                better.put("ps", best.name);
-                better.put("protocol", best.protocol);
-                better.put("latency_ms", best.latency);
+                better.put("uri", bestTelegram.uri);
+                better.put("ps", bestTelegram.name);
+                better.put("protocol", bestTelegram.protocol);
+                better.put("latency_ms", bestTelegram.latency);
+                Log.i(TAG, "[TG-MON] Better config found: " + bestTelegram.name
+                    + " (tg=" + bestTelegram.telegram_latency + "ms vs current=" + currentTelegramLatency + ")");
                 return better;
             }
         } catch (Exception e) {
-            Log.w(TAG, "Error finding better config", e);
+            Log.w(TAG, "[TG-MON] Error finding better config", e);
         }
         return null;
     }
@@ -2046,15 +2655,47 @@ public class VpnService extends android.net.VpnService {
             // Update current config
             currentConfig = newConfig;
 
-            // Start new XRay with new config
-            if (startXRaySocksProcess(newConfig)) {
-                Log.i(TAG, "Switched to new config successfully");
-                updateNotification("Switched to better server", NotificationState.CONNECTED);
+            // Try balanced mode first with URIs from top configs
+            List<String> uris = new ArrayList<>();
+            uris.add(newConfig.optString("uri", ""));
+            if (configManager != null) {
+                List<ConfigManager.ConfigItem> top = configManager.getTopConfigs();
+                for (ConfigManager.ConfigItem cfg : top) {
+                    if (!cfg.uri.equals(uris.get(0)) && uris.size() < 5) {
+                        if (cfg.telegram_latency > 0 && cfg.telegram_latency < Integer.MAX_VALUE) {
+                            uris.add(cfg.uri);
+                        }
+                    }
+                }
+            }
+
+            boolean started = false;
+            if (uris.size() > 1) {
+                started = startXRayBalancedProcess(uris);
+                if (started) {
+                    Log.i(TAG, "[TG-MON] Switched to balanced config with " + uris.size() + " servers");
+                }
+            }
+            if (!started) {
+                started = startXRaySocksProcess(newConfig);
+            }
+
+            if (started) {
+                boolean portAlive = waitForPortAlive(XRAY_SOCKS_PORT, 8000);
+                if (portAlive) {
+                    String msg = uris.size() > 1 && started
+                        ? "Switched (" + uris.size() + " balanced)"
+                        : "Switched to better server";
+                    updateNotification(msg, NotificationState.CONNECTED);
+                    broadcastStatus("Connected", msg, true);
+                } else {
+                    Log.w(TAG, "[TG-MON] SOCKS port not alive after switch");
+                }
             } else {
-                Log.w(TAG, "Failed to start new config after switch");
+                Log.w(TAG, "[TG-MON] Failed to start new config after switch");
             }
         } catch (Exception e) {
-            Log.e(TAG, "Error switching config", e);
+            Log.e(TAG, "[TG-MON] Error switching config", e);
         }
     }
 

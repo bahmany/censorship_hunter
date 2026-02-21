@@ -202,10 +202,9 @@ public class ConfigMonitorService extends Service {
             return;
         }
 
-        List<ConfigManager.ConfigItem> configs = configManager.getConfigs();
-        if (configs.isEmpty()) {
-            configs = configManager.getTopConfigs();
-        }
+        // Pass ALL configs — ConfigTester handles dedup + 3-phase pipeline internally.
+        // getPrioritizedConfigs() puts previously-working configs first.
+        List<ConfigManager.ConfigItem> configs = configManager.getPrioritizedConfigs();
         if (configs.isEmpty()) {
             Log.w(TAG, "No configs to test");
             updateNotification("No configs - waiting for refresh");
@@ -213,14 +212,8 @@ public class ConfigMonitorService extends Service {
             return;
         }
 
-        // Limit test batch to avoid testing too many configs
-        // Test top 50 by protocol priority (already sorted) - reduced from 200
-        if (configs.size() > 50) {
-            configs = configs.subList(0, 50);
-        }
-
         final int totalToTest = configs.size();
-        Log.i(TAG, "Starting health check: " + totalToTest + " configs");
+        Log.i(TAG, "Starting health check: " + totalToTest + " configs (pipeline will dedup)");
         updateNotification("Testing " + totalToTest + " configs...");
 
         // Keep reference to tested configs - config refresh may replace configManager's list
@@ -229,8 +222,8 @@ public class ConfigMonitorService extends Service {
         configTester.testConfigs(configs, new ConfigTester.TestCallback() {
             @Override
             public void onProgress(int tested, int total) {
-                // Update less frequently to reduce notification spam
-                if (!isDestroyed && tested % 15 == 0) { // Reduced from 25 for more frequent updates
+                // Update less frequently to reduce notification spam (thousands of configs now)
+                if (!isDestroyed && (tested % 200 == 0 || tested == total)) {
                     updateNotification("Testing: " + tested + "/" + total);
                 }
             }

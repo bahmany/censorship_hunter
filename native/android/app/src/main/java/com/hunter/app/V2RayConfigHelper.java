@@ -5,9 +5,23 @@ import android.util.Log;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.DatagramPacket;
+import java.net.DatagramSocket;
+import java.net.InetAddress;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * Static helper for parsing V2Ray URIs into XRay-compatible outbound JSON configs.
@@ -16,6 +30,273 @@ import java.util.Map;
  */
 public class V2RayConfigHelper {
     private static final String TAG = "V2RayConfigHelper";
+
+    // ── DNS Discovery: cached results ──────────────────────────────────
+    private static final Object dnsLock = new Object();
+    private static volatile List<String> cachedDnsServers = null;
+    private static volatile long dnsDiscoveryTime = 0;
+    private static final long DNS_CACHE_TTL = 10 * 60 * 1000; // 10 min
+
+    // ── All known DNS servers (100+) ──────────────────────────────────
+    private static final String[] ALL_DNS_SERVERS = {
+        // --- Iranian ISP / local DNS (highest priority — reachable without proxy) ---
+        "10.202.10.10",    // Radar DNS
+        "10.202.10.11",    // Radar DNS 2
+        "10.202.10.202",   // 403.online
+        "10.202.10.102",   // 403.online 2
+        "178.22.122.100",  // Shecan
+        "185.51.200.2",    // Shecan 2
+        "78.157.42.100",   // Electro
+        "78.157.42.101",   // Electro 2
+        "185.55.226.26",   // Begzar
+        "185.55.225.25",   // Begzar 2
+        "85.15.1.14",      // Shatel DNS
+        "85.15.1.15",      // Shatel DNS 2
+        "172.29.2.100",    // HostIran
+        "217.218.26.77",   // ITC Iran Telecom
+        "2.189.1.1",       // ITC Iran Telecom 2
+        "2.188.21.120",    // TIC Infrastructure
+        "2.188.21.100",    // TIC Infrastructure 2
+        "5.160.80.180",    // Respina
+        "5.160.80.183",    // Respina 2
+        "5.202.177.197",   // Pishgaman
+        "5.202.100.101",   // Pishgaman 2
+        "45.135.243.61",   // Faraso
+        "109.230.83.245",  // Faraso 2
+        "81.29.249.82",    // Pasargad Arian
+        // --- Global public DNS (may be blocked by Iranian ISP) ---
+        "8.8.8.8",         // Google
+        "8.8.4.4",         // Google 2
+        "1.1.1.1",         // Cloudflare
+        "1.0.0.1",         // Cloudflare 2
+        "9.9.9.9",         // Quad9
+        "149.112.112.112", // Quad9 2
+        "208.67.222.222",  // OpenDNS
+        "208.67.220.220",  // OpenDNS 2
+        "185.228.168.9",   // CleanBrowsing
+        "185.228.169.9",   // CleanBrowsing 2
+        "76.76.19.19",     // Alternate DNS
+        "76.223.122.150",  // Alternate DNS 2
+        "94.140.14.14",    // AdGuard
+        "94.140.15.15",    // AdGuard 2
+        "8.26.56.26",      // Comodo
+        "8.20.247.20",     // Comodo 2
+        "64.6.64.6",       // Verisign
+        "64.6.65.6",       // Verisign 2
+        "77.88.8.8",       // Yandex
+        "77.88.8.1",       // Yandex 2
+        "195.46.39.39",    // SafeDNS
+        "195.46.39.40",    // SafeDNS 2
+        "4.2.2.2",         // Level3
+        "4.2.2.1",         // Level3 2
+        "156.154.70.1",    // DNS Advantage
+        "156.154.71.1",    // DNS Advantage 2
+        "84.200.69.80",    // DNS.WATCH
+        "84.200.70.40",    // DNS.WATCH 2
+        "5.9.164.112",     // Digitalcourage
+        "46.182.19.48",    // Digitalcourage 2
+        "103.2.57.5",      // IIJ Japan
+        "103.2.57.6",      // IIJ Japan 2
+        "149.112.112.11",  // Quad9 Japan
+        "9.9.9.11",        // Quad9 variant
+        "185.121.177.177", // OpenNIC
+        "169.239.202.202", // OpenNIC 2
+        "185.231.182.126", // OpenNIC 3
+        "185.43.135.1",    // OpenNIC 4
+        "91.239.100.100",  // PublicDNS.org
+        "89.233.43.71",    // PublicDNS.org 2
+        "176.10.118.132",  // Swiss DNS
+        "176.10.118.133",  // Swiss DNS 2
+        "199.85.127.10",   // Norton/Symantec
+        "199.85.126.10",   // Norton/Symantec 2
+        "205.210.42.205",  // DNSResolvers
+        "64.68.200.200",   // DNSResolvers 2
+        "209.244.0.3",     // Level3 alt
+        "209.244.0.4",     // Level3 alt 2
+        "216.146.35.35",   // DynDNS
+        "216.146.36.36",   // DynDNS 2
+        "74.50.55.161",    // VisiZone
+        "74.50.55.162",    // VisiZone 2
+        "223.5.5.5",       // AliDNS China
+        "223.6.6.6",       // AliDNS China 2
+        "119.29.29.29",    // DNSPod China
+        "114.114.114.114", // 114DNS China
+        "114.114.115.115", // 114DNS China 2
+        "180.76.76.76",    // Baidu DNS
+        "101.226.4.6",     // China DNS
+        "123.125.81.6",    // China DNS 2
+    };
+
+    /**
+     * Get system DNS servers from Android properties.
+     */
+    public static List<String> getSystemDnsServers() {
+        List<String> servers = new ArrayList<>();
+        try {
+            for (int i = 1; i <= 4; i++) {
+                Process p = Runtime.getRuntime().exec("getprop net.dns" + i);
+                BufferedReader br = new BufferedReader(new InputStreamReader(p.getInputStream()));
+                String line = br.readLine();
+                br.close();
+                p.waitFor();
+                if (line != null && !line.trim().isEmpty()) {
+                    String ip = line.trim();
+                    if (!ip.contains(":") && !ip.startsWith("127.") && !ip.equals("0.0.0.0")) {
+                        if (!servers.contains(ip)) {
+                            servers.add(ip);
+                        }
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Failed to get system DNS: " + e.getMessage());
+        }
+        return servers;
+    }
+
+    /**
+     * Probe a single DNS server with a real UDP query for "example.com".
+     * Returns response time in ms, or -1 if failed.
+     */
+    private static int probeDns(String server, int timeoutMs) {
+        try {
+            // Build DNS query for example.com A record
+            byte[] query = buildDnsQuery("example.com");
+            InetAddress addr = InetAddress.getByName(server);
+            DatagramSocket sock = new DatagramSocket();
+            sock.setSoTimeout(timeoutMs);
+            DatagramPacket sendPkt = new DatagramPacket(query, query.length, addr, 53);
+            DatagramPacket recvPkt = new DatagramPacket(new byte[512], 512);
+            long start = System.currentTimeMillis();
+            sock.send(sendPkt);
+            sock.receive(recvPkt);
+            int elapsed = (int)(System.currentTimeMillis() - start);
+            sock.close();
+            // Verify it's a valid DNS response (QR bit set, RCODE=0)
+            byte[] resp = recvPkt.getData();
+            if (recvPkt.getLength() < 12) return -1;
+            boolean isResponse = (resp[2] & 0x80) != 0;
+            int rcode = resp[3] & 0x0F;
+            if (!isResponse || rcode != 0) return -1;
+            return elapsed;
+        } catch (Exception e) {
+            return -1;
+        }
+    }
+
+    /**
+     * Build a minimal DNS query packet for a domain (A record).
+     */
+    private static byte[] buildDnsQuery(String domain) {
+        // Header: ID=0x1234, QR=0, OPCODE=0, RD=1, QDCOUNT=1
+        byte[] header = {0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+        // Question: encode domain labels
+        String[] labels = domain.split("\\.");
+        int qLen = 0;
+        for (String l : labels) qLen += 1 + l.length();
+        qLen += 1 + 4; // null terminator + QTYPE(2) + QCLASS(2)
+        byte[] question = new byte[qLen];
+        int pos = 0;
+        for (String l : labels) {
+            question[pos++] = (byte) l.length();
+            for (int i = 0; i < l.length(); i++) question[pos++] = (byte) l.charAt(i);
+        }
+        question[pos++] = 0x00; // end of labels
+        question[pos++] = 0x00; question[pos++] = 0x01; // QTYPE = A
+        question[pos++] = 0x00; question[pos++] = 0x01; // QCLASS = IN
+        byte[] packet = new byte[header.length + question.length];
+        System.arraycopy(header, 0, packet, 0, header.length);
+        System.arraycopy(question, 0, packet, header.length, question.length);
+        return packet;
+    }
+
+    /**
+     * Discover the best DNS servers by probing all known servers in parallel.
+     * Returns top N fastest servers that actually respond.
+     * Results are cached for DNS_CACHE_TTL.
+     */
+    public static List<String> discoverBestDns(int maxResults) {
+        synchronized (dnsLock) {
+            if (cachedDnsServers != null && (System.currentTimeMillis() - dnsDiscoveryTime) < DNS_CACHE_TTL) {
+                return new ArrayList<>(cachedDnsServers);
+            }
+        }
+
+        Log.i(TAG, "Starting DNS discovery across " + ALL_DNS_SERVERS.length + " servers...");
+        long startTime = System.currentTimeMillis();
+
+        // Collect system DNS too
+        List<String> systemDns = getSystemDnsServers();
+        List<String> allToTest = new ArrayList<>(Arrays.asList(ALL_DNS_SERVERS));
+        for (String s : systemDns) {
+            if (!allToTest.contains(s)) allToTest.add(0, s); // system DNS first
+        }
+
+        final ConcurrentHashMap<String, Integer> results = new ConcurrentHashMap<>();
+        final int PROBE_TIMEOUT = 2000; // 2s per probe
+        ExecutorService pool = Executors.newFixedThreadPool(40);
+        final CountDownLatch latch = new CountDownLatch(allToTest.size());
+
+        for (String dns : allToTest) {
+            pool.execute(() -> {
+                try {
+                    int ms = probeDns(dns, PROBE_TIMEOUT);
+                    if (ms >= 0) {
+                        results.put(dns, ms);
+                    }
+                } finally {
+                    latch.countDown();
+                }
+            });
+        }
+
+        try {
+            latch.await(5, TimeUnit.SECONDS); // max 5s total
+        } catch (InterruptedException ignored) {}
+        pool.shutdownNow();
+
+        // Sort by response time
+        List<Map.Entry<String, Integer>> sorted = new ArrayList<>(results.entrySet());
+        sorted.sort((a, b) -> a.getValue().compareTo(b.getValue()));
+
+        List<String> best = new ArrayList<>();
+        for (int i = 0; i < Math.min(maxResults, sorted.size()); i++) {
+            best.add(sorted.get(i).getKey());
+            Log.i(TAG, "DNS #" + (i+1) + ": " + sorted.get(i).getKey() + " (" + sorted.get(i).getValue() + "ms)");
+        }
+
+        long elapsed = System.currentTimeMillis() - startTime;
+        Log.i(TAG, "DNS discovery done: " + results.size() + "/" + allToTest.size()
+            + " responded, top " + best.size() + " selected (" + elapsed + "ms)");
+
+        // Ensure we always have at least some fallbacks
+        if (best.isEmpty()) {
+            for (String s : systemDns) { if (!best.contains(s)) best.add(s); }
+            if (!best.contains("178.22.122.100")) best.add("178.22.122.100");
+            if (!best.contains("78.157.42.100")) best.add("78.157.42.100");
+            if (!best.contains("10.202.10.202")) best.add("10.202.10.202");
+            Log.w(TAG, "No DNS responded in time, using fallbacks: " + best);
+        }
+
+        // Cache
+        synchronized (dnsLock) {
+            cachedDnsServers = new ArrayList<>(best);
+            dnsDiscoveryTime = System.currentTimeMillis();
+        }
+        return best;
+    }
+
+    /**
+     * Build DNS server list for XRay config using discovered best servers.
+     */
+    private static JSONArray buildDnsServers() {
+        List<String> best = discoverBestDns(6); // top 6 fastest
+        JSONArray servers = new JSONArray();
+        for (String dns : best) {
+            servers.put(dns);
+        }
+        return servers;
+    }
 
     /**
      * Parse a V2Ray URI (vmess://, vless://, trojan://, ss://, hy2://, hysteria2://) into an XRay outbound JSON object.
@@ -44,22 +325,12 @@ public class V2RayConfigHelper {
                 return null;
             }
 
-            // CRITICAL: Force XRay to resolve proxy server domains via its built-in
-            // DNS module instead of Go's system resolver. On Android, Go defaults to
-            // [::1]:53 which doesn't exist, causing ALL domain lookups to fail.
-            if (result != null) {
-                JSONObject streamSettings = result.optJSONObject("streamSettings");
-                if (streamSettings == null) {
-                    streamSettings = new JSONObject();
-                    result.put("streamSettings", streamSettings);
-                }
-                JSONObject sockopt = streamSettings.optJSONObject("sockopt");
-                if (sockopt == null) {
-                    sockopt = new JSONObject();
-                    streamSettings.put("sockopt", sockopt);
-                }
-                sockopt.put("domainStrategy", "UseIPv4");
-            }
+            // Since we pre-resolve proxy server hostnames to IPs in generateFullConfig/
+            // generateBalancedConfig, XRay doesn't need to resolve them via DNS.
+            // Using "AsIs" avoids the DNS circular dependency when tun2socks is active.
+            // Previously "UseIPv4" caused rcode:3 errors because Iranian ISP DNS
+            // couldn't resolve CDN hostnames like s14.fastly80-2.hosting-ip.com.
+            // No sockopt.domainStrategy needed — pre-resolution handles it.
 
             return result;
         } catch (Exception e) {
@@ -69,12 +340,365 @@ public class V2RayConfigHelper {
     }
 
     /**
+     * Pre-resolve the proxy server hostname in an outbound config to an IP address.
+     * This is critical for VPN mode: when tun2socks is active, XRay's DNS queries
+     * get captured by tun2socks → sent back to XRay → circular dependency.
+     * Also critical for test configs: Go's system resolver on Android defaults to
+     * [::1]:53 which doesn't exist → "connection refused" for all domain lookups.
+     * By resolving the hostname BEFORE starting XRay, we avoid both issues.
+     *
+     * Uses direct UDP DNS queries to known DNS servers (bypasses broken system resolver).
+     */
+    public static void preResolveOutboundHost(JSONObject outbound) {
+        try {
+            String protocol = outbound.optString("protocol", "");
+            JSONObject settings = outbound.optJSONObject("settings");
+            if (settings == null) return;
+
+            String address = null;
+            JSONObject serverObj = null;
+
+            // Extract server address based on protocol
+            if ("vmess".equals(protocol) || "vless".equals(protocol)) {
+                JSONArray vnext = settings.optJSONArray("vnext");
+                if (vnext != null && vnext.length() > 0) {
+                    serverObj = vnext.getJSONObject(0);
+                    address = serverObj.optString("address", "");
+                }
+            } else if ("trojan".equals(protocol) || "shadowsocks".equals(protocol)) {
+                JSONArray servers = settings.optJSONArray("servers");
+                if (servers != null && servers.length() > 0) {
+                    serverObj = servers.getJSONObject(0);
+                    address = serverObj.optString("address", "");
+                }
+            }
+
+            if (address == null || address.isEmpty() || serverObj == null) return;
+
+            // Check if it's already an IP address
+            if (address.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+                if (isPoisonedOrBogonIp(address)) {
+                    Log.w(TAG, "Proxy address is a bogon/private IP: " + address + " — config likely poisoned");
+                }
+                return;
+            }
+
+            // Resolve hostname to IP using direct UDP DNS queries
+            // (bypasses Android's broken [::1]:53 system resolver)
+            Log.i(TAG, "Pre-resolving proxy hostname: " + address);
+            String ip = resolveHostnameDirectly(address);
+            if (ip != null) {
+                Log.i(TAG, "Resolved " + address + " -> " + ip);
+                serverObj.put("address", ip);
+            } else {
+                Log.w(TAG, "Could not resolve proxy hostname: " + address + " (will keep domain, XRay DNS may handle it)");
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error in preResolveOutboundHost", e);
+        }
+    }
+
+    /**
+     * Check if an IP address is poisoned/bogon (returned by Iranian censored DNS).
+     * Iranian ISPs return private IPs like 10.10.34.36 for blocked domains.
+     * These must NEVER be used as proxy server addresses.
+     */
+    private static boolean isPoisonedOrBogonIp(String ip) {
+        if (ip == null || ip.isEmpty()) return true;
+        try {
+            String[] parts = ip.split("\\.");
+            if (parts.length != 4) return true;
+            int a = Integer.parseInt(parts[0]);
+            int b = Integer.parseInt(parts[1]);
+
+            // 0.0.0.0/8 — "this" network
+            if (a == 0) return true;
+            // 10.0.0.0/8 — private (Iranian DNS poison target: 10.10.34.36)
+            if (a == 10) return true;
+            // 100.64.0.0/10 — CGN shared address space
+            if (a == 100 && b >= 64 && b <= 127) return true;
+            // 127.0.0.0/8 — loopback
+            if (a == 127) return true;
+            // 169.254.0.0/16 — link-local
+            if (a == 169 && b == 254) return true;
+            // 172.16.0.0/12 — private
+            if (a == 172 && b >= 16 && b <= 31) return true;
+            // 192.0.0.0/24 — IANA special
+            if (a == 192 && b == 0 && Integer.parseInt(parts[2]) == 0) return true;
+            // 192.168.0.0/16 — private
+            if (a == 192 && b == 168) return true;
+            // 198.18.0.0/15 — benchmarking
+            if (a == 198 && (b == 18 || b == 19)) return true;
+            // 224.0.0.0/4 — multicast, 240.0.0.0/4 — reserved
+            if (a >= 224) return true;
+
+            return false;
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    /**
+     * Check if an outbound's proxy server address is still a domain name (not an IP).
+     * After preResolveOutboundHost(), if the address is still a domain, it means
+     * DNS resolution failed (all results were poisoned). On Android, XRay's Go
+     * resolver defaults to [::1]:53 which doesn't exist, so these outbounds will
+     * ALWAYS fail with "connection refused" and must be excluded from balanced configs.
+     */
+    private static boolean isOutboundAddressUnresolved(JSONObject outbound) {
+        try {
+            String protocol = outbound.optString("protocol", "");
+            JSONObject settings = outbound.optJSONObject("settings");
+            if (settings == null) return false;
+
+            String address = null;
+            if ("vmess".equals(protocol) || "vless".equals(protocol)) {
+                JSONArray vnext = settings.optJSONArray("vnext");
+                if (vnext != null && vnext.length() > 0) {
+                    address = vnext.getJSONObject(0).optString("address", "");
+                }
+            } else if ("trojan".equals(protocol) || "shadowsocks".equals(protocol)) {
+                JSONArray servers = settings.optJSONArray("servers");
+                if (servers != null && servers.length() > 0) {
+                    address = servers.getJSONObject(0).optString("address", "");
+                }
+            }
+
+            if (address == null || address.isEmpty()) return false;
+
+            // If it's an IP address, it's resolved
+            return !address.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$");
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    /**
+     * Resolve a hostname to an IPv4 address using direct UDP DNS queries.
+     * Tries multiple DNS servers in parallel to maximize success on censored networks.
+     * IMPORTANT: Iranian DNS servers (Shecan, Electro, etc.) poison responses for
+     * blocked/foreign domains, returning bogus IPs like 10.10.34.36. We MUST use
+     * global DNS servers ONLY for proxy hostname resolution, and validate all results
+     * to reject poisoned/bogon IPs.
+     * Returns the first valid (non-poisoned) IP, or null if all fail.
+     */
+    private static String resolveHostnameDirectly(String hostname) {
+        // ONLY global DNS servers for proxy hostname resolution.
+        // Iranian DNS (Shecan, Electro) POISON foreign proxy domains → 10.10.34.36
+        // They are useful for XRay's internal DNS (resolving sites through proxy)
+        // but MUST NOT be used to resolve the proxy server address itself.
+        String[] dnsServers = {
+            "1.1.1.1", "8.8.8.8", "9.9.9.9",           // Global public DNS
+            "208.67.222.222", "1.0.0.1",                  // OpenDNS, Cloudflare secondary
+            "8.8.4.4", "149.112.112.112",                  // Google 2, Quad9 2
+            "223.5.5.5", "119.29.29.29"                    // AliDNS, DNSPod (not censored for foreign domains)
+        };
+
+        byte[] query = buildDnsQuery(hostname);
+
+        // Collect ALL results, then pick the best non-poisoned one
+        final ConcurrentHashMap<String, String> dnsResults = new ConcurrentHashMap<>();
+        final Object lock = new Object();
+        final String[] firstGoodResult = {null};
+        Thread[] threads = new Thread[dnsServers.length];
+
+        for (int i = 0; i < dnsServers.length; i++) {
+            final String dns = dnsServers[i];
+            threads[i] = new Thread(() -> {
+                try {
+                    synchronized (lock) {
+                        if (firstGoodResult[0] != null) return; // already found good result
+                    }
+                    InetAddress dnsAddr = InetAddress.getByName(dns);
+                    DatagramSocket sock = new DatagramSocket();
+                    sock.setSoTimeout(3000);
+                    DatagramPacket sendPkt = new DatagramPacket(query, query.length, dnsAddr, 53);
+                    DatagramPacket recvPkt = new DatagramPacket(new byte[512], 512);
+                    sock.send(sendPkt);
+                    sock.receive(recvPkt);
+                    sock.close();
+
+                    String ip = extractIpFromDnsResponse(recvPkt.getData(), recvPkt.getLength());
+                    if (ip != null) {
+                        dnsResults.put(dns, ip);
+                        if (!isPoisonedOrBogonIp(ip)) {
+                            synchronized (lock) {
+                                if (firstGoodResult[0] == null) {
+                                    firstGoodResult[0] = ip;
+                                    lock.notifyAll();
+                                }
+                            }
+                        } else {
+                            Log.w(TAG, "DNS " + dns + " returned poisoned/bogon IP " + ip + " for " + hostname + " — REJECTED");
+                        }
+                    }
+                } catch (Exception ignored) {}
+            }, "DNS-resolve-" + dns);
+            threads[i].setDaemon(true);
+            threads[i].start();
+        }
+
+        // Wait up to 4 seconds for any valid (non-poisoned) result
+        synchronized (lock) {
+            if (firstGoodResult[0] == null) {
+                try { lock.wait(4000); } catch (InterruptedException ignored) {}
+            }
+        }
+
+        if (firstGoodResult[0] != null) {
+            return firstGoodResult[0];
+        }
+
+        // Log all results for debugging if no good IP found
+        if (!dnsResults.isEmpty()) {
+            Log.w(TAG, "All DNS results for " + hostname + " were poisoned/bogon: " + dnsResults);
+        }
+
+        return null;
+    }
+
+    /**
+     * Extract the first A record (IPv4) from a raw DNS response packet.
+     */
+    private static String extractIpFromDnsResponse(byte[] data, int length) {
+        if (length < 12) return null;
+
+        // Check QR=1 (response) and RCODE=0 (no error)
+        boolean isResponse = (data[2] & 0x80) != 0;
+        int rcode = data[3] & 0x0F;
+        if (!isResponse || rcode != 0) return null;
+
+        int qdCount = ((data[4] & 0xFF) << 8) | (data[5] & 0xFF);
+        int anCount = ((data[6] & 0xFF) << 8) | (data[7] & 0xFF);
+        if (anCount == 0) return null;
+
+        // Skip question section
+        int pos = 12;
+        for (int q = 0; q < qdCount; q++) {
+            while (pos < length) {
+                int labelLen = data[pos] & 0xFF;
+                if (labelLen == 0) { pos++; break; }
+                if ((labelLen & 0xC0) == 0xC0) { pos += 2; break; } // pointer
+                pos += 1 + labelLen;
+            }
+            pos += 4; // QTYPE + QCLASS
+        }
+
+        // Parse answer section — find first A record (type=1, class=1)
+        for (int a = 0; a < anCount && pos < length; a++) {
+            // Skip name (may be pointer)
+            if ((data[pos] & 0xC0) == 0xC0) {
+                pos += 2;
+            } else {
+                while (pos < length) {
+                    int labelLen = data[pos] & 0xFF;
+                    if (labelLen == 0) { pos++; break; }
+                    if ((labelLen & 0xC0) == 0xC0) { pos += 2; break; }
+                    pos += 1 + labelLen;
+                }
+            }
+
+            if (pos + 10 > length) return null;
+            int type = ((data[pos] & 0xFF) << 8) | (data[pos + 1] & 0xFF);
+            int cls = ((data[pos + 2] & 0xFF) << 8) | (data[pos + 3] & 0xFF);
+            int rdLength = ((data[pos + 8] & 0xFF) << 8) | (data[pos + 9] & 0xFF);
+            pos += 10;
+
+            if (type == 1 && cls == 1 && rdLength == 4 && pos + 4 <= length) {
+                // A record — extract IPv4
+                return (data[pos] & 0xFF) + "." + (data[pos + 1] & 0xFF) + "."
+                     + (data[pos + 2] & 0xFF) + "." + (data[pos + 3] & 0xFF);
+            }
+            pos += rdLength;
+        }
+        return null;
+    }
+
+    /**
+     * Apply anti-DPI settings to an outbound for Iran's new filtering system.
+     * - TLS fragment: splits ClientHello to evade SNI-based DPI (most effective)
+     * - uTLS fingerprint: randomize TLS fingerprint to avoid detection
+     * - Mux: disabled when fragment is active (they are incompatible in XRay)
+     *
+     * NOTE: fragment and mux are mutually exclusive in XRay.
+     * Fragment operates at TCP level and is the primary anti-DPI technique for Iran.
+     */
+    public static void applyAntiDpiSettings(JSONObject outbound) {
+        try {
+            JSONObject streamSettings = outbound.optJSONObject("streamSettings");
+            if (streamSettings == null) return;
+
+            String security = streamSettings.optString("security", "none");
+            boolean isTls = "tls".equals(security) || "reality".equals(security);
+            boolean fragmentApplied = false;
+
+            // 1. TLS Fragment — split ClientHello into small pieces to bypass SNI inspection
+            // This is the most effective anti-DPI technique for Iran's new filtering.
+            // Only applies to TLS (not reality which uses its own anti-detection).
+            if ("tls".equals(security)) {
+                JSONObject sockopt = streamSettings.optJSONObject("sockopt");
+                if (sockopt == null) sockopt = new JSONObject();
+
+                if (!sockopt.has("fragment")) {
+                    JSONObject fragment = new JSONObject();
+                    fragment.put("packets", "tlshello");
+                    fragment.put("length", "100-200");
+                    fragment.put("interval", "10-20");
+                    sockopt.put("fragment", fragment);
+                    fragmentApplied = true;
+                }
+
+                sockopt.put("tcpNoDelay", true);
+                sockopt.put("TcpKeepAliveInterval", 15);
+                streamSettings.put("sockopt", sockopt);
+            }
+
+            // 2. Ensure uTLS fingerprint is set for all TLS connections
+            if (isTls) {
+                String settingsKey = "tls".equals(security) ? "tlsSettings" : "realitySettings";
+                JSONObject tlsSettings = streamSettings.optJSONObject(settingsKey);
+                if (tlsSettings != null) {
+                    String fp = tlsSettings.optString("fingerprint", "");
+                    if (fp.isEmpty() || "none".equals(fp)) {
+                        String[] fingerprints = {"chrome", "firefox", "safari", "edge", "randomized"};
+                        tlsSettings.put("fingerprint", fingerprints[(int)(Math.random() * fingerprints.length)]);
+                    }
+                }
+            }
+
+            // 3. Mux — MUST be disabled when fragment is active (incompatible in XRay).
+            // Also disable mux for Reality — mux multiplexes ALL connections into one
+            // session. If that session has ANY issue (x509 cert mismatch, timeout),
+            // ALL connections fail including Telegram. The x509 errors in logs
+            // ("certificate is valid for *.google.com, not tgju.org") are caused by
+            // mux sessions failing on misconfigured Reality proxies.
+            if (!outbound.has("mux")) {
+                JSONObject mux = new JSONObject();
+                mux.put("enabled", false);
+                outbound.put("mux", mux);
+            }
+
+            Log.d(TAG, "Applied anti-DPI settings (security=" + security
+                + ", fragment=" + fragmentApplied + ")");
+        } catch (Exception e) {
+            Log.w(TAG, "Error applying anti-DPI settings", e);
+        }
+    }
+
+    /**
      * Generate a full V2Ray config JSON for a given URI and SOCKS port.
      */
     public static String generateFullConfig(String uri, int socksPort) {
         try {
             JSONObject outbound = parseUriToOutbound(uri);
             if (outbound == null) return null;
+
+            // Pre-resolve proxy hostname to IP to avoid DNS circular dependency
+            // when running behind tun2socks (VPN mode)
+            preResolveOutboundHost(outbound);
+
+            // Apply anti-DPI settings for Iran's new filtering system
+            applyAntiDpiSettings(outbound);
 
             JSONObject config = new JSONObject();
 
@@ -121,12 +745,16 @@ public class V2RayConfigHelper {
 
             // Routing
             JSONObject routing = new JSONObject();
-            routing.put("domainStrategy", "IPIfNonMatch");
+            // "AsIs" = route based on domain names without resolving to IP.
+            // "IPIfNonMatch" causes XRay to resolve ALL domains via DNS for
+            // routing decisions, which fails on Iranian networks.
+            routing.put("domainStrategy", "AsIs");
             JSONArray rules = new JSONArray();
 
-            // CRITICAL: Route XRay's internal DNS module queries direct.
-            // Without "tag" in DNS config + this rule, DNS queries bypass routing
-            // and go to the first outbound (proxy), creating a chicken-and-egg loop.
+            // Route XRay's internal DNS module queries direct.
+            // sockopt.domainStrategy: "UseIPv4" makes outbound transport resolve
+            // proxy server domains via DNS module. These queries must go direct
+            // (not through proxy — chicken-and-egg problem).
             JSONObject directDnsTag = new JSONObject();
             directDnsTag.put("type", "field");
             directDnsTag.put("inboundTag", new JSONArray().put("dns-internal"));
@@ -134,7 +762,7 @@ public class V2RayConfigHelper {
             rules.put(directDnsTag);
 
             // Route client app DNS (from socks-in) through proxy
-            // so censored domains are resolved correctly on the remote server
+            // so censored domains are resolved on the remote server
             JSONObject proxyDns = new JSONObject();
             proxyDns.put("type", "field");
             proxyDns.put("inboundTag", new JSONArray().put("socks-in"));
@@ -149,64 +777,25 @@ public class V2RayConfigHelper {
             directDns.put("outboundTag", "direct");
             rules.put(directDns);
 
-            // Route private IPs and DNS server IPs directly to avoid loops
+            // Route private IPs directly to avoid loops
             JSONObject directPrivate = new JSONObject();
             directPrivate.put("type", "field");
             directPrivate.put("ip", new JSONArray()
-                .put("192.168.0.0/16").put("172.16.0.0/12")
-                .put("10.0.0.0/8").put("127.0.0.0/8")
-                .put("178.22.122.100").put("78.157.42.100")
-                .put("1.1.1.1").put("8.8.8.8"));
+                .put("geoip:private"));
             directPrivate.put("outboundTag", "direct");
             rules.put(directPrivate);
 
             routing.put("rules", rules);
             config.put("routing", routing);
 
-            // DNS - optimized for Iranian censorship with fast fallbacks
+            // DNS - system DNS servers first (ISP DNS resolves proxy server domains),
+            // then Iranian public DNS as fallback. System DNS is most reliable because
+            // ISP configures it and it resolves all non-censored domains.
             JSONObject dns = new JSONObject();
-            JSONArray servers = new JSONArray();
-            
-            // Fast traditional DNS servers (prioritize speed over privacy in Iran)
-            JSONObject shecan = new JSONObject(); // Iranian DNS service
-            shecan.put("address", "178.22.122.100");
-            shecan.put("port", 53);
-            servers.put(shecan);
-            
-            JSONObject electro = new JSONObject(); // Another Iranian DNS
-            electro.put("address", "78.157.42.100");
-            electro.put("port", 53);
-            servers.put(electro);
-            
-            // Cloudflare (usually works)
-            JSONObject cloudflare = new JSONObject();
-            cloudflare.put("address", "1.1.1.1");
-            cloudflare.put("port", 53);
-            servers.put(cloudflare);
-            
-            // Google (sometimes blocked)
-            JSONObject google = new JSONObject();
-            google.put("address", "8.8.8.8");
-            google.put("port", 53);
-            servers.put(google);
-            
-            // Fast DoH servers with shorter timeouts (Iranian networks are slow)
-            JSONObject cloudflareDoh = new JSONObject();
-            cloudflareDoh.put("address", "https://1.1.1.1/dns-query");
-            cloudflareDoh.put("port", 443);
-            JSONObject dohSettings1 = new JSONObject();
-            dohSettings1.put("path", "/dns-query");
-            dohSettings1.put("queryStrategy", "UseIPv4");
-            cloudflareDoh.put("settings", dohSettings1);
-            servers.put(cloudflareDoh);
-            
-            dns.put("servers", servers);
-            dns.put("disableCache", false);  // Enable cache for performance
-            dns.put("queryStrategy", "UseIPv4");  // Force IPv4 to avoid IPv6 issues
-            dns.put("disableFallback", false);  // Allow fallback to other DNS servers
-            dns.put("final", "178.22.122.100");  // Final fallback to Iranian DNS
-            dns.put("tag", "dns-internal");  // CRITICAL: enables routing for DNS module queries
-            
+            dns.put("servers", buildDnsServers());
+            dns.put("queryStrategy", "UseIPv4");
+            dns.put("disableCache", false);
+            dns.put("tag", "dns-internal");
             config.put("dns", dns);
 
             return config.toString(2);
@@ -286,7 +875,7 @@ public class V2RayConfigHelper {
         String[] hostParams = userHost[1].split("\\?");
         String[] hostPort = hostParams[0].split(":");
         String host = hostPort[0];
-        int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
+        int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1].replaceAll("[^0-9]", "")) : 443;
 
         Map<String, String> params = parseQueryParams(hostParams.length > 1 ? hostParams[1] : "");
 
@@ -429,7 +1018,7 @@ public class V2RayConfigHelper {
         String[] hostParams = passHost[1].split("\\?");
         String[] hostPort = hostParams[0].split(":");
         String host = hostPort[0];
-        int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
+        int port = hostPort.length > 1 ? Integer.parseInt(hostPort[1].replaceAll("[^0-9]", "")) : 443;
 
         Map<String, String> params = parseQueryParams(hostParams.length > 1 ? hostParams[1] : "");
 
@@ -499,7 +1088,7 @@ public class V2RayConfigHelper {
             if (q >= 0) hostPortPart = hostPortPart.substring(0, q);
             String[] hostPort = hostPortPart.split(":");
             host = hostPort[0];
-            port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
+            port = hostPort.length > 1 ? Integer.parseInt(hostPort[1].replaceAll("[^0-9]", "")) : 443;
         } else {
             String decoded = new String(android.util.Base64.decode(mainPart, android.util.Base64.NO_WRAP | android.util.Base64.URL_SAFE));
             String[] methodRest = decoded.split(":", 2);
@@ -513,7 +1102,7 @@ public class V2RayConfigHelper {
             if (q >= 0) hostPortPart = hostPortPart.substring(0, q);
             String[] hostPort = hostPortPart.split(":");
             host = hostPort[0];
-            port = hostPort.length > 1 ? Integer.parseInt(hostPort[1]) : 443;
+            port = hostPort.length > 1 ? Integer.parseInt(hostPort[1].replaceAll("[^0-9]", "")) : 443;
         }
 
         if (method != null) {
@@ -592,12 +1181,38 @@ public class V2RayConfigHelper {
 
             // Parse all URIs into outbounds
             java.util.List<JSONObject> proxyOutbounds = new java.util.ArrayList<>();
+            int tagIdx = 0;
             for (int i = 0; i < uris.size(); i++) {
                 JSONObject outbound = parseUriToOutbound(uris.get(i));
-                if (outbound != null) {
-                    outbound.put("tag", "proxy-" + i);
-                    proxyOutbounds.add(outbound);
+                if (outbound == null) continue;
+
+                // Pre-resolve proxy hostname to IP to avoid DNS circular dependency
+                preResolveOutboundHost(outbound);
+
+                // CRITICAL: Skip outbounds where hostname could not be resolved.
+                // On Android, XRay's Go resolver defaults to [::1]:53 which doesn't exist,
+                // so unresolved hostnames will ALWAYS fail with "connection refused".
+                // Including them in the balanced config wastes balancer attempts and
+                // causes Telegram/other apps to fail when the balancer routes to them.
+                if (isOutboundAddressUnresolved(outbound)) {
+                    Log.w(TAG, "Skipping outbound #" + i + " from balanced config — hostname unresolved");
+                    continue;
                 }
+
+                applyAntiDpiSettings(outbound);
+
+                // CRITICAL: Disable mux for ALL outbounds in balanced mode.
+                // Mux multiplexes all connections into one session. If that session
+                // has ANY issue (x509 cert error, timeout), ALL connections through
+                // that proxy fail — including Telegram. In balanced mode with multiple
+                // proxies, mux failures cause cascading connection drops.
+                JSONObject mux = new JSONObject();
+                mux.put("enabled", false);
+                outbound.put("mux", mux);
+
+                outbound.put("tag", "proxy-" + tagIdx);
+                tagIdx++;
+                proxyOutbounds.add(outbound);
             }
 
             if (proxyOutbounds.isEmpty()) return null;
@@ -658,14 +1273,18 @@ public class V2RayConfigHelper {
             JSONArray subjectSelector = new JSONArray();
             subjectSelector.put("proxy-");
             observatory.put("subjectSelector", subjectSelector);
-            observatory.put("probeURL", "http://cp.cloudflare.com/generate_204");
+            // Use IP-based probe URL — cp.cloudflare.com is DPI-targeted in Iran
+            observatory.put("probeURL", "http://1.1.1.1/generate_204");
             observatory.put("probeInterval", "30s");
             observatory.put("enableConcurrency", true);
             config.put("observatory", observatory);
 
             // Routing with balancer
             JSONObject routing = new JSONObject();
-            routing.put("domainStrategy", "IPIfNonMatch");
+            // "AsIs" = route based on domain names without resolving to IP.
+            // "IPIfNonMatch" was causing XRay to resolve ALL domains via DNS
+            // before routing, and Iranian DNS returns NXDOMAIN for proxy domains.
+            routing.put("domainStrategy", "AsIs");
 
             // Balancers
             JSONArray balancers = new JSONArray();
@@ -683,9 +1302,7 @@ public class V2RayConfigHelper {
             // Rules
             JSONArray rules = new JSONArray();
 
-            // CRITICAL: Route XRay's internal DNS module queries direct.
-            // Without "tag" in DNS config + this rule, DNS queries bypass routing
-            // and go to the first outbound (proxy), creating a chicken-and-egg loop.
+            // Route XRay's internal DNS module queries direct.
             JSONObject directDnsTag = new JSONObject();
             directDnsTag.put("type", "field");
             directDnsTag.put("inboundTag", new JSONArray().put("dns-internal"));
@@ -693,7 +1310,7 @@ public class V2RayConfigHelper {
             rules.put(directDnsTag);
 
             // Route client app DNS (from socks-in) through balancer
-            // so censored domains are resolved correctly on the remote server
+            // so censored domains are resolved on the remote server
             JSONObject proxyDns = new JSONObject();
             proxyDns.put("type", "field");
             proxyDns.put("inboundTag", new JSONArray().put("socks-in"));
@@ -708,14 +1325,11 @@ public class V2RayConfigHelper {
             directDns.put("outboundTag", "direct");
             rules.put(directDns);
 
-            // Private IPs and DNS server IPs go direct
+            // Private IPs go direct
             JSONObject directPrivate = new JSONObject();
             directPrivate.put("type", "field");
             directPrivate.put("ip", new JSONArray()
-                .put("192.168.0.0/16").put("172.16.0.0/12")
-                .put("10.0.0.0/8").put("127.0.0.0/8")
-                .put("178.22.122.100").put("78.157.42.100")
-                .put("1.1.1.1").put("8.8.8.8"));
+                .put("geoip:private"));
             directPrivate.put("outboundTag", "direct");
             rules.put(directPrivate);
 
@@ -729,17 +1343,12 @@ public class V2RayConfigHelper {
             routing.put("rules", rules);
             config.put("routing", routing);
 
-            // DNS - include Iranian DNS servers for resolving proxy domains on censored networks
+            // DNS - system DNS + Iranian public DNS for resolving proxy server domains
             JSONObject dns = new JSONObject();
-            JSONArray servers = new JSONArray();
-            servers.put("178.22.122.100"); // Shecan (Iranian DNS, fast)
-            servers.put("78.157.42.100");  // Electro (Iranian DNS)
-            servers.put("1.1.1.1");        // Cloudflare
-            servers.put("8.8.8.8");        // Google
-            dns.put("servers", servers);
-            dns.put("disableCache", false);
+            dns.put("servers", buildDnsServers());
             dns.put("queryStrategy", "UseIPv4");
-            dns.put("tag", "dns-internal");  // CRITICAL: enables routing for DNS module queries
+            dns.put("disableCache", false);
+            dns.put("tag", "dns-internal");
             config.put("dns", dns);
 
             Log.i(TAG, "Generated balanced config with " + proxyOutbounds.size() + " proxies");

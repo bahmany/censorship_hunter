@@ -1,44 +1,88 @@
 <resources>
-    <!-- Material 3 Dynamic Colors -->
-    <color name="primary">#6750A4</color>
-    <color name="on_primary">#FFFFFF</color>
-    <color name="primary_container">#EADDFF</color>
-    <color name="on_primary_container">#21005D</color>
-    <color name="secondary">#625B71</color>
-    <color name="on_secondary">#FFFFFF</color>
-    <color name="secondary_container">#E8DEF8</color>
-    <color name="on_secondary_container">#1D192B</color>
-    <color name="tertiary">#7D5260</color>
-    <color name="on_tertiary">#FFFFFF</color>
-    <color name="tertiary_container">#FFD8E4</color>
-    <color name="on_tertiary_container">#31111D</color>
-    <color name="error">#BA1A1A</color>
-    <color name="on_error">#FFFFFF</color>
-    <color name="error_container">#FFDAD6</color>
-    <color name="on_error_container">#410002</color>
-    <color name="background">#FFFBFE</color>
-    <color name="on_background">#1C1B1F</color>
-    <color name="surface">#FFFBFE</color>
-    <color name="on_surface">#1C1B1F</color>
-    <color name="surface_variant">#E7E0EC</color>
-    <color name="on_surface_variant">#49454F</color>
-    <color name="outline">#79747E</color>
-    <color name="inverse_on_surface">#F4EFF4</color>
-    <color name="inverse_surface">#313033</color>
-    <color name="primary_inverse">#D0BCFF</color>
+    <!-- ═══════════════════════════════════════════════════════════════
+         2026 Color System — "Midnight Velvet"
+         Deep noir base with warm rose-gold and cool cyan accents.
+         Inspired by chromatic-adaptation color science:
+         low-chroma backgrounds preserve night vision while
+         high-chroma accents draw the eye through simultaneous contrast.
+         ═══════════════════════════════════════════════════════════════ -->
 
-    <!-- Dark Theme -->
-    <color name="background_dark">#0F1419</color>
-    <color name="card_background">#1E2329</color>
-    <color name="text_primary">#FFFFFF</color>
-    <color name="text_secondary">#B0B0B0</color>
-    <color name="accent_blue">#4A9EFF</color>
-    <color name="accent_green">#00C853</color>
-    <color name="accent_purple">#B388FF</color>
-    <color name="accent_red">#FF5252</color>
-    <color name="accent_orange">#FFAB40</color>
-    <color name="divider">#2A2A36</color>
-    <color name="status_connected">#00E676</color>
-    <color name="status_connecting">#FFD740</color>
-    <color name="status_disconnected">#FF5252</color>
+    <!-- Material 3 seed colors -->
+    <color name="primary">#C8A2C8</color>
+    <color name="on_primary">#1A1A2E</color>
+    <color name="primary_container">#2D2040</color>
+    <color name="on_primary_container">#E8D5F5</color>
+    <color name="secondary">#A8B4C8</color>
+    <color name="on_secondary">#1A1A2E</color>
+    <color name="secondary_container">#1E2A3A</color>
+    <color name="on_secondary_container">#D0DCF0</color>
+    <color name="tertiary">#D4A0A0</color>
+    <color name="on_tertiary">#1A1A2E</color>
+    <color name="tertiary_container">#3A2020</color>
+    <color name="on_tertiary_container">#F5D5D5</color>
+    <color name="error">#F2B8B5</color>
+    <color name="on_error">#601410</color>
+    <color name="error_container">#8C1D18</color>
+    <color name="on_error_container">#F9DEDC</color>
+    <color name="background">#0A0A14</color>
+    <color name="on_background">#E6E1E5</color>
+    <color name="surface">#0A0A14</color>
+    <color name="on_surface">#E6E1E5</color>
+    <color name="surface_variant">#161622</color>
+    <color name="on_surface_variant">#CAC4D0</color>
+    <color name="outline">#2A2A3C</color>
+    <color name="inverse_on_surface">#1C1B1F</color>
+    <color name="inverse_surface">#E6E1E5</color>
+    <color name="primary_inverse">#C8A2C8</color>
+
+    <!-- ── Core palette ──────────────────────────────────────────── -->
+    <color name="background_dark">#08080F</color>
+    <color name="background_elevated">#0E0E1A</color>
+    <color name="card_background">#12121F</color>
+    <color name="card_background_elevated">#1A1A2E</color>
+    <color name="surface_dim">#0C0C16</color>
+
+    <!-- ── Typography ────────────────────────────────────────────── -->
+    <color name="text_primary">#F0EDF5</color>
+    <color name="text_secondary">#8A8698</color>
+    <color name="text_tertiary">#5C5868</color>
+    <color name="text_on_accent">#0A0A14</color>
+
+    <!-- ── Accent: Cyan-Teal (connected / active) ────────────────── -->
+    <color name="accent_cyan">#5EECD5</color>
+    <color name="accent_cyan_dim">#2A6B60</color>
+    <color name="accent_cyan_glow">#1A4A42</color>
+
+    <!-- ── Accent: Rose-Gold (warmth / allure) ───────────────────── -->
+    <color name="accent_rose">#E8A0B4</color>
+    <color name="accent_rose_dim">#6B3A4A</color>
+    <color name="accent_rose_glow">#3A1A28</color>
+
+    <!-- ── Accent: Amber (searching / warning) ───────────────────── -->
+    <color name="accent_amber">#F0C060</color>
+    <color name="accent_amber_dim">#6B5520</color>
+
+    <!-- ── Accent: Soft Red (disconnect / error) ─────────────────── -->
+    <color name="accent_red">#F07070</color>
+    <color name="accent_red_dim">#6B2828</color>
+
+    <!-- ── Legacy aliases (keep existing code working) ───────────── -->
+    <color name="accent_blue">#7EB8F0</color>
+    <color name="accent_green">#5EECD5</color>
+    <color name="accent_purple">#C8A2C8</color>
+    <color name="accent_orange">#F0C060</color>
+    <color name="divider">#1E1E30</color>
+
+    <!-- ── Status colors ─────────────────────────────────────────── -->
+    <color name="status_connected">#5EECD5</color>
+    <color name="status_connecting">#F0C060</color>
+    <color name="status_disconnected">#8A8698</color>
+
+    <!-- ── Power button ring gradients ───────────────────────────── -->
+    <color name="ring_off_start">#2A2A3C</color>
+    <color name="ring_off_end">#1A1A2E</color>
+    <color name="ring_on_start">#5EECD5</color>
+    <color name="ring_on_end">#2AE8A0</color>
+    <color name="ring_connecting_start">#F0C060</color>
+    <color name="ring_connecting_end">#E8A040</color>
 </resources>

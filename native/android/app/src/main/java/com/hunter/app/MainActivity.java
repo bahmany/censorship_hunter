@@ -31,7 +31,9 @@ import android.os.Handler;
 import android.os.Looper;
 import android.net.TrafficStats;
 
-import com.google.android.material.button.MaterialButton;
+import android.animation.ObjectAnimator;
+import android.animation.AnimatorSet;
+import android.view.animation.AccelerateDecelerateInterpolator;
 
 import java.util.Collections;
 import java.util.List;
@@ -42,8 +44,8 @@ import java.util.List;
  */
 public class MainActivity extends AppCompatActivity {
 
-    private MaterialButton connectButton;
-    private MaterialButton refreshButton, shareButton, switchButton, exitButton;
+    private ImageView connectButton;
+    private View refreshButton, shareButton, switchButton, exitButton;
     private ProgressBar progressBar;
     private ProgressBar v2rayProgressBar;
     private TextView statusText, statusDetail, configCount;
@@ -53,6 +55,10 @@ public class MainActivity extends AppCompatActivity {
     private View progressCard;
     private View speedTrafficCard;
     private TextView downloadSpeed, uploadSpeed, totalTraffic, sessionTime;
+    private TextView patienceMessage;
+
+    // Power button visuals
+    private ImageView powerGlow, powerRing;
 
     private ConfigManager configManager;
     private boolean isConnected = false;
@@ -226,10 +232,13 @@ public class MainActivity extends AppCompatActivity {
         uploadSpeed = findViewById(R.id.upload_speed);
         totalTraffic = findViewById(R.id.total_traffic);
         sessionTime = findViewById(R.id.session_time);
+        powerGlow = findViewById(R.id.power_glow);
+        powerRing = findViewById(R.id.power_ring);
+        patienceMessage = findViewById(R.id.patience_message);
         
         // Initialize switch button in disabled state
         switchButton.setEnabled(false);
-        switchButton.setAlpha(0.5f);
+        switchButton.setAlpha(0.4f);
     }
 
     private void setupListeners() {
@@ -275,6 +284,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void refreshConfigs() {
         refreshButton.setEnabled(false);
+        refreshButton.setAlpha(0.4f);
         statusDetail.setText("Fetching configs from GitHub...");
         
         configManager.refreshConfigs(new ConfigManager.RefreshCallback() {
@@ -289,6 +299,7 @@ public class MainActivity extends AppCompatActivity {
             public void onComplete(int totalConfigs) {
                 runOnUiThread(() -> {
                     refreshButton.setEnabled(true);
+                    refreshButton.setAlpha(1.0f);
                     statusDetail.setText("Found " + totalConfigs + " configs");
                     updateConfigStats();
                     Toast.makeText(MainActivity.this, 
@@ -300,6 +311,7 @@ public class MainActivity extends AppCompatActivity {
             public void onError(String error) {
                 runOnUiThread(() -> {
                     refreshButton.setEnabled(true);
+                    refreshButton.setAlpha(1.0f);
                     statusDetail.setText("Error: " + error);
                     Toast.makeText(MainActivity.this, 
                         "Error: " + error, Toast.LENGTH_SHORT).show();
@@ -432,58 +444,107 @@ public class MainActivity extends AppCompatActivity {
     private void setConnectingState() {
         isConnecting = true;
         isConnected = false;
-        connectButton.setVisibility(View.INVISIBLE);
         progressBar.setVisibility(View.VISIBLE);
-        statusText.setText("Connecting...");
-        statusText.setTextColor(getColor(R.color.status_connecting));
+        statusText.setText("Connecting");
+        statusText.setTextColor(getColor(R.color.accent_amber));
         statusDetail.setText("Establishing connection...");
-        statusIcon.setColorFilter(getColor(R.color.status_connecting));
-        
-        // Disable switch button during connection
+
+        // Show patience message
+        if (patienceMessage != null) patienceMessage.setVisibility(View.VISIBLE);
+
+        // Power button: amber glow + connecting ring
+        powerRing.setImageResource(R.drawable.bg_power_ring_connecting);
+        powerGlow.setImageResource(R.drawable.bg_power_glow_connecting);
+        animateGlow(0.6f);
+        pulseRing(true);
+
         switchButton.setEnabled(false);
-        switchButton.setAlpha(0.5f);
+        switchButton.setAlpha(0.4f);
     }
 
     private void setConnectedState() {
         isConnecting = false;
         isConnected = true;
-        connectButton.setVisibility(View.VISIBLE);
         progressBar.setVisibility(View.GONE);
-        connectButton.setText("Disconnect");
-        connectButton.setBackgroundTintList(getColorStateList(R.color.accent_red));
         statusText.setText("Connected");
-        statusText.setTextColor(getColor(R.color.status_connected));
+        statusText.setTextColor(getColor(R.color.accent_cyan));
         statusDetail.setText("VPN is active");
-        statusIcon.setImageResource(R.drawable.ic_vpn_on);
-        statusIcon.clearColorFilter();
 
-        // Enable switch button when connected
+        // Hide patience message
+        if (patienceMessage != null) patienceMessage.setVisibility(View.GONE);
+
+        // Power button: cyan glow + on ring
+        powerRing.setImageResource(R.drawable.bg_power_ring_on);
+        powerGlow.setImageResource(R.drawable.bg_power_glow_on);
+        animateGlow(0.8f);
+        pulseRing(false);
+        powerRing.setScaleX(1f);
+        powerRing.setScaleY(1f);
+
         switchButton.setEnabled(true);
         switchButton.setAlpha(1.0f);
 
-        // Start speed monitoring
         startSpeedMonitoring();
     }
 
     private void setDisconnectedState() {
         isConnecting = false;
         isConnected = false;
-        connectButton.setVisibility(View.VISIBLE);
         progressBar.setVisibility(View.GONE);
-        connectButton.setText("Connect");
-        connectButton.setBackgroundTintList(getColorStateList(R.color.accent_green));
         statusText.setText("Disconnected");
-        statusText.setTextColor(getColor(R.color.text_primary));
+        statusText.setTextColor(getColor(R.color.text_secondary));
         statusDetail.setText("Tap to connect");
-        statusIcon.setImageResource(R.drawable.ic_vpn_off);
-        statusIcon.setColorFilter(getColor(R.color.accent_blue));
 
-        // Disable switch button when disconnected
+        // Hide patience message
+        if (patienceMessage != null) patienceMessage.setVisibility(View.GONE);
+
+        // Power button: dim ring, no glow
+        powerRing.setImageResource(R.drawable.bg_power_ring_off);
+        animateGlow(0f);
+        pulseRing(false);
+        powerRing.setScaleX(1f);
+        powerRing.setScaleY(1f);
+
         switchButton.setEnabled(false);
-        switchButton.setAlpha(0.5f);
+        switchButton.setAlpha(0.4f);
 
-        // Stop speed monitoring
         stopSpeedMonitoring();
+    }
+
+    private void animateGlow(float targetAlpha) {
+        if (powerGlow == null) return;
+        powerGlow.animate()
+            .alpha(targetAlpha)
+            .setDuration(600)
+            .setInterpolator(new AccelerateDecelerateInterpolator())
+            .start();
+    }
+
+    private AnimatorSet pulseAnimator;
+
+    private void pulseRing(boolean start) {
+        if (powerRing == null) return;
+        if (pulseAnimator != null) {
+            pulseAnimator.cancel();
+            pulseAnimator = null;
+        }
+        if (!start) return;
+
+        ObjectAnimator scaleX = ObjectAnimator.ofFloat(powerRing, "scaleX", 1f, 1.06f, 1f);
+        ObjectAnimator scaleY = ObjectAnimator.ofFloat(powerRing, "scaleY", 1f, 1.06f, 1f);
+        pulseAnimator = new AnimatorSet();
+        pulseAnimator.playTogether(scaleX, scaleY);
+        pulseAnimator.setDuration(1500);
+        pulseAnimator.setInterpolator(new AccelerateDecelerateInterpolator());
+        pulseAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
+            @Override
+            public void onAnimationEnd(android.animation.Animator animation) {
+                if (isConnecting && pulseAnimator != null) {
+                    pulseAnimator.start();
+                }
+            }
+        });
+        pulseAnimator.start();
     }
 
     private void showV2RayProgress(String label, String detail, int progress, int max) {

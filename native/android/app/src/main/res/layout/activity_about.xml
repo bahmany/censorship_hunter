@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@color/background_dark"
@@ -31,7 +30,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:layout_marginStart="16dp"
-            android:text="About Us"
+            android:text="About"
             android:textSize="20sp"
             android:textStyle="bold"
             android:textColor="@color/text_primary" />
@@ -42,7 +41,6 @@
     <ScrollView
         android:layout_width="0dp"
         android:layout_height="0dp"
-        android:layout_marginTop="16dp"
         android:scrollbars="vertical"
         android:fadeScrollbars="true"
         app:layout_constraintTop_toBottomOf="@id/top_bar"
@@ -54,60 +52,54 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="24dp">
+            android:padding="20dp">
 
-            <!-- App Info Card -->
+            <!-- ═══════ App Info Card ═══════ -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="20dp"
+                android:layout_marginBottom="16dp"
                 app:cardBackgroundColor="@color/card_background"
                 app:cardCornerRadius="20dp"
-                app:cardElevation="8dp">
+                app:cardElevation="6dp">
 
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:orientation="vertical"
-                    android:padding="32dp"
+                    android:padding="28dp"
                     android:gravity="center">
 
-                    <!-- App Icon -->
                     <ImageView
-                        android:layout_width="80dp"
-                        android:layout_height="80dp"
+                        android:layout_width="72dp"
+                        android:layout_height="72dp"
                         android:src="@drawable/ic_v2ray_logo"
-                        android:layout_marginBottom="16dp"
-                        app:tint="@color/accent_blue" />
+                        android:layout_marginBottom="14dp"
+                        app:tint="@color/accent_cyan" />
 
-                    <!-- App Title -->
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Iranian Free V2Ray"
-                        android:textSize="28sp"
+                        android:text="Filter Bypass"
+                        android:textSize="26sp"
                         android:textStyle="bold"
                         android:textColor="@color/text_primary"
-                        android:layout_marginBottom="8dp"
-                        android:gravity="center" />
+                        android:layout_marginBottom="6dp" />
 
-                    <!-- Version -->
                     <TextView
                         android:id="@+id/app_version"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="Version 1.0.0"
-                        android:textSize="16sp"
-                        android:textColor="@color/accent_blue"
-                        android:textStyle="bold"
-                        android:layout_marginBottom="12dp" />
+                        android:textSize="14sp"
+                        android:textColor="@color/accent_cyan"
+                        android:layout_marginBottom="10dp" />
 
-                    <!-- Tagline -->
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Freedom for Everyone"
-                        android:textSize="14sp"
+                        android:text="Free internet for everyone"
+                        android:textSize="13sp"
                         android:textColor="@color/text_secondary"
                         android:gravity="center" />
 
@@ -115,7 +107,7 @@
 
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Description Card -->
+            <!-- ═══════ About Card ═══════ -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -133,26 +125,26 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="About App"
-                        android:textSize="20sp"
+                        android:text="About"
+                        android:textSize="18sp"
                         android:textStyle="bold"
                         android:textColor="@color/text_primary"
-                        android:layout_marginBottom="12dp" />
+                        android:layout_marginBottom="10dp" />
 
                     <TextView
                         android:id="@+id/app_description"
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="Iranian Free V2Ray is a completely free VPN application designed to help Iranian users bypass internet restrictions and access information freely.\n\nThis application is developed by independent developers and distributed completely free. We believe that unlimited access to information should be available to everyone.\n\nIf you find this application useful and would like to support its development and maintenance, you can make voluntary donations through cryptocurrency."
+                        android:text="Filter Bypass is a completely free VPN application designed to help users bypass internet restrictions and access information freely.\n\nDeveloped by independent developers and distributed at no cost. We believe unlimited access to information is a fundamental right.\n\nNo ads. No tracking. No data collection. Ever."
                         android:textSize="14sp"
                         android:textColor="@color/text_secondary"
-                        android:lineSpacingExtra="6dp" />
+                        android:lineSpacingExtra="5dp" />
 
                 </LinearLayout>
 
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Features Card -->
+            <!-- ═══════ Contact & Community Card ═══════ -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -170,32 +162,38 @@
                     <TextView
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
-                        android:text="Features"
-                        android:textSize="20sp"
+                        android:text="Community &amp; Contact"
+                        android:textSize="18sp"
                         android:textStyle="bold"
                         android:textColor="@color/text_primary"
-                        android:layout_marginBottom="12dp" />
+                        android:layout_marginBottom="10dp" />
 
-                    <LinearLayout
+                    <TextView
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:orientation="vertical">
+                        android:text="Join our Telegram group for updates, support, and direct contact with the development team."
+                        android:textSize="14sp"
+                        android:textColor="@color/text_secondary"
+                        android:layout_marginBottom="14dp"
+                        android:lineSpacingExtra="4dp" />
 
-                        <TextView
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text="• Real-time speed and traffic monitoring\n• Automatic config testing and selection\n• Iranian DPI bypass techniques\n• Completely free and open source\n• No ads or tracking\n• User-friendly interface"
-                            android:textSize="14sp"
-                            android:textColor="@color/text_secondary"
-                            android:lineSpacingExtra="6dp" />
-
-                    </LinearLayout>
+                    <!-- Telegram Button -->
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/btn_telegram"
+                        style="@style/Widget.Material3.Button"
+                        android:layout_width="match_parent"
+                        android:layout_height="52dp"
+                        android:text="Join Telegram Group"
+                        android:textColor="@color/text_primary"
+                        android:textSize="15sp"
+                        app:backgroundTint="#2AABEE"
+                        app:cornerRadius="14dp" />
 
                 </LinearLayout>
 
             </com.google.android.material.card.MaterialCardView>
 
-            <!-- Support Card -->
+            <!-- ═══════ Support / Donate Card ═══════ -->
             <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -214,30 +212,123 @@
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="Support Development"
-                        android:textSize="20sp"
+                        android:textSize="18sp"
                         android:textStyle="bold"
                         android:textColor="@color/text_primary"
-                        android:layout_marginBottom="12dp" />
+                        android:layout_marginBottom="8dp" />
 
                     <TextView
-                        android:layout_width="wrap_content"
+                        android:layout_width="match_parent"
                         android:layout_height="wrap_content"
-                        android:text="If you find this application useful, support its development with a voluntary donation. Your support helps maintain and improve the application."
+                        android:text="If you find this app useful, you can support its development with a voluntary crypto donation. Tap any address to copy it."
                         android:textSize="14sp"
                         android:textColor="@color/text_secondary"
                         android:layout_marginBottom="16dp"
                         android:lineSpacingExtra="4dp" />
 
-                    <com.google.android.material.button.MaterialButton
-                        android:id="@+id/btn_donate"
-                        style="@style/Widget.Material3.Button.ElevatedButton"
+                    <!-- BTC -->
+                    <LinearLayout
+                        android:id="@+id/row_btc"
                         android:layout_width="match_parent"
-                        android:layout_height="56dp"
-                        android:text="Donate with Bitcoin"
-                        android:textColor="@color/text_primary"
-                        app:backgroundTint="@color/accent_green"
-                        app:icon="@drawable/ic_v2ray_logo"
-                        app:iconTint="@color/text_primary" />
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="?attr/selectableItemBackground"
+                        android:padding="12dp"
+                        android:layout_marginBottom="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Bitcoin (BTC)"
+                            android:textSize="13sp"
+                            android:textStyle="bold"
+                            android:textColor="@color/accent_amber" />
+
+                        <TextView
+                            android:id="@+id/addr_btc"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="bc1qe9l9rxs54vglu6velwdssygngy99njr8s95wss"
+                            android:textSize="12sp"
+                            android:textColor="@color/text_secondary"
+                            android:fontFamily="monospace"
+                            android:layout_marginTop="4dp"
+                            android:textIsSelectable="true" />
+
+                    </LinearLayout>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:background="@color/divider"
+                        android:layout_marginBottom="8dp" />
+
+                    <!-- USDT (ERC-20) -->
+                    <LinearLayout
+                        android:id="@+id/row_usdt"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="?attr/selectableItemBackground"
+                        android:padding="12dp"
+                        android:layout_marginBottom="8dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="USDT (ERC-20)"
+                            android:textSize="13sp"
+                            android:textStyle="bold"
+                            android:textColor="@color/accent_cyan" />
+
+                        <TextView
+                            android:id="@+id/addr_usdt"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="0x37e14feC86acAA16F1b92d3f0Ee08d11c851e963"
+                            android:textSize="12sp"
+                            android:textColor="@color/text_secondary"
+                            android:fontFamily="monospace"
+                            android:layout_marginTop="4dp"
+                            android:textIsSelectable="true" />
+
+                    </LinearLayout>
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:background="@color/divider"
+                        android:layout_marginBottom="8dp" />
+
+                    <!-- Solana -->
+                    <LinearLayout
+                        android:id="@+id/row_sol"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:background="?attr/selectableItemBackground"
+                        android:padding="12dp">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text="Solana (SOL)"
+                            android:textSize="13sp"
+                            android:textStyle="bold"
+                            android:textColor="#9945FF" />
+
+                        <TextView
+                            android:id="@+id/addr_sol"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Ek73rGNUz4fvy7QAJpsUVfHxeJJV5HTWVcG1N1fPf7wA"
+                            android:textSize="12sp"
+                            android:textColor="@color/text_secondary"
+                            android:fontFamily="monospace"
+                            android:layout_marginTop="4dp"
+                            android:textIsSelectable="true" />
+
+                    </LinearLayout>
 
                 </LinearLayout>
 
@@ -245,14 +336,14 @@
 
             <!-- Footer -->
             <TextView
-                android:layout_width="wrap_content"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="© 2026 Iranian Free V2Ray\nCompletely free and open source"
+                android:text="© 2026 Filter Bypass\nFree and open source — No ads, no tracking"
                 android:textSize="12sp"
                 android:textColor="@color/text_secondary"
                 android:gravity="center"
-                android:layout_gravity="center"
-                android:layout_marginTop="20dp" />
+                android:layout_marginTop="12dp"
+                android:layout_marginBottom="24dp" />
 
         </LinearLayout>
 

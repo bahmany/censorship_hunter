@@ -163,17 +163,29 @@ public class ConfigManager {
     }
 
     /**
-     * Get configs with working ones prioritized at the top for faster connections
+     * Get configs with working ones prioritized at the top for faster connections.
+     * Telegram-capable configs are heavily prioritized (3x weight) since Telegram
+     * stability is the primary requirement for Iranian users.
      */
     public List<ConfigItem> getPrioritizedConfigs() {
         List<ConfigItem> result = new ArrayList<>();
         
-        // Sort top configs by combined score (latency + telegram + instagram)
+        // Sort: Telegram-capable first (by telegram latency), then by general latency.
+        // Telegram latency is weighted 3x because it's the primary user requirement.
         synchronized (topConfigs) {
             topConfigs.sort((a, b) -> {
-                long scoreA = (long) a.latency + a.telegram_latency + a.instagram_latency;
-                long scoreB = (long) b.latency + b.telegram_latency + b.instagram_latency;
-                return Long.compare(scoreA, scoreB);
+                boolean aTg = a.telegram_latency > 0 && a.telegram_latency < Integer.MAX_VALUE;
+                boolean bTg = b.telegram_latency > 0 && b.telegram_latency < Integer.MAX_VALUE;
+                // Telegram-verified configs always come first
+                if (aTg != bTg) return aTg ? -1 : 1;
+                if (aTg) {
+                    // Both have Telegram — sort by telegram latency (3x weight) + general latency
+                    long scoreA = (long) a.telegram_latency * 3 + a.latency;
+                    long scoreB = (long) b.telegram_latency * 3 + b.latency;
+                    return Long.compare(scoreA, scoreB);
+                }
+                // Neither has Telegram — sort by general latency
+                return Integer.compare(a.latency, b.latency);
             });
             result.addAll(topConfigs);
         }
@@ -211,6 +223,11 @@ public class ConfigManager {
      * Add a config to the top configs cache (working configs prioritized)
      */
     public void addToTopConfigs(String uri, String name, String protocol, int latency, int telegramLatency, int instagramLatency) {
+        // Only cache configs that were actually tested with a positive latency
+        if (latency <= 0) {
+            Log.w(TAG, "Rejecting config with invalid latency=" + latency + " from top cache: " + name);
+            return;
+        }
         synchronized (topConfigs) {
             // Remove if already exists
             topConfigs.removeIf(item -> item.uri.equals(uri));
@@ -220,7 +237,7 @@ public class ConfigManager {
             item.uri = uri;
             item.name = name != null ? name : "Server";
             item.protocol = protocol != null ? protocol : "Unknown";
-            item.latency = latency > 0 ? latency : -1;
+            item.latency = latency;
             item.telegram_latency = telegramLatency;
             item.instagram_latency = instagramLatency;
             
@@ -233,7 +250,7 @@ public class ConfigManager {
             
             // Save to cache
             saveTopConfigsToCache();
-            Log.i(TAG, "Added config to top cache: " + name + " (" + protocol + ")");
+            Log.i(TAG, "Added config to top cache: " + name + " (" + protocol + ", " + latency + "ms)");
         }
     }
 
@@ -699,16 +716,26 @@ public class ConfigManager {
             synchronized (topConfigs) {
                 topConfigs.clear();
                 int limit = Math.min(arr.length(), TOP_CACHE_SIZE);
+                int skipped = 0;
                 for (int i = 0; i < limit; i++) {
                     JSONObject obj = arr.getJSONObject(i);
+                    int latency = obj.optInt("latency_ms", -1);
+                    // Skip configs with invalid latency (never properly tested)
+                    if (latency <= 0) {
+                        skipped++;
+                        continue;
+                    }
                     ConfigItem item = new ConfigItem();
                     item.uri = obj.getString("uri");
                     item.name = obj.optString("ps", "Server");
                     item.protocol = obj.optString("protocol", "Unknown");
-                    item.latency = obj.optInt("latency_ms", -1);
+                    item.latency = latency;
                     item.telegram_latency = obj.optInt("telegram_latency", Integer.MAX_VALUE);
                     item.instagram_latency = obj.optInt("instagram_latency", Integer.MAX_VALUE);
                     topConfigs.add(item);
+                }
+                if (skipped > 0) {
+                    Log.w(TAG, "Skipped " + skipped + " cached configs with invalid latency");
                 }
             }
             Log.i(TAG, "Loaded " + topConfigs.size() + " top cached configs");

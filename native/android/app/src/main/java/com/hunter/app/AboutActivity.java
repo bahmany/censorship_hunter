@@ -1,5 +1,7 @@
 package com.hunter.app;
 
+import android.content.ClipData;
+import android.content.ClipboardManager;
 import android.content.Intent;
 import android.net.Uri;
 import android.os.Bundle;
@@ -13,65 +15,53 @@ import androidx.appcompat.app.AppCompatActivity;
 import com.google.android.material.button.MaterialButton;
 
 /**
- * About page for Iranian Free V2Ray
- * Displays app information, developers, and donation information
+ * About page — community, contact, and donation info.
  */
 public class AboutActivity extends AppCompatActivity {
 
-    private ImageButton backButton;
-    private TextView appVersion, appDescription;
-    private MaterialButton donateButton;
+    private static final String TELEGRAM_GROUP = "https://t.me/free_v2ray_iranian";
+    private static final String ADDR_BTC  = "bc1qe9l9rxs54vglu6velwdssygngy99njr8s95wss";
+    private static final String ADDR_USDT = "0x37e14feC86acAA16F1b92d3f0Ee08d11c851e963";
+    private static final String ADDR_SOL  = "Ek73rGNUz4fvy7QAJpsUVfHxeJJV5HTWVcG1N1fPf7wA";
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_about);
 
-        initViews();
-        setupListeners();
-        loadAppInfo();
-    }
+        // Back button
+        findViewById(R.id.btn_back).setOnClickListener(v -> finish());
 
-    private void initViews() {
-        backButton = findViewById(R.id.btn_back);
-        appVersion = findViewById(R.id.app_version);
-        appDescription = findViewById(R.id.app_description);
-        donateButton = findViewById(R.id.btn_donate);
-    }
-
-    private void setupListeners() {
-        backButton.setOnClickListener(v -> finish());
-
-        donateButton.setOnClickListener(v -> {
-            // Copy address or open crypto wallet
-            String cryptoAddress = "bc1qxy2kgdygjrsqtzq2n0yrf2493p83kkfjhx0wlh"; // Replace with actual address
-            Intent intent = new Intent(Intent.ACTION_VIEW);
-            intent.setData(Uri.parse("bitcoin:" + cryptoAddress));
-            try {
-                startActivity(intent);
-            } catch (Exception e) {
-                // Alternative - copy address
-                android.content.ClipboardManager clipboard =
-                    (android.content.ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
-                android.content.ClipData clip = android.content.ClipData.newPlainText("Bitcoin Address", cryptoAddress);
-                clipboard.setPrimaryClip(clip);
-                android.widget.Toast.makeText(this, "Bitcoin address copied", android.widget.Toast.LENGTH_SHORT).show();
-            }
-        });
-    }
-
-    private void loadAppInfo() {
+        // Version
+        TextView appVersion = findViewById(R.id.app_version);
         try {
-            String version = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
-            appVersion.setText("Version " + version);
+            String ver = getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+            appVersion.setText("Version " + ver);
         } catch (Exception e) {
             appVersion.setText("Version 1.0.0");
         }
 
-        appDescription.setText("Iranian Free V2Ray is a completely free VPN application designed to help Iranian users bypass internet restrictions and access information freely.\n\n" +
-                              "This application is developed by independent developers and distributed completely free. " +
-                              "We believe that unlimited access to information should be available to everyone.\n\n" +
-                              "If you find this application useful and would like to support its development and maintenance, " +
-                              "you can make voluntary donations through cryptocurrency.");
+        // Telegram group button
+        MaterialButton btnTelegram = findViewById(R.id.btn_telegram);
+        btnTelegram.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(TELEGRAM_GROUP)));
+            } catch (Exception e) {
+                copyToClipboard("Telegram", TELEGRAM_GROUP);
+            }
+        });
+
+        // Tap-to-copy for each crypto address row
+        findViewById(R.id.row_btc).setOnClickListener(v -> copyToClipboard("Bitcoin", ADDR_BTC));
+        findViewById(R.id.row_usdt).setOnClickListener(v -> copyToClipboard("USDT", ADDR_USDT));
+        findViewById(R.id.row_sol).setOnClickListener(v -> copyToClipboard("Solana", ADDR_SOL));
+    }
+
+    private void copyToClipboard(String label, String text) {
+        ClipboardManager clipboard = (ClipboardManager) getSystemService(CLIPBOARD_SERVICE);
+        if (clipboard != null) {
+            clipboard.setPrimaryClip(ClipData.newPlainText(label, text));
+        }
+        Toast.makeText(this, label + " address copied!", Toast.LENGTH_SHORT).show();
     }
 }

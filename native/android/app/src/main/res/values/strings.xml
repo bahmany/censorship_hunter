@@ -1,8 +1,8 @@
 <resources>
-    <string name="app_name">Iranian Free V2Ray</string>
-    <string name="app_name_fa">Iranian Free V2Ray</string>
-    <string name="status_idle">Idle...</string>
-    <string name="status_connecting">Connecting...</string>
+    <string name="app_name">Filter Bypass</string>
+    <string name="app_name_fa">فیلترشکن</string>
+    <string name="status_idle">Idle</string>
+    <string name="status_connecting">Connecting</string>
     <string name="status_connected">Connected</string>
     <string name="status_disconnected">Disconnected</string>
     <string name="btn_start">Start</string>
@@ -15,4 +15,6 @@
     <string name="configs_found">Configs Found</string>
     <string name="no_configs">No Configs Found</string>
     <string name="loading_configs">Loading...</string>
+    <string name="patience_message">Please be patient — downloading and testing configs may take a few minutes on first run</string>
+    <string name="patience_message_fa">لطفاً صبور باشید — دانلود و تست کانفیگ‌ها ممکن است چند دقیقه طول بکشد</string>
 </resources> 
