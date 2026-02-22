@@ -7,6 +7,7 @@ from channels, and reporting validated results back to Telegram.
 
 import asyncio
 import logging
+import threading
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
@@ -114,6 +115,8 @@ class TelegramScraper:
         self.local_proxy_port = None
         self._socks_server = None
         self._socks_thread = None
+        self._telegram_lock = threading.Lock()
+        self._db_locked_count = 0
         
         # Initialize SSH config and cache managers
         self.ssh_config_manager = SSHConfigManager()
@@ -450,9 +453,17 @@ class TelegramScraper:
             return []
 
     async def _reset_client(self) -> None:
+        """Properly disconnect Telethon client to avoid 'Task destroyed but pending' warnings."""
+        if not self.client:
+            return
         try:
-            if self.client:
+            if self.client.is_connected():
                 await self.client.disconnect()
+        except Exception:
+            pass
+        # Give Telethon's internal tasks time to clean up
+        try:
+            await asyncio.sleep(0.3)
         except Exception:
             pass
         self.client = None
@@ -471,15 +482,81 @@ class TelegramScraper:
             except Exception:
                 pass
 
-    async def connect(self, use_proxy_fallback: bool = True) -> bool:
+    def _check_other_hunter_processes(self) -> bool:
+        """Check if other Hunter processes are running."""
+        try:
+            import subprocess
+            import sys
+            
+            current_pid = os.getpid()
+            
+            if sys.platform == "win32":
+                # Windows: use wmic to check command lines of python processes
+                result = subprocess.run(
+                    ["wmic", "process", "where", "name='python.exe'", "get", "CommandLine,ProcessId", "/FORMAT:CSV"],
+                    capture_output=True, text=True, timeout=5
+                )
+                
+                for line in result.stdout.splitlines():
+                    if not line or line.startswith("Node,CommandLine,ProcessId"):
+                        continue
+                    
+                    parts = line.split(',')
+                    if len(parts) >= 3:
+                        cmd_line = parts[1].strip('"')
+                        pid_str = parts[2].strip()
+                        
+                        # Check if this is a Hunter process and not our own
+                        if ("hunter" in cmd_line.lower() or "pythonProject1" in cmd_line.lower()) and pid_str != str(current_pid):
+                            try:
+                                # Verify the process is actually running
+                                subprocess.run(["tasklist", "/FI", f"PID {pid_str}"], 
+                                             capture_output=True, timeout=2)
+                                return True
+                            except:
+                                continue
+            else:
+                # Linux/Mac: use pgrep
+                result = subprocess.run(
+                    ["pgrep", "-f", "hunter"],
+                    capture_output=True, text=True, timeout=3
+                )
+                
+                for pid_str in result.stdout.strip().split('\n'):
+                    if pid_str and pid_str.strip() != str(current_pid):
+                        return True
+                        
+        except Exception as e:
+            self.logger.debug(f"Failed to check other Hunter processes: {e}")
+        
+        return False
+
+    async def connect(self, use_proxy_fallback: bool = True, _retry: bool = False) -> bool:
         """Establish connection to Telegram.
         
         Args:
             use_proxy_fallback: If True, use V2Ray proxy tunnel if SSH fails
+            _retry: Internal flag to prevent infinite retry loops
         """
         if not TELETHON_AVAILABLE:
             return False
 
+        # Prevent concurrent access to Telethon session (SQLite is single-writer)
+        # Use threading.Lock because web dashboard calls from a different event loop/thread
+        acquired = self._telegram_lock.acquire(blocking=False)
+        if not acquired:
+            self.logger.info("Telegram connection already in progress, waiting...")
+            # Wait in a non-blocking way so we don't freeze the event loop
+            while not self._telegram_lock.acquire(blocking=False):
+                await asyncio.sleep(0.5)
+        
+        try:
+            return await self._connect_inner(use_proxy_fallback, _retry)
+        finally:
+            self._telegram_lock.release()
+
+    async def _connect_inner(self, use_proxy_fallback: bool = True, _retry: bool = False) -> bool:
+        """Inner connection logic (must be called under _telegram_lock)."""
         if self.client and await self.heartbeat.check_connection(self.client):
             return True
 
@@ -580,15 +657,67 @@ class TelegramScraper:
             return False
 
         except Exception as e:
-            self.logger.info(f"Telegram connection skipped: {e}")
-            await self._reset_client()
+            msg = str(e)
+            # Special handling for database locked error
+            if "database is locked" in msg.lower():
+                self._db_locked_count += 1
+                self.logger.warning(f"Telegram session database is locked (attempt #{self._db_locked_count})")
+                
+                # Properly disconnect the broken client first
+                await self._reset_client()
+                
+                # Only attempt auto-reset once per session, and not on retry
+                if _retry:
+                    self.logger.info("Already retried after session reset - giving up this attempt")
+                    return False
+                
+                # Check if no other Hunter processes are running (smart auto-reset)
+                auto_reset = os.getenv("HUNTER_AUTO_RESET_LOCKED_SESSION", "false").lower() == "true"
+                smart_auto_reset = os.getenv("HUNTER_SMART_AUTO_RESET", "true").lower() == "true"
+                other_hunter_running = self._check_other_hunter_processes()
+                
+                if auto_reset or (smart_auto_reset and not other_hunter_running):
+                    if not other_hunter_running:
+                        self.logger.info("No other Hunter processes detected - safe to reset session")
+                    self.logger.info("Deleting locked session files and retrying connection...")
+                    self._delete_session_files()
+                    
+                    # Wait briefly for file system to release locks
+                    await asyncio.sleep(1)
+                    
+                    # Retry connection with fresh session (will require re-login)
+                    self.logger.info("Retrying Telegram connection with fresh session...")
+                    return await self._connect_inner(use_proxy_fallback, _retry=True)
+                else:
+                    if other_hunter_running:
+                        self.logger.warning("Other Hunter processes detected - not auto-resetting")
+                    self.logger.info("Tip: Set HUNTER_AUTO_RESET_LOCKED_SESSION=true to force auto-reset")
+                    return False
+            else:
+                self.logger.info(f"Telegram connection skipped: {e}")
+                await self._reset_client()
 
         return False
 
     async def scrape_configs(self, channels: List[str], limit: int = 100) -> Set[str]:
         """Scrape proxy configurations from Telegram channels."""
+        # Acquire lock to prevent concurrent Telegram access (database locked)
+        # Use threading.Lock because web dashboard calls from a different event loop/thread
+        acquired = self._telegram_lock.acquire(blocking=False)
+        if not acquired:
+            self.logger.info("Another Telegram operation in progress, waiting...")
+            while not self._telegram_lock.acquire(blocking=False):
+                await asyncio.sleep(0.5)
+        
+        try:
+            return await self._scrape_configs_inner(channels, limit)
+        finally:
+            self._telegram_lock.release()
+
+    async def _scrape_configs_inner(self, channels: List[str], limit: int = 100) -> Set[str]:
+        """Inner scrape logic (must be called under _telegram_lock)."""
         if not self.client or not await self.heartbeat.check_connection(self.client):
-            if not await self.connect():
+            if not await self._connect_inner():
                 return set()
 
         configs: Set[str] = set()
@@ -730,11 +859,15 @@ class TelegramScraper:
 
     async def send_report(self, report_text: str) -> bool:
         """Send report to Telegram channel."""
-        if not self.client or not await self.heartbeat.check_connection(self.client):
-            if not await self.connect():
-                return False
-
+        acquired = self._telegram_lock.acquire(blocking=False)
+        if not acquired:
+            while not self._telegram_lock.acquire(blocking=False):
+                await asyncio.sleep(0.5)
         try:
+            if not self.client or not await self.heartbeat.check_connection(self.client):
+                if not await self._connect_inner():
+                    return False
+
             channel = self.config.get("report_channel")
             if not channel:
                 return False
@@ -746,14 +879,20 @@ class TelegramScraper:
         except Exception as e:
             self.logger.error(f"Failed to send report: {e}")
             return False
+        finally:
+            self._telegram_lock.release()
 
     async def send_file(self, filename: str, content: bytes, caption: str = "") -> bool:
         """Send a file to the Telegram report channel."""
-        if not self.client or not await self.heartbeat.check_connection(self.client):
-            if not await self.connect():
-                return False
-
+        acquired = self._telegram_lock.acquire(blocking=False)
+        if not acquired:
+            while not self._telegram_lock.acquire(blocking=False):
+                await asyncio.sleep(0.5)
         try:
+            if not self.client or not await self.heartbeat.check_connection(self.client):
+                if not await self._connect_inner():
+                    return False
+
             channel = self.config.get("report_channel")
             if not channel:
                 return False
@@ -766,13 +905,22 @@ class TelegramScraper:
         except Exception as e:
             self.logger.error(f"Failed to send file: {e}")
             return False
+        finally:
+            self._telegram_lock.release()
 
     async def disconnect(self):
         """Disconnect from Telegram and close SSH tunnel."""
-        if self.client:
-            await self.client.disconnect()
-            self.client = None
-        self.close_ssh_tunnel()
+        # Acquire lock to prevent disconnect during active scrape/connect
+        acquired = self._telegram_lock.acquire(blocking=False)
+        if not acquired:
+            self.logger.info("Waiting for active Telegram operation to finish before disconnect...")
+            while not self._telegram_lock.acquire(blocking=False):
+                await asyncio.sleep(0.5)
+        try:
+            await self._reset_client()
+            self.close_ssh_tunnel()
+        finally:
+            self._telegram_lock.release()
 
 
 class BotReporter:
