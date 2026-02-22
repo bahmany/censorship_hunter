@@ -33,7 +33,10 @@ import android.net.TrafficStats;
 
 import android.animation.ObjectAnimator;
 import android.animation.AnimatorSet;
+import android.content.SharedPreferences;
 import android.view.animation.AccelerateDecelerateInterpolator;
+
+import androidx.appcompat.widget.SwitchCompat;
 
 import java.util.Collections;
 import java.util.List;
@@ -56,6 +59,8 @@ public class MainActivity extends AppCompatActivity {
     private View speedTrafficCard;
     private TextView downloadSpeed, uploadSpeed, totalTraffic, sessionTime;
     private TextView patienceMessage;
+    private TextView poolSizeText;
+    private SwitchCompat continuousScanSwitch;
 
     // Power button visuals
     private ImageView powerGlow, powerRing;
@@ -65,6 +70,7 @@ public class MainActivity extends AppCompatActivity {
     private boolean isConnecting = false;
     private BroadcastReceiver progressReceiver;
     private BroadcastReceiver vpnStatusReceiver;
+    private BroadcastReceiver configPoolReceiver;
 
     // Speed and traffic monitoring
     private Handler speedUpdateHandler;
@@ -87,6 +93,17 @@ public class MainActivity extends AppCompatActivity {
                 } else {
                     setDisconnectedState();
                     statusDetail.setText("VPN permission required");
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> configSelectLauncher =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == Activity.RESULT_OK && result.getData() != null) {
+                    java.util.ArrayList<String> uris = result.getData()
+                        .getStringArrayListExtra(ConfigSelectActivity.EXTRA_SELECTED_URIS);
+                    if (uris != null && !uris.isEmpty()) {
+                        connectWithSelectedConfigs(uris);
+                    }
                 }
             });
 
@@ -119,6 +136,19 @@ public class MainActivity extends AppCompatActivity {
         };
         LocalBroadcastManager.getInstance(this).registerReceiver(progressReceiver, 
             new IntentFilter("com.hunter.app.V2RAY_PROGRESS"));
+
+        // Config pool receiver - updates pool size display
+        configPoolReceiver = new BroadcastReceiver() {
+            @Override
+            public void onReceive(Context context, Intent intent) {
+                if (com.hunter.app.VpnService.BROADCAST_CONFIG_POOL.equals(intent.getAction())) {
+                    int poolSize = intent.getIntExtra("pool_size", 0);
+                    runOnUiThread(() -> updatePoolSizeDisplay(poolSize));
+                }
+            }
+        };
+        LocalBroadcastManager.getInstance(this).registerReceiver(configPoolReceiver,
+            new IntentFilter(com.hunter.app.VpnService.BROADCAST_CONFIG_POOL));
 
         // VPN status receiver - updates UI based on VpnService state changes
         vpnStatusReceiver = new BroadcastReceiver() {
@@ -235,10 +265,40 @@ public class MainActivity extends AppCompatActivity {
         powerGlow = findViewById(R.id.power_glow);
         powerRing = findViewById(R.id.power_ring);
         patienceMessage = findViewById(R.id.patience_message);
+        poolSizeText = findViewById(R.id.pool_size_text);
+        continuousScanSwitch = findViewById(R.id.continuous_scan_switch);
         
-        // Initialize switch button in disabled state
-        switchButton.setEnabled(false);
-        switchButton.setAlpha(0.4f);
+        // Switch button always enabled — opens config selection
+        switchButton.setEnabled(true);
+        switchButton.setAlpha(1.0f);
+
+        // Select server button
+        View selectServerBtn = findViewById(R.id.btn_select_server);
+        if (selectServerBtn != null) {
+            selectServerBtn.setOnClickListener(v -> switchConfig());
+        }
+
+        // DNS and fragment switches are display-only for now (always enabled)
+        // They show the user that these features are active
+        SwitchCompat dnsSwitch = findViewById(R.id.dns_proxy_switch);
+        if (dnsSwitch != null) {
+            dnsSwitch.setChecked(true);
+            dnsSwitch.setEnabled(false); // Always on — DNS must go through proxy
+        }
+        SwitchCompat fragmentSwitch = findViewById(R.id.fragment_switch);
+        if (fragmentSwitch != null) {
+            fragmentSwitch.setChecked(true);
+        }
+
+        // Load continuous scan preference
+        SharedPreferences vpnPrefs = getSharedPreferences("vpn_settings", MODE_PRIVATE);
+        boolean scanEnabled = vpnPrefs.getBoolean(com.hunter.app.VpnService.PREF_CONTINUOUS_SCAN, true);
+        if (continuousScanSwitch != null) {
+            continuousScanSwitch.setChecked(scanEnabled);
+            continuousScanSwitch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+                vpnPrefs.edit().putBoolean(com.hunter.app.VpnService.PREF_CONTINUOUS_SCAN, isChecked).apply();
+            });
+        }
     }
 
     private void setupListeners() {
@@ -261,25 +321,40 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void switchConfig() {
-        if (!isConnected) {
-            Toast.makeText(this, "Switch config is only available when connected", Toast.LENGTH_SHORT).show();
-            return;
+        // Open config selection activity
+        configSelectLauncher.launch(new Intent(this, ConfigSelectActivity.class));
+    }
+
+    private void connectWithSelectedConfigs(java.util.ArrayList<String> uris) {
+        // Disconnect if currently connected
+        if (isConnected || isConnecting) {
+            disconnectVpn();
         }
-        
-        if (isConnecting) {
-            Toast.makeText(this, "Please wait for current operation", Toast.LENGTH_SHORT).show();
-            return;
-        }
-        
-        // Disconnect first
-        disconnectVpn();
-        
-        // Reconnect after a short delay to allow disconnect to complete
+
+        // Start VPN with selected configs after short delay
         connectButton.postDelayed(() -> {
-            if (!isConnecting && !isConnected) {
-                connectVpn();
+            Intent vpnIntent = VpnService.prepare(this);
+            if (vpnIntent != null) {
+                vpnPermissionLauncher.launch(vpnIntent);
+                // Store selected URIs for after permission grant
+                getSharedPreferences("vpn_settings", MODE_PRIVATE).edit()
+                    .putStringSet("custom_uris", new java.util.HashSet<>(uris)).apply();
+            } else {
+                startVpnServiceWithUris(uris);
             }
-        }, 1500);
+        }, isConnected ? 1500 : 100);
+    }
+
+    private void startVpnServiceWithUris(java.util.ArrayList<String> uris) {
+        Intent intent = new Intent(this, com.hunter.app.VpnService.class);
+        intent.setAction(com.hunter.app.VpnService.ACTION_START);
+        intent.putStringArrayListExtra("custom_uris", uris);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent);
+        } else {
+            startService(intent);
+        }
+        setConnectingState();
     }
 
     private void refreshConfigs() {
@@ -458,8 +533,7 @@ public class MainActivity extends AppCompatActivity {
         animateGlow(0.6f);
         pulseRing(true);
 
-        switchButton.setEnabled(false);
-        switchButton.setAlpha(0.4f);
+        // switchButton stays enabled during connecting
     }
 
     private void setConnectedState() {
@@ -480,9 +554,6 @@ public class MainActivity extends AppCompatActivity {
         pulseRing(false);
         powerRing.setScaleX(1f);
         powerRing.setScaleY(1f);
-
-        switchButton.setEnabled(true);
-        switchButton.setAlpha(1.0f);
 
         startSpeedMonitoring();
     }
@@ -751,6 +822,16 @@ public class MainActivity extends AppCompatActivity {
         finishAffinity();
     }
 
+    private void updatePoolSizeDisplay(int poolSize) {
+        if (poolSizeText == null) return;
+        if (poolSize > 1 && isConnected) {
+            poolSizeText.setText(String.format(getString(R.string.pool_active), poolSize));
+            poolSizeText.setVisibility(View.VISIBLE);
+        } else {
+            poolSizeText.setVisibility(View.GONE);
+        }
+    }
+
     @Override
     protected void onDestroy() {
         super.onDestroy();
@@ -759,6 +840,9 @@ public class MainActivity extends AppCompatActivity {
         }
         if (vpnStatusReceiver != null) {
             LocalBroadcastManager.getInstance(this).unregisterReceiver(vpnStatusReceiver);
+        }
+        if (configPoolReceiver != null) {
+            LocalBroadcastManager.getInstance(this).unregisterReceiver(configPoolReceiver);
         }
     }
 }

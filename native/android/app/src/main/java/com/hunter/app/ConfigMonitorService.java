@@ -256,9 +256,9 @@ public class ConfigMonitorService extends Service {
                 // Update top 100 cache
                 configManager.updateTopConfigs(working);
 
-                // Trigger immediate network condition check if we have good configs
+                // Notify running VPN to inject new configs (zero-downtime upgrade)
                 if (successCount > 0 && working.size() > 0) {
-                    triggerNetworkConditionCheck();
+                    notifyVpnOfNewConfigs(working.size());
                 }
 
                 updateNotification(successCount + " working / " +
@@ -276,20 +276,25 @@ public class ConfigMonitorService extends Service {
     }
 
     /**
-     * Trigger immediate network condition check when good configs are found
+     * Notify running VPN service that new working configs are available.
+     * VPN will hot-swap to upgraded balancer without traffic interruption.
      */
-    private void triggerNetworkConditionCheck() {
-        if (!isDestroyed) {
-            workerHandler.post(() -> {
-                try {
-                    // This would integrate with the network detection system
-                    // For now, we'll just log that we're triggering a check
-                    Log.i(TAG, "Triggering immediate network condition check");
-                    // TODO: Call actual network condition detection system
-                } catch (Exception e) {
-                    Log.w(TAG, "Error triggering network condition check", e);
-                }
-            });
+    private void notifyVpnOfNewConfigs(int workingCount) {
+        if (isDestroyed) return;
+        try {
+            // Check if VPN is running and continuous scan is enabled
+            if (!VpnState.isActive()) {
+                Log.d(TAG, "VPN not active, skipping config injection");
+                return;
+            }
+
+            // Send ACTION_INJECT_CONFIGS to VpnService
+            Intent intent = new Intent(this, com.hunter.app.VpnService.class);
+            intent.setAction(com.hunter.app.VpnService.ACTION_INJECT_CONFIGS);
+            startService(intent);
+            Log.i(TAG, "Notified VPN of " + workingCount + " new working configs for injection");
+        } catch (Exception e) {
+            Log.w(TAG, "Error notifying VPN of new configs", e);
         }
     }
 

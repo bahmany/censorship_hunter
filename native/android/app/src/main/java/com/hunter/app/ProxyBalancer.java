@@ -23,14 +23,14 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * Proxy balancer that provides SOCKS5 servers on ports 10808 and 10809.
- * Port 10808: General balancer for all good configs
- * Port 10809: Google balancer for configs with Google access
+ * Proxy balancer that provides SOCKS5 servers on ports 10812 and 10813.
+ * Port 10812: General balancer for all good configs
+ * Port 10813: Google balancer for configs with Google access
  */
 public class ProxyBalancer {
     private static final String TAG = "ProxyBalancer";
-    private static final int GENERAL_PORT = 10808;
-    private static final int GOOGLE_PORT = 10809;
+    private static final int GENERAL_PORT = 10812;
+    private static final int GOOGLE_PORT = 10813;
     private static final int BACKEND_BASE_PORT = 20808;
     private static final int MAX_BACKENDS = 3;
 
@@ -74,7 +74,7 @@ public class ProxyBalancer {
             // Start backends
             startBackends();
 
-            // Start general balancer on port 10808
+            // Start general balancer on port 10812
             ServerBootstrap generalBootstrap = createServerBootstrap();
             generalBootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
                 @Override
@@ -89,7 +89,7 @@ public class ProxyBalancer {
             generalChannel = generalFuture.channel();
             Log.i(TAG, "General balancer started on port " + GENERAL_PORT);
 
-            // Start Google balancer on port 10809
+            // Start Google balancer on port 10813
             ServerBootstrap googleBootstrap = createServerBootstrap();
             googleBootstrap.childHandler(new ChannelInitializer<SocketChannel>() {
                 @Override

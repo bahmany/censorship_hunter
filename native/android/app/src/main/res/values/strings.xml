@@ -17,4 +17,12 @@
     <string name="loading_configs">Loading...</string>
     <string name="patience_message">Please be patient — downloading and testing configs may take a few minutes on first run</string>
     <string name="patience_message_fa">لطفاً صبور باشید — دانلود و تست کانفیگ‌ها ممکن است چند دقیقه طول بکشد</string>
+    <string name="continuous_scan">Auto-scan for better configs</string>
+    <string name="continuous_scan_fa">اسکن خودکار برای کانفیگ‌های بهتر</string>
+    <string name="pool_active">%d active servers</string>
+    <string name="select_configs">Select Configs</string>
+    <string name="select_configs_hint">Select one or more configs to connect with. Configs are sorted by quality.</string>
+    <string name="no_configs_to_select">No tested configs available yet. Start the VPN first to discover configs.</string>
+    <string name="select_all">Select All</string>
+    <string name="connect_selected">Connect</string>
 </resources> 

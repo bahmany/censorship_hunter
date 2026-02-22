@@ -445,7 +445,7 @@ public class V2RayConfigHelper {
      * resolver defaults to [::1]:53 which doesn't exist, so these outbounds will
      * ALWAYS fail with "connection refused" and must be excluded from balanced configs.
      */
-    private static boolean isOutboundAddressUnresolved(JSONObject outbound) {
+    public static boolean isOutboundAddressUnresolved(JSONObject outbound) {
         try {
             String protocol = outbound.optString("protocol", "");
             JSONObject settings = outbound.optJSONObject("settings");
@@ -687,116 +687,185 @@ public class V2RayConfigHelper {
 
     /**
      * Generate a full V2Ray config JSON for a given URI and SOCKS port.
+     * Modeled exactly after v2rayNG's proven working approach:
+     * - SOCKS inbound with sniffing (http+tls, NO routeOnly, NO quic)
+     * - domainStrategy "IPIfNonMatch" (NOT "AsIs") so XRay resolves domains for routing
+     * - freedom outbound with "UseIP" (NOT "UseIPv4")
+     * - DNS: simple DoH strings, no object form, no localhost
+     * - dokodemo-door DNS inbound + dns-out outbound + routing rules
      */
     public static String generateFullConfig(String uri, int socksPort) {
         try {
             JSONObject outbound = parseUriToOutbound(uri);
             if (outbound == null) return null;
 
-            // Pre-resolve proxy hostname to IP to avoid DNS circular dependency
-            // when running behind tun2socks (VPN mode)
-            preResolveOutboundHost(outbound);
+            // v2rayNG pattern: resolve proxy hostname and add to dns.hosts
+            // (NOT replacing outbound address — XRay uses dns.hosts + sockopt.domainStrategy=UseIP)
+            String proxyDomain = getOutboundDomain(outbound);
+            String resolvedIp = null;
+            if (proxyDomain != null) {
+                resolvedIp = resolveHostnameDirectly(proxyDomain);
+                if (resolvedIp != null) {
+                    Log.i(TAG, "Resolved " + proxyDomain + " -> " + resolvedIp);
+                    // v2rayNG sets sockopt.domainStrategy = "UseIP" so XRay looks up dns.hosts
+                    JSONObject streamSettings = outbound.optJSONObject("streamSettings");
+                    if (streamSettings != null) {
+                        JSONObject sockopt = streamSettings.optJSONObject("sockopt");
+                        if (sockopt == null) sockopt = new JSONObject();
+                        sockopt.put("domainStrategy", "UseIP");
+                        streamSettings.put("sockopt", sockopt);
+                    }
+                } else {
+                    // All DNS poisoned — try replacing address directly as fallback
+                    Log.w(TAG, "Could not resolve " + proxyDomain + " — keeping domain");
+                }
+            }
 
-            // Apply anti-DPI settings for Iran's new filtering system
+            // Extract IP for direct routing (either resolved or already an IP)
+            String proxyServerIp = extractOutboundAddress(outbound);
+            if (proxyServerIp == null && resolvedIp != null) {
+                proxyServerIp = resolvedIp;
+            }
+
             applyAntiDpiSettings(outbound);
 
             JSONObject config = new JSONObject();
 
-            // Log
+            // ── Log ──
             JSONObject log = new JSONObject();
             log.put("loglevel", "warning");
             config.put("log", log);
 
-            // Inbounds - SOCKS5 proxy
+            // ── Stats + Policy (v2rayNG base template) ──
+            config.put("stats", new JSONObject());
+            JSONObject policy = new JSONObject();
+            JSONObject levels = new JSONObject();
+            JSONObject level8 = new JSONObject();
+            level8.put("handshake", 4);
+            level8.put("connIdle", 300);
+            level8.put("uplinkOnly", 1);
+            level8.put("downlinkOnly", 1);
+            levels.put("8", level8);
+            policy.put("levels", levels);
+            JSONObject system = new JSONObject();
+            system.put("statsOutboundUplink", true);
+            system.put("statsOutboundDownlink", true);
+            policy.put("system", system);
+            config.put("policy", policy);
+
+            // ── Inbounds (v2rayNG: socks only, NO dokodemo-door for gomobile tun2socks) ──
             JSONArray inbounds = new JSONArray();
             JSONObject socksIn = new JSONObject();
-            socksIn.put("tag", "socks-in");
+            socksIn.put("tag", "socks");
             socksIn.put("port", socksPort);
             socksIn.put("listen", "127.0.0.1");
             socksIn.put("protocol", "socks");
             JSONObject socksSettings = new JSONObject();
+            socksSettings.put("auth", "noauth");
             socksSettings.put("udp", true);
+            socksSettings.put("userLevel", 8);
             socksIn.put("settings", socksSettings);
-
             JSONObject sniffing = new JSONObject();
             sniffing.put("enabled", true);
-            sniffing.put("destOverride", new JSONArray().put("http").put("tls").put("quic"));
-            sniffing.put("routeOnly", true);
+            sniffing.put("destOverride", new JSONArray().put("http").put("tls"));
             socksIn.put("sniffing", sniffing);
-
             inbounds.put(socksIn);
             config.put("inbounds", inbounds);
 
-            // Outbounds
+            // ── Outbounds ──
             JSONArray outbounds = new JSONArray();
-            outbounds.put(outbound);
+            outbounds.put(outbound); // proxy (tag="proxy")
 
             JSONObject direct = new JSONObject();
             direct.put("tag", "direct");
             direct.put("protocol", "freedom");
+            JSONObject directSettings = new JSONObject();
+            directSettings.put("domainStrategy", "UseIP");
+            direct.put("settings", directSettings);
             outbounds.put(direct);
 
             JSONObject block = new JSONObject();
             block.put("tag", "block");
             block.put("protocol", "blackhole");
+            JSONObject blockSettings = new JSONObject();
+            JSONObject blockResponse = new JSONObject();
+            blockResponse.put("type", "http");
+            blockSettings.put("response", blockResponse);
+            block.put("settings", blockSettings);
             outbounds.put(block);
+
+            // dns-out outbound (v2rayNG pattern)
+            JSONObject dnsOut = new JSONObject();
+            dnsOut.put("tag", "dns-out");
+            dnsOut.put("protocol", "dns");
+            outbounds.put(dnsOut);
 
             config.put("outbounds", outbounds);
 
-            // Routing
+            // ── Routing (v2rayNG: domainStrategy "AsIs") ──
             JSONObject routing = new JSONObject();
-            // "AsIs" = route based on domain names without resolving to IP.
-            // "IPIfNonMatch" causes XRay to resolve ALL domains via DNS for
-            // routing decisions, which fails on Iranian networks.
             routing.put("domainStrategy", "AsIs");
             JSONArray rules = new JSONArray();
 
-            // Route XRay's internal DNS module queries direct.
-            // sockopt.domainStrategy: "UseIPv4" makes outbound transport resolve
-            // proxy server domains via DNS module. These queries must go direct
-            // (not through proxy — chicken-and-egg problem).
-            JSONObject directDnsTag = new JSONObject();
-            directDnsTag.put("type", "field");
-            directDnsTag.put("inboundTag", new JSONArray().put("dns-internal"));
-            directDnsTag.put("outboundTag", "direct");
-            rules.put(directDnsTag);
+            // Rule 1: Port 53 from socks → dns-out
+            // (v2rayNG hev-socks5-tunnel pattern: captures DNS from tun2socks)
+            JSONObject dnsFromSocks = new JSONObject();
+            dnsFromSocks.put("type", "field");
+            dnsFromSocks.put("inboundTag", new JSONArray().put("socks"));
+            dnsFromSocks.put("port", "53");
+            dnsFromSocks.put("outboundTag", "dns-out");
+            rules.put(dnsFromSocks);
 
-            // Route client app DNS (from socks-in) through proxy
-            // so censored domains are resolved on the remote server
-            JSONObject proxyDns = new JSONObject();
-            proxyDns.put("type", "field");
-            proxyDns.put("inboundTag", new JSONArray().put("socks-in"));
-            proxyDns.put("port", "53");
-            proxyDns.put("outboundTag", "proxy");
-            rules.put(proxyDns);
+            // Rule 2: Proxy server IP → direct (avoid routing loop)
+            if (proxyServerIp != null && !proxyServerIp.isEmpty()) {
+                JSONObject proxyDirect = new JSONObject();
+                proxyDirect.put("type", "field");
+                proxyDirect.put("ip", new JSONArray().put(proxyServerIp));
+                proxyDirect.put("outboundTag", "direct");
+                rules.put(proxyDirect);
+            }
 
-            // Catch any remaining port-53 traffic and send direct
-            JSONObject directDns = new JSONObject();
-            directDns.put("type", "field");
-            directDns.put("port", "53");
-            directDns.put("outboundTag", "direct");
-            rules.put(directDns);
-
-            // Route private IPs directly to avoid loops
+            // Rule 3: Private IPs → direct
             JSONObject directPrivate = new JSONObject();
             directPrivate.put("type", "field");
-            directPrivate.put("ip", new JSONArray()
-                .put("geoip:private"));
+            directPrivate.put("ip", new JSONArray().put("geoip:private"));
             directPrivate.put("outboundTag", "direct");
             rules.put(directPrivate);
 
             routing.put("rules", rules);
             config.put("routing", routing);
 
-            // DNS - system DNS servers first (ISP DNS resolves proxy server domains),
-            // then Iranian public DNS as fallback. System DNS is most reliable because
-            // ISP configures it and it resolves all non-censored domains.
+            // ── DNS (v2rayNG pattern: tag="dns-module" + routing sends it through proxy) ──
+            // THIS IS THE KEY: dns.tag causes XRay to tag all DNS module traffic.
+            // The routing rule below sends tagged DNS traffic through the proxy outbound.
+            // Without this, DNS queries go directly to 1.1.1.1 which is BLOCKED by Iranian ISP.
             JSONObject dns = new JSONObject();
-            dns.put("servers", buildDnsServers());
+            JSONArray dnsServers = new JSONArray();
+            dnsServers.put("1.1.1.1");
+            dnsServers.put("8.8.8.8");
+            dns.put("servers", dnsServers);
             dns.put("queryStrategy", "UseIPv4");
-            dns.put("disableCache", false);
-            dns.put("tag", "dns-internal");
+            dns.put("tag", "dns-module");  // v2rayNG: TAG_DNS = "dns-module"
+
+            // hosts — v2rayNG hardcodes googleapis + adds resolved proxy IPs here
+            JSONObject hosts = new JSONObject();
+            hosts.put("domain:googleapis.cn", "googleapis.com");
+            // v2rayNG resolveOutboundDomainsToHosts: add resolved proxy IP to hosts
+            if (proxyDomain != null && resolvedIp != null) {
+                hosts.put(proxyDomain, resolvedIp);
+            }
+            dns.put("hosts", hosts);
+
             config.put("dns", dns);
+
+            // ── DNS routing rules (v2rayNG: getDns adds these AFTER main routing) ──
+            // CRITICAL: Route DNS module traffic through proxy so DNS queries
+            // reach 1.1.1.1 via the encrypted tunnel, not directly (which ISP blocks)
+            JSONObject dnsModuleRule = new JSONObject();
+            dnsModuleRule.put("type", "field");
+            dnsModuleRule.put("inboundTag", new JSONArray().put("dns-module"));
+            dnsModuleRule.put("outboundTag", "proxy");
+            rules.put(dnsModuleRule);
 
             return config.toString(2);
 
@@ -804,6 +873,74 @@ public class V2RayConfigHelper {
             Log.e(TAG, "Error generating full config", e);
             return null;
         }
+    }
+
+    /**
+     * Extract the resolved proxy server IP address from an outbound config.
+     * Used to create a direct routing rule so proxy traffic doesn't loop.
+     */
+    public static String extractOutboundAddress(JSONObject outbound) {
+        try {
+            String protocol = outbound.optString("protocol", "");
+            JSONObject settings = outbound.optJSONObject("settings");
+            if (settings == null) return null;
+
+            String address = null;
+            if ("vmess".equals(protocol) || "vless".equals(protocol)) {
+                JSONArray vnext = settings.optJSONArray("vnext");
+                if (vnext != null && vnext.length() > 0) {
+                    address = vnext.getJSONObject(0).optString("address", "");
+                }
+            } else if ("trojan".equals(protocol) || "shadowsocks".equals(protocol)) {
+                JSONArray servers = settings.optJSONArray("servers");
+                if (servers != null && servers.length() > 0) {
+                    address = servers.getJSONObject(0).optString("address", "");
+                }
+            }
+
+            // Only return if it's an IP (not a domain)
+            if (address != null && address.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+                return address;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error extracting outbound address", e);
+        }
+        return null;
+    }
+
+    /**
+     * Extract the proxy server domain from an outbound config.
+     * Returns null if the address is already an IP or not found.
+     * Used by v2rayNG's resolveOutboundDomainsToHosts pattern.
+     */
+    private static String getOutboundDomain(JSONObject outbound) {
+        try {
+            String protocol = outbound.optString("protocol", "");
+            JSONObject settings = outbound.optJSONObject("settings");
+            if (settings == null) return null;
+
+            String address = null;
+            if ("vmess".equals(protocol) || "vless".equals(protocol)) {
+                JSONArray vnext = settings.optJSONArray("vnext");
+                if (vnext != null && vnext.length() > 0) {
+                    address = vnext.getJSONObject(0).optString("address", "");
+                }
+            } else if ("trojan".equals(protocol) || "shadowsocks".equals(protocol)) {
+                JSONArray servers = settings.optJSONArray("servers");
+                if (servers != null && servers.length() > 0) {
+                    address = servers.getJSONObject(0).optString("address", "");
+                }
+            }
+
+            // Only return if it's a domain (NOT an IP)
+            if (address != null && !address.isEmpty()
+                && !address.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+                return address;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Error extracting outbound domain", e);
+        }
+        return null;
     }
 
     private static JSONObject parseVmessUri(String uri) throws Exception {
@@ -1179,33 +1316,42 @@ public class V2RayConfigHelper {
         try {
             if (uris == null || uris.isEmpty()) return null;
 
-            // Parse all URIs into outbounds
+            // Parse all URIs into outbounds, resolve hostnames, collect hosts for DNS
             java.util.List<JSONObject> proxyOutbounds = new java.util.ArrayList<>();
+            JSONObject dnsHosts = new JSONObject();
+            dnsHosts.put("domain:googleapis.cn", "googleapis.com");
+            List<String> proxyServerIps = new ArrayList<>();
+
             int tagIdx = 0;
             for (int i = 0; i < uris.size(); i++) {
                 JSONObject outbound = parseUriToOutbound(uris.get(i));
                 if (outbound == null) continue;
 
-                // Pre-resolve proxy hostname to IP to avoid DNS circular dependency
-                preResolveOutboundHost(outbound);
-
-                // CRITICAL: Skip outbounds where hostname could not be resolved.
-                // On Android, XRay's Go resolver defaults to [::1]:53 which doesn't exist,
-                // so unresolved hostnames will ALWAYS fail with "connection refused".
-                // Including them in the balanced config wastes balancer attempts and
-                // causes Telegram/other apps to fail when the balancer routes to them.
-                if (isOutboundAddressUnresolved(outbound)) {
-                    Log.w(TAG, "Skipping outbound #" + i + " from balanced config — hostname unresolved");
-                    continue;
+                // v2rayNG resolveOutboundDomainsToHosts pattern
+                String domain = getOutboundDomain(outbound);
+                if (domain != null) {
+                    String ip = resolveHostnameDirectly(domain);
+                    if (ip != null) {
+                        dnsHosts.put(domain, ip);
+                        if (!proxyServerIps.contains(ip)) proxyServerIps.add(ip);
+                        JSONObject ss = outbound.optJSONObject("streamSettings");
+                        if (ss != null) {
+                            JSONObject so = ss.optJSONObject("sockopt");
+                            if (so == null) so = new JSONObject();
+                            so.put("domainStrategy", "UseIP");
+                            ss.put("sockopt", so);
+                        }
+                    } else {
+                        Log.w(TAG, "Skipping outbound #" + i + " — hostname unresolved");
+                        continue;
+                    }
+                } else {
+                    String ip = extractOutboundAddress(outbound);
+                    if (ip != null && !proxyServerIps.contains(ip)) proxyServerIps.add(ip);
                 }
 
                 applyAntiDpiSettings(outbound);
 
-                // CRITICAL: Disable mux for ALL outbounds in balanced mode.
-                // Mux multiplexes all connections into one session. If that session
-                // has ANY issue (x509 cert error, timeout), ALL connections through
-                // that proxy fail — including Telegram. In balanced mode with multiple
-                // proxies, mux failures cause cascading connection drops.
                 JSONObject mux = new JSONObject();
                 mux.put("enabled", false);
                 outbound.put("mux", mux);
@@ -1225,115 +1371,111 @@ public class V2RayConfigHelper {
 
             JSONObject config = new JSONObject();
 
-            // Log
-            JSONObject log = new JSONObject();
-            log.put("loglevel", "warning");
-            config.put("log", log);
+            // ── Log + Stats + Policy ──
+            config.put("log", new JSONObject().put("loglevel", "warning"));
+            config.put("stats", new JSONObject());
+            JSONObject policy = new JSONObject();
+            JSONObject levels = new JSONObject();
+            JSONObject level8 = new JSONObject();
+            level8.put("handshake", 4);
+            level8.put("connIdle", 300);
+            level8.put("uplinkOnly", 1);
+            level8.put("downlinkOnly", 1);
+            levels.put("8", level8);
+            policy.put("levels", levels);
+            JSONObject system = new JSONObject();
+            system.put("statsOutboundUplink", true);
+            system.put("statsOutboundDownlink", true);
+            policy.put("system", system);
+            config.put("policy", policy);
 
-            // Inbounds - SOCKS5 proxy
+            // ── Inbounds (socks only, no dokodemo-door) ──
             JSONArray inbounds = new JSONArray();
             JSONObject socksIn = new JSONObject();
-            socksIn.put("tag", "socks-in");
+            socksIn.put("tag", "socks");
             socksIn.put("port", socksPort);
             socksIn.put("listen", "127.0.0.1");
             socksIn.put("protocol", "socks");
             JSONObject socksSettings = new JSONObject();
+            socksSettings.put("auth", "noauth");
             socksSettings.put("udp", true);
+            socksSettings.put("userLevel", 8);
             socksIn.put("settings", socksSettings);
-
             JSONObject sniffing = new JSONObject();
             sniffing.put("enabled", true);
-            sniffing.put("destOverride", new JSONArray().put("http").put("tls").put("quic"));
-            sniffing.put("routeOnly", true);
+            sniffing.put("destOverride", new JSONArray().put("http").put("tls"));
             socksIn.put("sniffing", sniffing);
-
             inbounds.put(socksIn);
             config.put("inbounds", inbounds);
 
-            // Outbounds - multiple proxies + direct + block
+            // ── Outbounds ──
             JSONArray outbounds = new JSONArray();
-            for (JSONObject proxy : proxyOutbounds) {
-                outbounds.put(proxy);
-            }
+            for (JSONObject proxy : proxyOutbounds) outbounds.put(proxy);
 
             JSONObject direct = new JSONObject();
             direct.put("tag", "direct");
             direct.put("protocol", "freedom");
+            direct.put("settings", new JSONObject().put("domainStrategy", "UseIP"));
             outbounds.put(direct);
 
             JSONObject block = new JSONObject();
             block.put("tag", "block");
             block.put("protocol", "blackhole");
+            block.put("settings", new JSONObject().put("response", new JSONObject().put("type", "http")));
             outbounds.put(block);
 
+            outbounds.put(new JSONObject().put("tag", "dns-out").put("protocol", "dns"));
             config.put("outbounds", outbounds);
 
-            // Observatory - monitors proxy health with periodic probes
+            // ── Observatory ──
             JSONObject observatory = new JSONObject();
-            JSONArray subjectSelector = new JSONArray();
-            subjectSelector.put("proxy-");
-            observatory.put("subjectSelector", subjectSelector);
-            // Use IP-based probe URL — cp.cloudflare.com is DPI-targeted in Iran
+            observatory.put("subjectSelector", new JSONArray().put("proxy-"));
             observatory.put("probeURL", "http://1.1.1.1/generate_204");
             observatory.put("probeInterval", "30s");
             observatory.put("enableConcurrency", true);
             config.put("observatory", observatory);
 
-            // Routing with balancer
+            // ── Routing (v2rayNG: AsIs) ──
             JSONObject routing = new JSONObject();
-            // "AsIs" = route based on domain names without resolving to IP.
-            // "IPIfNonMatch" was causing XRay to resolve ALL domains via DNS
-            // before routing, and Iranian DNS returns NXDOMAIN for proxy domains.
             routing.put("domainStrategy", "AsIs");
 
-            // Balancers
             JSONArray balancers = new JSONArray();
             JSONObject balancer = new JSONObject();
             balancer.put("tag", "proxy-balancer");
-            JSONArray selector = new JSONArray();
-            selector.put("proxy-");
-            balancer.put("selector", selector);
-            JSONObject strategy = new JSONObject();
-            strategy.put("type", "leastPing");
-            balancer.put("strategy", strategy);
+            balancer.put("selector", new JSONArray().put("proxy-"));
+            balancer.put("strategy", new JSONObject().put("type", "leastPing"));
             balancers.put(balancer);
             routing.put("balancers", balancers);
 
-            // Rules
             JSONArray rules = new JSONArray();
 
-            // Route XRay's internal DNS module queries direct.
-            JSONObject directDnsTag = new JSONObject();
-            directDnsTag.put("type", "field");
-            directDnsTag.put("inboundTag", new JSONArray().put("dns-internal"));
-            directDnsTag.put("outboundTag", "direct");
-            rules.put(directDnsTag);
+            // Rule 1: Port 53 from socks → dns-out
+            JSONObject dnsFromSocks = new JSONObject();
+            dnsFromSocks.put("type", "field");
+            dnsFromSocks.put("inboundTag", new JSONArray().put("socks"));
+            dnsFromSocks.put("port", "53");
+            dnsFromSocks.put("outboundTag", "dns-out");
+            rules.put(dnsFromSocks);
 
-            // Route client app DNS (from socks-in) through balancer
-            // so censored domains are resolved on the remote server
-            JSONObject proxyDns = new JSONObject();
-            proxyDns.put("type", "field");
-            proxyDns.put("inboundTag", new JSONArray().put("socks-in"));
-            proxyDns.put("port", "53");
-            proxyDns.put("balancerTag", "proxy-balancer");
-            rules.put(proxyDns);
+            // Rule 2: Proxy server IPs → direct
+            if (!proxyServerIps.isEmpty()) {
+                JSONObject proxyDirect = new JSONObject();
+                proxyDirect.put("type", "field");
+                JSONArray ipArray = new JSONArray();
+                for (String ip : proxyServerIps) ipArray.put(ip);
+                proxyDirect.put("ip", ipArray);
+                proxyDirect.put("outboundTag", "direct");
+                rules.put(proxyDirect);
+            }
 
-            // Catch any remaining port-53 traffic and send direct
-            JSONObject directDns = new JSONObject();
-            directDns.put("type", "field");
-            directDns.put("port", "53");
-            directDns.put("outboundTag", "direct");
-            rules.put(directDns);
-
-            // Private IPs go direct
+            // Rule 3: Private IPs → direct
             JSONObject directPrivate = new JSONObject();
             directPrivate.put("type", "field");
-            directPrivate.put("ip", new JSONArray()
-                .put("geoip:private"));
+            directPrivate.put("ip", new JSONArray().put("geoip:private"));
             directPrivate.put("outboundTag", "direct");
             rules.put(directPrivate);
 
-            // All other traffic goes through balancer
+            // Rule 4: All other traffic → balancer
             JSONObject balancerRule = new JSONObject();
             balancerRule.put("type", "field");
             balancerRule.put("network", "tcp,udp");
@@ -1343,13 +1485,20 @@ public class V2RayConfigHelper {
             routing.put("rules", rules);
             config.put("routing", routing);
 
-            // DNS - system DNS + Iranian public DNS for resolving proxy server domains
+            // ── DNS (v2rayNG: tag="dns-module", routed through first proxy) ──
             JSONObject dns = new JSONObject();
-            dns.put("servers", buildDnsServers());
+            dns.put("servers", new JSONArray().put("1.1.1.1").put("8.8.8.8"));
             dns.put("queryStrategy", "UseIPv4");
-            dns.put("disableCache", false);
-            dns.put("tag", "dns-internal");
+            dns.put("tag", "dns-module");
+            dns.put("hosts", dnsHosts);
             config.put("dns", dns);
+
+            // DNS routing: send dns-module traffic through first proxy (balancer can't be used for DNS)
+            JSONObject dnsModuleRule = new JSONObject();
+            dnsModuleRule.put("type", "field");
+            dnsModuleRule.put("inboundTag", new JSONArray().put("dns-module"));
+            dnsModuleRule.put("outboundTag", proxyOutbounds.get(0).getString("tag"));
+            rules.put(dnsModuleRule);
 
             Log.i(TAG, "Generated balanced config with " + proxyOutbounds.size() + " proxies");
             return config.toString(2);

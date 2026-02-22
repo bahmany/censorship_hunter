@@ -400,7 +400,21 @@ public class ConfigTester {
                 return new boolean[]{false, false};
             }
 
-            // Test 1: Telegram DC connectivity — MOST IMPORTANT for Iranian users.
+            // Test 1: Download/HTTP test — MANDATORY.
+            // This is the most important test: verifies the proxy can actually
+            // transfer data, not just establish TCP connections.
+            // Without this, configs that pass Telegram DC connect but can't
+            // transfer HTTP data would be accepted, causing "connecting" forever.
+            boolean downloadOk = testDownloadThroughSocks(port, config.name);
+            if (!downloadOk) {
+                downloadOk = testHttpThroughSocks(port, config.name);
+            }
+            if (!downloadOk) {
+                Log.d(TAG, "Config REJECTED (download test failed): " + config.name);
+                return new boolean[]{false, false};
+            }
+
+            // Test 2: Telegram DC connectivity — important for Iranian users.
             // Returns latency in ms, or -1 if unreachable.
             int telegramLatency = testTelegramThroughSocks(port, config.name);
             boolean telegramOk = telegramLatency >= 0;
@@ -408,40 +422,13 @@ public class ConfigTester {
             // Store Telegram latency on the config item for ranking/monitoring
             config.telegram_latency = telegramOk ? telegramLatency : Integer.MAX_VALUE;
 
-            // Test 2: Download/HTTP test — verifies general internet connectivity.
-            boolean downloadOk = false;
-            if (telegramOk) {
-                // Telegram works — try download test but don't require it.
-                // Many proxies in Iran can route TCP but fail HTTP due to DPI.
-                downloadOk = testDownloadThroughSocks(port, config.name);
-                if (!downloadOk) {
-                    downloadOk = testHttpThroughSocks(port, config.name);
-                }
-            } else {
-                // Telegram failed — download test is the only hope.
-                // Config must pass at least ONE connectivity test.
-                downloadOk = testDownloadThroughSocks(port, config.name);
-                if (!downloadOk) {
-                    downloadOk = testHttpThroughSocks(port, config.name);
-                }
-                if (!downloadOk) {
-                    Log.d(TAG, "Config REJECTED (no connectivity): " + config.name);
-                    return new boolean[]{false, false};
-                }
-            }
-
-            // Accept if EITHER Telegram OR download works
-            if (!telegramOk && !downloadOk) {
-                Log.d(TAG, "Config REJECTED (no connectivity): " + config.name);
-                return new boolean[]{false, false};
-            }
-
             // Test 3: Google access (bonus, not required)
             boolean googleAccessible = testGoogleThroughSocks(port, config.name);
 
-            Log.i(TAG, "Config ACCEPTED: " + config.name + " (telegram=" + telegramOk
+            Log.i(TAG, "Config ACCEPTED: " + config.name + " (download=true"
+                + ", telegram=" + telegramOk
                 + (telegramOk ? " " + telegramLatency + "ms" : "")
-                + ", download=" + downloadOk + ", google=" + googleAccessible + ")");
+                + ", google=" + googleAccessible + ")");
             return new boolean[]{true, googleAccessible};
 
         } catch (InterruptedException e) {
@@ -981,96 +968,127 @@ public class ConfigTester {
 
     /**
      * Generate a minimal V2Ray JSON config for testing a single URI.
+     * Based on v2rayNG architecture: dns.tag routes DNS through proxy.
      */
     private String generateTestConfig(String uri, int socksPort) {
         try {
             JSONObject outbound = V2RayConfigHelper.parseUriToOutbound(uri);
             if (outbound == null) return null;
 
-            // Pre-resolve proxy hostname to IP so XRay doesn't need DNS.
-            // On Android, Go's system resolver defaults to [::1]:53 which doesn't exist,
-            // causing "connection refused" for ALL domain-based proxy servers.
-            V2RayConfigHelper.preResolveOutboundHost(outbound);
+            // v2rayNG resolveOutboundDomainsToHosts pattern:
+            // resolve hostname → add to dns.hosts + set sockopt.domainStrategy=UseIP
+            String proxyDomain = null;
+            String resolvedIp = null;
+            // Check if address is a domain
+            String address = V2RayConfigHelper.extractOutboundAddress(outbound);
+            if (address == null) {
+                // address is a domain, not IP — need to resolve
+                V2RayConfigHelper.preResolveOutboundHost(outbound);
+                // After preResolve, check if it got resolved
+                address = V2RayConfigHelper.extractOutboundAddress(outbound);
+                if (address == null) {
+                    // Still unresolved — try the v2rayNG hosts approach instead
+                    // Extract the domain name before preResolve changed it
+                    try {
+                        String protocol = outbound.optString("protocol", "");
+                        JSONObject settings = outbound.optJSONObject("settings");
+                        if (settings != null) {
+                            if ("vmess".equals(protocol) || "vless".equals(protocol)) {
+                                JSONArray vnext = settings.optJSONArray("vnext");
+                                if (vnext != null && vnext.length() > 0) {
+                                    proxyDomain = vnext.getJSONObject(0).optString("address", "");
+                                }
+                            } else if ("trojan".equals(protocol) || "shadowsocks".equals(protocol)) {
+                                JSONArray servers = settings.optJSONArray("servers");
+                                if (servers != null && servers.length() > 0) {
+                                    proxyDomain = servers.getJSONObject(0).optString("address", "");
+                                }
+                            }
+                        }
+                    } catch (Exception ignored) {}
 
-            // Apply anti-DPI settings (TLS fragment, uTLS, mux) for Iran's filtering
+                    if (proxyDomain != null && !proxyDomain.isEmpty()
+                        && !proxyDomain.matches("^\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}$")) {
+                        // Domain still unresolved — this config likely won't work
+                        Log.w(TAG, "Rejecting config — hostname unresolved: " + proxyDomain);
+                        return null;
+                    }
+                }
+            }
+
             V2RayConfigHelper.applyAntiDpiSettings(outbound);
 
             JSONObject config = new JSONObject();
+            config.put("log", new JSONObject().put("loglevel", "warning"));
 
-            // Log
-            JSONObject log = new JSONObject();
-            log.put("loglevel", "warning");
-            config.put("log", log);
-
-            // Inbound: SOCKS5
+            // ── Inbound: SOCKS ──
             JSONArray inbounds = new JSONArray();
             JSONObject socksIn = new JSONObject();
-            socksIn.put("tag", "socks-in");
+            socksIn.put("tag", "socks");
             socksIn.put("port", socksPort);
             socksIn.put("listen", "127.0.0.1");
             socksIn.put("protocol", "socks");
             JSONObject socksSettings = new JSONObject();
-            socksSettings.put("udp", false);
+            socksSettings.put("auth", "noauth");
+            socksSettings.put("udp", true);
+            socksSettings.put("userLevel", 8);
             socksIn.put("settings", socksSettings);
-
-            // Sniffing helps XRay detect destination domains from TLS SNI
             JSONObject sniffing = new JSONObject();
             sniffing.put("enabled", true);
             sniffing.put("destOverride", new JSONArray().put("http").put("tls"));
-            sniffing.put("routeOnly", true);
             socksIn.put("sniffing", sniffing);
-
             inbounds.put(socksIn);
             config.put("inbounds", inbounds);
 
-            // Outbounds: proxy + direct (needed for routing private IPs)
+            // ── Outbounds ──
             JSONArray outbounds = new JSONArray();
             outbounds.put(outbound);
-
-            JSONObject direct = new JSONObject();
-            direct.put("tag", "direct");
-            direct.put("protocol", "freedom");
-            outbounds.put(direct);
-
+            outbounds.put(new JSONObject().put("tag", "direct").put("protocol", "freedom")
+                .put("settings", new JSONObject().put("domainStrategy", "UseIP")));
+            outbounds.put(new JSONObject().put("tag", "dns-out").put("protocol", "dns"));
             config.put("outbounds", outbounds);
 
-            // Routing - route private IPs and DNS traffic directly
+            // ── Routing (v2rayNG: AsIs) ──
             JSONObject routing = new JSONObject();
             routing.put("domainStrategy", "AsIs");
             JSONArray rules = new JSONArray();
 
-            // Route XRay's internal DNS module queries direct.
-            JSONObject directDnsTag = new JSONObject();
-            directDnsTag.put("type", "field");
-            directDnsTag.put("inboundTag", new JSONArray().put("dns-internal"));
-            directDnsTag.put("outboundTag", "direct");
-            rules.put(directDnsTag);
+            // Proxy server IP → direct
+            String proxyServerIp = V2RayConfigHelper.extractOutboundAddress(outbound);
+            if (proxyServerIp != null && !proxyServerIp.isEmpty()) {
+                JSONObject proxyDirect = new JSONObject();
+                proxyDirect.put("type", "field");
+                proxyDirect.put("ip", new JSONArray().put(proxyServerIp));
+                proxyDirect.put("outboundTag", "direct");
+                rules.put(proxyDirect);
+            }
 
-            // Catch port-53 traffic and send direct
-            JSONObject directDns = new JSONObject();
-            directDns.put("type", "field");
-            directDns.put("port", "53");
-            directDns.put("outboundTag", "direct");
-            rules.put(directDns);
-
+            // Private IPs → direct
             JSONObject directPrivate = new JSONObject();
             directPrivate.put("type", "field");
-            directPrivate.put("ip", new JSONArray()
-                .put("geoip:private"));
+            directPrivate.put("ip", new JSONArray().put("geoip:private"));
             directPrivate.put("outboundTag", "direct");
             rules.put(directPrivate);
+
             routing.put("rules", rules);
             config.put("routing", routing);
 
-            // DNS - use discovered best DNS servers (probed in parallel)
+            // ── DNS (v2rayNG: tag="dns-module" → routed through proxy) ──
             JSONObject dns = new JSONObject();
-            JSONArray dnsServers = new JSONArray();
-            for (String s : V2RayConfigHelper.discoverBestDns(6)) dnsServers.put(s);
-            dns.put("servers", dnsServers);
+            dns.put("servers", new JSONArray().put("1.1.1.1").put("8.8.8.8"));
             dns.put("queryStrategy", "UseIPv4");
-            dns.put("disableCache", false);
-            dns.put("tag", "dns-internal");
+            dns.put("tag", "dns-module");
+            JSONObject hosts = new JSONObject();
+            hosts.put("domain:googleapis.cn", "googleapis.com");
+            dns.put("hosts", hosts);
             config.put("dns", dns);
+
+            // DNS routing: send dns-module traffic through proxy
+            JSONObject dnsModuleRule = new JSONObject();
+            dnsModuleRule.put("type", "field");
+            dnsModuleRule.put("inboundTag", new JSONArray().put("dns-module"));
+            dnsModuleRule.put("outboundTag", "proxy");
+            rules.put(dnsModuleRule);
 
             return config.toString();
 

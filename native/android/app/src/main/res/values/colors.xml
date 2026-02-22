@@ -41,6 +41,7 @@
     <color name="card_background">#12121F</color>
     <color name="card_background_elevated">#1A1A2E</color>
     <color name="surface_dim">#0C0C16</color>
+    <color name="surface_elevated">#1E1E30</color>
 
     <!-- ── Typography ────────────────────────────────────────────── -->
     <color name="text_primary">#F0EDF5</color>

@@ -11,31 +11,29 @@
 <androidx.constraintlayout.widget.ConstraintLayout
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    android:paddingBottom="32dp">
+    android:paddingBottom="24dp">
 
-    <!-- ════════════════════════════════════════════════════════════
-         TOP BAR — minimal, floating
-         ════════════════════════════════════════════════════════════ -->
+    <!-- ═══ TOP BAR ═══ -->
     <LinearLayout
         android:id="@+id/top_bar"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
         android:gravity="center_vertical"
-        android:paddingHorizontal="20dp"
-        android:paddingTop="48dp"
-        android:paddingBottom="8dp"
+        android:paddingHorizontal="16dp"
+        android:paddingTop="40dp"
+        android:paddingBottom="4dp"
         app:layout_constraintTop_toTopOf="parent">
 
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="V2Ray"
+            android:text="Filter Bypass"
             android:textSize="18sp"
             android:textColor="@color/text_secondary"
-            android:letterSpacing="0.15"
-            android:fontFamily="sans-serif-light" />
+            android:letterSpacing="0.08"
+            android:fontFamily="sans-serif-medium" />
 
         <ImageButton
             android:id="@+id/btn_settings"
@@ -56,44 +54,37 @@
             android:contentDescription="About"
             android:padding="8dp"
             app:tint="@color/text_tertiary" />
-
     </LinearLayout>
 
-    <!-- ════════════════════════════════════════════════════════════
-         POWER BUTTON — central hero element
-         Layered: glow → ring → icon
-         ════════════════════════════════════════════════════════════ -->
+    <!-- ═══ POWER BUTTON (compact) ═══ -->
     <FrameLayout
         android:id="@+id/power_button_area"
-        android:layout_width="220dp"
-        android:layout_height="220dp"
-        android:layout_marginTop="24dp"
+        android:layout_width="160dp"
+        android:layout_height="160dp"
+        android:layout_marginTop="12dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/top_bar">
 
-        <!-- Glow layer (visible when connected/connecting) -->
         <ImageView
             android:id="@+id/power_glow"
-            android:layout_width="220dp"
-            android:layout_height="220dp"
+            android:layout_width="160dp"
+            android:layout_height="160dp"
             android:layout_gravity="center"
             android:alpha="0"
             android:src="@drawable/bg_power_glow_on" />
 
-        <!-- Ring -->
         <ImageView
             android:id="@+id/power_ring"
-            android:layout_width="160dp"
-            android:layout_height="160dp"
+            android:layout_width="120dp"
+            android:layout_height="120dp"
             android:layout_gravity="center"
             android:src="@drawable/bg_power_ring_off" />
 
-        <!-- Power icon (clickable) -->
         <ImageView
             android:id="@+id/connect_button"
-            android:layout_width="56dp"
-            android:layout_height="56dp"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
             android:layout_gravity="center"
             android:src="@drawable/ic_power"
             android:background="?attr/selectableItemBackgroundBorderless"
@@ -101,29 +92,25 @@
             android:focusable="true"
             android:contentDescription="Connect" />
 
-        <!-- Spinner overlay (shown while connecting) -->
         <ProgressBar
             android:id="@+id/progress_bar"
-            android:layout_width="164dp"
-            android:layout_height="164dp"
+            android:layout_width="124dp"
+            android:layout_height="124dp"
             android:layout_gravity="center"
             android:indeterminateTint="@color/accent_amber"
             android:visibility="gone" />
-
     </FrameLayout>
 
-    <!-- ════════════════════════════════════════════════════════════
-         STATUS TEXT — below power button
-         ════════════════════════════════════════════════════════════ -->
+    <!-- ═══ STATUS ═══ -->
     <TextView
         android:id="@+id/status_text"
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
+        android:layout_marginTop="10dp"
         android:text="@string/status_disconnected"
         android:textColor="@color/text_secondary"
-        android:textSize="22sp"
-        android:letterSpacing="0.08"
+        android:textSize="20sp"
+        android:letterSpacing="0.06"
         android:fontFamily="sans-serif-light"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
@@ -133,38 +120,35 @@
         android:id="@+id/status_detail"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginTop="6dp"
-        android:layout_marginHorizontal="40dp"
+        android:layout_marginTop="4dp"
+        android:layout_marginHorizontal="32dp"
         android:gravity="center"
         android:ellipsize="end"
         android:maxLines="2"
         android:text="Tap to connect"
         android:textColor="@color/text_tertiary"
-        android:textSize="13sp"
-        android:fontFamily="sans-serif"
+        android:textSize="12sp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/status_text" />
 
-    <!-- Patience message — shown during connecting/searching -->
     <TextView
         android:id="@+id/patience_message"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginTop="12dp"
-        android:layout_marginHorizontal="32dp"
+        android:layout_marginTop="8dp"
+        android:layout_marginHorizontal="24dp"
         android:gravity="center"
         android:text="@string/patience_message"
         android:textColor="@color/accent_amber"
-        android:textSize="12sp"
-        android:fontFamily="sans-serif"
-        android:lineSpacingExtra="3dp"
+        android:textSize="11sp"
+        android:lineSpacingExtra="2dp"
         android:visibility="gone"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/status_detail" />
 
-    <!-- Hidden status icon (kept for code compatibility) -->
+    <!-- Hidden compat views -->
     <ImageView
         android:id="@+id/status_icon"
         android:layout_width="1dp"
@@ -172,130 +156,6 @@
         android:visibility="gone"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
-
-    <!-- ════════════════════════════════════════════════════════════
-         SPEED CARD — glassmorphic, appears when connected
-         ════════════════════════════════════════════════════════════ -->
-    <LinearLayout
-        android:id="@+id/speed_traffic_card"
-        android:layout_width="0dp"
-        android:layout_height="wrap_content"
-        android:layout_marginHorizontal="20dp"
-        android:layout_marginTop="28dp"
-        android:background="@drawable/bg_card_glass"
-        android:orientation="horizontal"
-        android:padding="20dp"
-        android:visibility="gone"
-        android:weightSum="3"
-        app:layout_constraintEnd_toEndOf="parent"
-        app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/status_detail">
-
-        <!-- Download -->
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_marginBottom="6dp"
-                android:src="@drawable/ic_download"
-                app:tint="@color/accent_cyan" />
-
-            <TextView
-                android:id="@+id/download_speed"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="0 B/s"
-                android:textColor="@color/text_primary"
-                android:textSize="15sp"
-                android:textStyle="bold"
-                android:fontFamily="sans-serif-medium" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Down"
-                android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
-        </LinearLayout>
-
-        <!-- Upload -->
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_marginBottom="6dp"
-                android:src="@drawable/ic_upload"
-                app:tint="@color/accent_rose" />
-
-            <TextView
-                android:id="@+id/upload_speed"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="0 B/s"
-                android:textColor="@color/text_primary"
-                android:textSize="15sp"
-                android:textStyle="bold"
-                android:fontFamily="sans-serif-medium" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Up"
-                android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
-        </LinearLayout>
-
-        <!-- Traffic -->
-        <LinearLayout
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"
-            android:gravity="center"
-            android:orientation="vertical">
-
-            <ImageView
-                android:layout_width="20dp"
-                android:layout_height="20dp"
-                android:layout_marginBottom="6dp"
-                android:src="@drawable/ic_traffic"
-                app:tint="@color/accent_purple" />
-
-            <TextView
-                android:id="@+id/total_traffic"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="0 KB"
-                android:textColor="@color/text_primary"
-                android:textSize="15sp"
-                android:textStyle="bold"
-                android:fontFamily="sans-serif-medium" />
-
-            <TextView
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="Traffic"
-                android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
-        </LinearLayout>
-
-    </LinearLayout>
-
-    <!-- Hidden session_time (kept for code compatibility) -->
     <TextView
         android:id="@+id/session_time"
         android:layout_width="1dp"
@@ -304,38 +164,220 @@
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintStart_toStartOf="parent" />
 
-    <!-- ════════════════════════════════════════════════════════════
-         PROGRESS CARD — config testing progress
-         ════════════════════════════════════════════════════════════ -->
+    <!-- ═══ SPEED CARD (when connected) ═══ -->
+    <LinearLayout
+        android:id="@+id/speed_traffic_card"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="16dp"
+        android:background="@drawable/bg_card_glass"
+        android:orientation="horizontal"
+        android:padding="14dp"
+        android:visibility="gone"
+        android:weightSum="3"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/patience_message">
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginBottom="4dp"
+                android:src="@drawable/ic_download"
+                app:tint="@color/accent_cyan" />
+            <TextView
+                android:id="@+id/download_speed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0 B/s"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Down"
+                android:textColor="@color/text_tertiary"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginBottom="4dp"
+                android:src="@drawable/ic_upload"
+                app:tint="@color/accent_rose" />
+            <TextView
+                android:id="@+id/upload_speed"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0 B/s"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Up"
+                android:textColor="@color/text_tertiary"
+                android:textSize="10sp" />
+        </LinearLayout>
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:gravity="center"
+            android:orientation="vertical">
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginBottom="4dp"
+                android:src="@drawable/ic_traffic"
+                app:tint="@color/accent_purple" />
+            <TextView
+                android:id="@+id/total_traffic"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0 KB"
+                android:textColor="@color/text_primary"
+                android:textSize="14sp"
+                android:textStyle="bold" />
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Traffic"
+                android:textColor="@color/text_tertiary"
+                android:textSize="10sp" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ═══ SETTINGS CARD — DNS toggle + options ═══ -->
+    <LinearLayout
+        android:id="@+id/settings_card"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="12dp"
+        android:background="@drawable/bg_card_glass"
+        android:orientation="vertical"
+        android:padding="14dp"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toBottomOf="@id/speed_traffic_card">
+
+        <!-- DNS through proxy toggle (auto-enabled) -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="DNS through proxy"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/dns_proxy_switch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:thumbTint="@color/accent_cyan"
+                android:trackTint="@color/surface_elevated" />
+        </LinearLayout>
+
+        <!-- TLS Fragment toggle -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="TLS Fragment (anti-DPI)"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/fragment_switch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:thumbTint="@color/accent_cyan"
+                android:trackTint="@color/surface_elevated" />
+        </LinearLayout>
+
+        <!-- Continuous scan toggle -->
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="@string/continuous_scan"
+                android:textColor="@color/text_secondary"
+                android:textSize="13sp" />
+            <androidx.appcompat.widget.SwitchCompat
+                android:id="@+id/continuous_scan_switch"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:checked="true"
+                android:thumbTint="@color/accent_cyan"
+                android:trackTint="@color/surface_elevated" />
+        </LinearLayout>
+    </LinearLayout>
+
+    <!-- ═══ PROGRESS CARD ═══ -->
     <LinearLayout
         android:id="@+id/progress_card"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginHorizontal="20dp"
-        android:layout_marginTop="16dp"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="12dp"
         android:background="@drawable/bg_card_glass"
         android:orientation="vertical"
-        android:padding="16dp"
+        android:padding="14dp"
         android:visibility="gone"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toBottomOf="@id/speed_traffic_card">
+        app:layout_constraintTop_toBottomOf="@id/settings_card">
 
         <TextView
             android:id="@+id/progress_label"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:layout_marginBottom="10dp"
+            android:layout_marginBottom="8dp"
             android:text="Testing configs..."
             android:textColor="@color/text_secondary"
-            android:textSize="13sp" />
+            android:textSize="12sp" />
 
         <ProgressBar
             android:id="@+id/v2ray_progress_bar"
             style="@style/Widget.AppCompat.ProgressBar.Horizontal"
             android:layout_width="match_parent"
             android:layout_height="3dp"
-            android:layout_marginBottom="6dp"
+            android:layout_marginBottom="4dp"
             android:max="100"
             android:progress="0"
             android:progressTint="@color/accent_cyan" />
@@ -346,70 +388,111 @@
             android:layout_height="wrap_content"
             android:text="0/0"
             android:textColor="@color/text_tertiary"
-            android:textSize="12sp" />
-
+            android:textSize="11sp" />
     </LinearLayout>
 
-    <!-- ════════════════════════════════════════════════════════════
-         INFO ROW — configs count, minimal
-         ════════════════════════════════════════════════════════════ -->
+    <!-- ═══ SERVER INFO CARD — configs count + select server button ═══ -->
     <LinearLayout
         android:id="@+id/stats_card"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginHorizontal="20dp"
-        android:layout_marginTop="16dp"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="12dp"
         android:background="@drawable/bg_card_glass"
-        android:gravity="center"
-        android:orientation="horizontal"
+        android:orientation="vertical"
         android:padding="14dp"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/progress_card">
 
-        <ImageView
-            android:layout_width="18dp"
-            android:layout_height="18dp"
-            android:layout_marginEnd="10dp"
-            android:src="@drawable/ic_list"
-            app:tint="@color/text_tertiary" />
-
-        <TextView
-            android:id="@+id/config_count"
-            android:layout_width="wrap_content"
+        <LinearLayout
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="0"
-            android:textColor="@color/accent_cyan"
-            android:textSize="16sp"
-            android:textStyle="bold"
-            android:fontFamily="sans-serif-medium" />
+            android:gravity="center_vertical"
+            android:orientation="horizontal">
 
-        <TextView
-            android:layout_width="wrap_content"
+            <ImageView
+                android:layout_width="16dp"
+                android:layout_height="16dp"
+                android:layout_marginEnd="8dp"
+                android:src="@drawable/ic_list"
+                app:tint="@color/text_tertiary" />
+
+            <TextView
+                android:id="@+id/config_count"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="0"
+                android:textColor="@color/accent_cyan"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="4dp"
+                android:text="configs"
+                android:textColor="@color/text_tertiary"
+                android:textSize="12sp" />
+
+            <View
+                android:layout_width="0dp"
+                android:layout_height="1dp"
+                android:layout_weight="1" />
+
+            <TextView
+                android:id="@+id/pool_size_text"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:textColor="@color/accent_cyan"
+                android:textSize="11sp"
+                android:visibility="gone" />
+        </LinearLayout>
+
+        <!-- Select server button -->
+        <LinearLayout
+            android:id="@+id/btn_select_server"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:layout_marginStart="6dp"
-            android:text="configs available"
-            android:textColor="@color/text_tertiary"
-            android:textSize="13sp" />
+            android:layout_marginTop="10dp"
+            android:background="@drawable/bg_btn_action"
+            android:gravity="center"
+            android:orientation="horizontal"
+            android:padding="12dp"
+            android:clickable="true"
+            android:focusable="true">
 
+            <ImageView
+                android:layout_width="18dp"
+                android:layout_height="18dp"
+                android:layout_marginEnd="8dp"
+                android:src="@drawable/ic_swap"
+                app:tint="@color/accent_cyan" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Select Server"
+                android:textColor="@color/accent_cyan"
+                android:textSize="13sp"
+                android:textStyle="bold" />
+        </LinearLayout>
     </LinearLayout>
 
-    <!-- ════════════════════════════════════════════════════════════
-         BOTTOM ACTIONS — icon-only row, ultra-minimal
-         ════════════════════════════════════════════════════════════ -->
+    <!-- ═══ BOTTOM ACTIONS ═══ -->
     <LinearLayout
         android:id="@+id/bottom_actions"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginHorizontal="20dp"
-        android:layout_marginTop="20dp"
+        android:layout_marginHorizontal="16dp"
+        android:layout_marginTop="12dp"
         android:gravity="center"
         android:orientation="horizontal"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toBottomOf="@id/stats_card">
 
-        <!-- Refresh -->
         <LinearLayout
             android:id="@+id/btn_refresh"
             android:layout_width="0dp"
@@ -418,28 +501,24 @@
             android:background="@drawable/bg_btn_action"
             android:gravity="center"
             android:orientation="vertical"
-            android:padding="14dp"
-            android:layout_marginEnd="6dp"
+            android:padding="12dp"
+            android:layout_marginEnd="4dp"
             android:clickable="true"
             android:focusable="true">
-
             <ImageView
-                android:layout_width="22dp"
-                android:layout_height="22dp"
-                android:layout_marginBottom="4dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_marginBottom="3dp"
                 android:src="@drawable/ic_refresh"
                 app:tint="@color/text_secondary" />
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Refresh"
                 android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
+                android:textSize="10sp" />
         </LinearLayout>
 
-        <!-- Switch -->
         <LinearLayout
             android:id="@+id/btn_switch"
             android:layout_width="0dp"
@@ -448,28 +527,24 @@
             android:background="@drawable/bg_btn_action"
             android:gravity="center"
             android:orientation="vertical"
-            android:padding="14dp"
-            android:layout_marginHorizontal="6dp"
+            android:padding="12dp"
+            android:layout_marginHorizontal="4dp"
             android:clickable="true"
             android:focusable="true">
-
             <ImageView
-                android:layout_width="22dp"
-                android:layout_height="22dp"
-                android:layout_marginBottom="4dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_marginBottom="3dp"
                 android:src="@drawable/ic_swap"
                 app:tint="@color/accent_cyan" />
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Switch"
                 android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
+                android:textSize="10sp" />
         </LinearLayout>
 
-        <!-- Share -->
         <LinearLayout
             android:id="@+id/btn_share"
             android:layout_width="0dp"
@@ -478,28 +553,24 @@
             android:background="@drawable/bg_btn_action"
             android:gravity="center"
             android:orientation="vertical"
-            android:padding="14dp"
-            android:layout_marginHorizontal="6dp"
+            android:padding="12dp"
+            android:layout_marginHorizontal="4dp"
             android:clickable="true"
             android:focusable="true">
-
             <ImageView
-                android:layout_width="22dp"
-                android:layout_height="22dp"
-                android:layout_marginBottom="4dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_marginBottom="3dp"
                 android:src="@drawable/ic_share"
                 app:tint="@color/accent_rose" />
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Share"
                 android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
+                android:textSize="10sp" />
         </LinearLayout>
 
-        <!-- Exit -->
         <LinearLayout
             android:id="@+id/btn_exit"
             android:layout_width="0dp"
@@ -508,29 +579,24 @@
             android:background="@drawable/bg_btn_action"
             android:gravity="center"
             android:orientation="vertical"
-            android:padding="14dp"
-            android:layout_marginStart="6dp"
+            android:padding="12dp"
+            android:layout_marginStart="4dp"
             android:clickable="true"
             android:focusable="true">
-
             <ImageView
-                android:layout_width="22dp"
-                android:layout_height="22dp"
-                android:layout_marginBottom="4dp"
+                android:layout_width="20dp"
+                android:layout_height="20dp"
+                android:layout_marginBottom="3dp"
                 android:src="@drawable/ic_exit"
                 app:tint="@color/accent_red" />
-
             <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Exit"
                 android:textColor="@color/text_tertiary"
-                android:textSize="11sp" />
-
+                android:textSize="10sp" />
         </LinearLayout>
-
     </LinearLayout>
 
 </androidx.constraintlayout.widget.ConstraintLayout>
-
 </ScrollView>

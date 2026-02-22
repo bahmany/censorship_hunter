@@ -38,6 +38,7 @@ import java.net.SocketTimeoutException;
 import java.nio.charset.StandardCharsets;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -54,12 +55,18 @@ public class VpnService extends android.net.VpnService {
     private static final String CHANNEL_ID = "vpn_service_channel";
     private static final int NOTIFICATION_ID = 1;
     private static final int TUN_MTU = 1500;
-    private static final String TUN_ADDRESS = "10.255.0.1";
-    private static final int TUN_PREFIX = 24;
-    private static final String TUN_ADDRESS_V6 = "fd00:1:fd00:1::1";
-    private static final int TUN_PREFIX_V6 = 128;
-    private static final String TUN_DNS = "1.1.1.1"; // DNS forwarded through proxy via tun2socks+XRay sniffing
-    private static final int XRAY_SOCKS_PORT = 10810;
+    // v2rayNG 1.10.32 default: VpnInterfaceAddressConfig.OPTION_1
+    private static final String TUN_ADDRESS = "10.10.14.1";
+    private static final int TUN_PREFIX = 30;
+    private static final String TUN_ADDRESS_V6 = "fc00::10:10:14:1";
+    private static final int TUN_PREFIX_V6 = 126;
+    private static final String TUN_DNS = "1.1.1.1";
+    private static final int XRAY_SOCKS_PORT = 10808; // v2rayNG default SOCKS port
+    private static final int XRAY_SHADOW_PORT = 10811; // Shadow port for zero-downtime hot-swap
+
+    // Continuous scan preference
+    public static final String PREF_CONTINUOUS_SCAN = "continuous_scan_enabled";
+    public static final String BROADCAST_CONFIG_POOL = "com.hunter.app.CONFIG_POOL_UPDATE";
 
     // Notification states
     private enum NotificationState {
@@ -76,9 +83,14 @@ public class VpnService extends android.net.VpnService {
     private volatile Process xrayProcess;
     private volatile File xrayConfigFile;
     private volatile Thread autoSwitchThread;
+    private volatile Thread continuousScanThread;
     private volatile JSONObject currentConfig;
     private volatile int currentTelegramLatency = Integer.MAX_VALUE;
     private volatile int currentInstagramLatency = Integer.MAX_VALUE;
+    private volatile int activePort = XRAY_SOCKS_PORT; // Currently active SOCKS port
+    private final List<JSONObject> activeConfigPool = Collections.synchronizedList(new ArrayList<>());
+    private volatile long lastHotSwapTime = 0;
+    private static final long HOT_SWAP_COOLDOWN_MS = 30_000; // Min 30s between hot-swaps
 
     private ConfigManager configManager;
 
@@ -92,6 +104,7 @@ public class VpnService extends android.net.VpnService {
     public static final String ACTION_START = "com.hunter.app.action.START";
     public static final String ACTION_STOP = "com.hunter.app.action.STOP";
     public static final String ACTION_EXIT = "com.hunter.app.action.EXIT";
+    public static final String ACTION_INJECT_CONFIGS = "com.hunter.app.action.INJECT_CONFIGS";
     public static final String BROADCAST_STATUS = "com.hunter.app.VPN_STATUS";
 
     public static VpnService getInstance() {
@@ -127,6 +140,11 @@ public class VpnService extends android.net.VpnService {
             stopSelf();
             return START_NOT_STICKY;
         }
+        if (ACTION_INJECT_CONFIGS.equals(action) && isRunning.get()) {
+            // ConfigMonitorService found new working configs — inject into running VPN
+            executor.execute(this::injectNewConfigsFromCache);
+            return START_STICKY;
+        }
 
         if (ACTION_START.equals(action) && !isRunning.get() && !stopInProgress.get()) {
             try {
@@ -137,7 +155,14 @@ public class VpnService extends android.net.VpnService {
                 } else {
                     startForeground(NOTIFICATION_ID, notification);
                 }
-                executor.execute(this::startVpn);
+                // Check if user selected specific configs
+                ArrayList<String> customUris = intent.getStringArrayListExtra("custom_uris");
+                if (customUris != null && !customUris.isEmpty()) {
+                    Log.i(TAG, "Starting VPN with " + customUris.size() + " user-selected configs");
+                    executor.execute(() -> startVpnWithCustomUris(customUris));
+                } else {
+                    executor.execute(this::startVpn);
+                }
             } catch (Throwable t) {
                 Log.e(TAG, "startForeground failed", t);
                 stopSelf();
@@ -146,6 +171,97 @@ public class VpnService extends android.net.VpnService {
         }
 
         return START_STICKY;
+    }
+
+    /**
+     * Start VPN with user-selected config URIs (from ConfigSelectActivity).
+     * Skips auto-discovery and directly uses the provided URIs.
+     */
+    private void startVpnWithCustomUris(ArrayList<String> uris) {
+        isRunning.set(true);
+        try {
+            Log.i(TAG, "[CUSTOM] Starting VPN with " + uris.size() + " user-selected URIs");
+            updateNotification("Connecting with selected configs...", NotificationState.CONNECTING);
+            broadcastStatus("Connecting", "Using " + uris.size() + " selected configs", false);
+
+            // Setup TUN interface
+            if (!setupTunInterface()) {
+                Log.e(TAG, "[CUSTOM] Failed to setup TUN interface");
+                updateNotification("VPN setup failed");
+                stopVpn();
+                return;
+            }
+
+            // Start XRay with user-selected URIs
+            boolean started;
+            if (uris.size() > 1) {
+                started = startXRayBalancedProcess(uris);
+            } else {
+                JSONObject single = new JSONObject();
+                single.put("uri", uris.get(0));
+                single.put("ps", "Custom");
+                started = startXRaySocksProcess(single);
+            }
+
+            if (!started) {
+                Log.e(TAG, "[CUSTOM] Failed to start XRay");
+                updateNotification("Failed to start config");
+                stopVpn();
+                return;
+            }
+
+            // Wait for SOCKS port
+            boolean portAlive = waitForPortAlive(XRAY_SOCKS_PORT, 8000);
+            if (!portAlive) {
+                Log.e(TAG, "[CUSTOM] SOCKS port not alive");
+                updateNotification("Config start failed");
+                stopVpn();
+                return;
+            }
+
+            // Start tun2socks bridge
+            if (!startTun2SocksBridge()) {
+                Log.e(TAG, "[CUSTOM] tun2socks bridge failed");
+                updateNotification("Bridge start failed");
+                stopVpn();
+                return;
+            }
+
+            // Build config pool for monitoring
+            List<JSONObject> pool = new ArrayList<>();
+            for (String uri : uris) {
+                JSONObject cfg = new JSONObject();
+                cfg.put("uri", uri);
+                cfg.put("ps", "Custom");
+                pool.add(cfg);
+            }
+            synchronized (activeConfigPool) {
+                activeConfigPool.clear();
+                activeConfigPool.addAll(pool);
+            }
+            if (!pool.isEmpty()) currentConfig = pool.get(0);
+            broadcastConfigPoolUpdate();
+
+            // Hide progress and show success
+            Intent hideIntent = new Intent("com.hunter.app.V2RAY_PROGRESS");
+            hideIntent.putExtra("show", false);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(hideIntent);
+
+            startAutoSwitchThread();
+            VpnState.setActive(true);
+            String msg = uris.size() > 1
+                ? "Connected (" + uris.size() + " balanced)"
+                : "Connected (custom)";
+            updateNotification(msg, NotificationState.CONNECTED);
+            broadcastStatus("Connected", msg, true);
+            startTrafficRouting();
+            executor.execute(this::checkConnectivity);
+
+            Log.i(TAG, "[CUSTOM] VPN started successfully with " + uris.size() + " configs");
+        } catch (Exception e) {
+            Log.e(TAG, "[CUSTOM] Failed to start VPN", e);
+            stopVpn();
+        }
     }
 
     private void startVpn() {
@@ -499,6 +615,13 @@ public class VpnService extends android.net.VpnService {
 
             currentConfig = workingConfigs.get(0);
 
+            // Populate active config pool for health monitoring
+            synchronized (activeConfigPool) {
+                activeConfigPool.clear();
+                activeConfigPool.addAll(workingConfigs);
+            }
+            broadcastConfigPoolUpdate();
+
             // Hide progress bar and show success
             Intent hideIntent = new Intent("com.hunter.app.V2RAY_PROGRESS");
             hideIntent.putExtra("show", false);
@@ -528,7 +651,7 @@ public class VpnService extends android.net.VpnService {
         Socket socket = null;
         try {
             socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+            socket.connect(new InetSocketAddress("127.0.0.1", activePort), timeoutMs);
             socket.setSoTimeout(timeoutMs); // Increased for XHTTP connections
 
             OutputStream os = socket.getOutputStream();
@@ -670,7 +793,7 @@ public class VpnService extends android.net.VpnService {
         Socket socket = null;
         try {
             socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), 8000);
+            socket.connect(new InetSocketAddress("127.0.0.1", activePort), 8000);
             socket.setSoTimeout(20000);
 
             OutputStream os = socket.getOutputStream();
@@ -753,7 +876,7 @@ public class VpnService extends android.net.VpnService {
         try {
             long start = System.nanoTime();
             socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), 8000);
+            socket.connect(new InetSocketAddress("127.0.0.1", activePort), 8000);
             socket.setSoTimeout(25000);
 
             OutputStream os = socket.getOutputStream();
@@ -867,7 +990,7 @@ public class VpnService extends android.net.VpnService {
         try {
             long start = System.nanoTime();
             socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), 8000);
+            socket.connect(new InetSocketAddress("127.0.0.1", activePort), 8000);
             socket.setSoTimeout(15000);
 
             OutputStream os = socket.getOutputStream();
@@ -1081,7 +1204,7 @@ public class VpnService extends android.net.VpnService {
             
             // Test TCP connection
             Socket socket = new Socket(new Proxy(Proxy.Type.SOCKS,
-                    new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT)));
+                    new InetSocketAddress("127.0.0.1", activePort)));
             try {
                 socket.connect(new InetSocketAddress(host, port), 8000);
                 socket.setSoTimeout(10000);
@@ -1141,7 +1264,7 @@ public class VpnService extends android.net.VpnService {
         try {
             long start = System.nanoTime();
             socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), 8000);
+            socket.connect(new InetSocketAddress("127.0.0.1", activePort), 8000);
             socket.setSoTimeout(15000);
 
             OutputStream os = socket.getOutputStream();
@@ -1305,8 +1428,9 @@ public class VpnService extends android.net.VpnService {
     }
 
     /**
-     * Hot-swap XRay from single config to balanced config with multiple servers.
-     * tun2socks stays running — only XRay is restarted, so traffic resumes quickly.
+     * Hot-swap XRay to balanced config with ZERO downtime.
+     * Strategy: start new XRay on shadow port → verify → stop old XRay → restart tun2socks.
+     * tun2socks restart takes ~1s — much better than the old 10+ second gap.
      */
     private void upgradeToBalancedConfig(List<JSONObject> configs) {
         try {
@@ -1320,38 +1444,348 @@ public class VpnService extends android.net.VpnService {
                 return;
             }
 
-            Log.i(TAG, "[UPGRADE] Stopping old XRay for balancer upgrade...");
-            stopXRayOnly();
+            // Update the active config pool
+            synchronized (activeConfigPool) {
+                activeConfigPool.clear();
+                activeConfigPool.addAll(configs);
+            }
 
-            Log.i(TAG, "[UPGRADE] Starting balanced XRay with " + uris.size() + " servers...");
-            boolean started = startXRayBalancedProcess(uris);
-            if (!started) {
-                Log.w(TAG, "[UPGRADE] Balanced start failed, falling back to single config");
-                // Try first config as fallback
-                started = startXRaySocksProcess(configs.get(0));
-                if (!started) {
-                    Log.e(TAG, "[UPGRADE] Single config fallback also failed!");
+            boolean success = hotSwapXRay(uris, null);
+            if (success) {
+                String msg = "Connected (" + uris.size() + " balanced)";
+                updateNotification(msg, NotificationState.CONNECTED);
+                broadcastStatus("Connected", msg, true);
+                broadcastConfigPoolUpdate();
+                Log.i(TAG, "[UPGRADE] Balancer upgrade complete with " + uris.size() + " servers");
+            } else {
+                Log.w(TAG, "[UPGRADE] Hot-swap failed, keeping current config");
+            }
+        } catch (Exception e) {
+            Log.e(TAG, "[UPGRADE] Failed to upgrade to balanced config", e);
+        }
+    }
+
+    /**
+     * Zero-downtime XRay hot-swap.
+     * 1. Start new XRay on shadow port
+     * 2. Verify new XRay works (SOCKS test)
+     * 3. Stop old XRay
+     * 4. Restart tun2socks pointing to new port
+     * 5. Swap active port reference
+     *
+     * If balanced URIs are provided, uses balanced config. Otherwise uses single config.
+     * Returns true if swap succeeded.
+     */
+    private boolean hotSwapXRay(List<String> balancedUris, JSONObject singleConfig) {
+        // Cooldown check — prevent rapid swaps
+        long now = System.currentTimeMillis();
+        if (now - lastHotSwapTime < HOT_SWAP_COOLDOWN_MS) {
+            Log.i(TAG, "[HOT-SWAP] Cooldown active, skipping (last swap " + (now - lastHotSwapTime) + "ms ago)");
+            return false;
+        }
+
+        int shadowPort = (activePort == XRAY_SOCKS_PORT) ? XRAY_SHADOW_PORT : XRAY_SOCKS_PORT;
+        Process shadowProcess = null;
+        File shadowConfigFile = null;
+
+        try {
+            FreeV2RayApplication app = FreeV2RayApplication.getInstance();
+            if (app == null) return false;
+            XRayManager xrayManager = app.getXRayManager();
+            if (xrayManager == null || !xrayManager.isReady()) return false;
+
+            // Step 1: Start new XRay on shadow port
+            Log.i(TAG, "[HOT-SWAP] Starting new XRay on shadow port " + shadowPort);
+            if (balancedUris != null && balancedUris.size() > 1) {
+                String jsonConfig = V2RayConfigHelper.generateBalancedConfig(balancedUris, shadowPort);
+                if (jsonConfig == null) {
+                    Log.w(TAG, "[HOT-SWAP] Failed to generate balanced config");
+                    return false;
+                }
+                shadowConfigFile = xrayManager.writeConfig(jsonConfig, shadowPort);
+            } else if (singleConfig != null) {
+                String uri = singleConfig.optString("uri", "");
+                String jsonConfig = V2RayConfigHelper.generateFullConfig(uri, shadowPort);
+                if (jsonConfig == null) return false;
+                shadowConfigFile = xrayManager.writeConfig(jsonConfig, shadowPort);
+            } else {
+                return false;
+            }
+
+            if (shadowConfigFile == null) return false;
+            shadowProcess = xrayManager.startProcess(shadowConfigFile);
+            if (shadowProcess == null) {
+                shadowConfigFile.delete();
+                return false;
+            }
+
+            // Step 2: Verify shadow XRay works
+            boolean shadowAlive = waitForPortAlive(shadowPort, 8000);
+            if (!shadowAlive) {
+                Log.w(TAG, "[HOT-SWAP] Shadow port " + shadowPort + " not alive");
+                shadowProcess.destroyForcibly();
+                shadowConfigFile.delete();
+                return false;
+            }
+
+            // Quick connectivity check on shadow port
+            boolean shadowWorks = checkSocksTcpConnectOnPort(shadowPort, 5000);
+            if (!shadowWorks) {
+                Log.w(TAG, "[HOT-SWAP] Shadow port connectivity check failed");
+                shadowProcess.destroyForcibly();
+                shadowConfigFile.delete();
+                return false;
+            }
+
+            Log.i(TAG, "[HOT-SWAP] Shadow XRay verified on port " + shadowPort);
+
+            // Step 3: Stop old XRay (tun2socks will buffer briefly)
+            Process oldProcess = xrayProcess;
+            File oldConfigFile = xrayConfigFile;
+
+            // Step 4: Atomic swap — update references
+            xrayProcess = shadowProcess;
+            xrayConfigFile = shadowConfigFile;
+            activePort = shadowPort;
+
+            // Step 5: Restart tun2socks to point at new port
+            // This is the only moment of traffic interruption (~1-2s)
+            restartTun2SocksForPort(shadowPort);
+
+            // Step 6: Clean up old process
+            if (oldProcess != null) {
+                try { oldProcess.destroyForcibly(); } catch (Exception ignored) {}
+            }
+            if (oldConfigFile != null && oldConfigFile.exists()) {
+                try { oldConfigFile.delete(); } catch (Exception ignored) {}
+            }
+
+            lastHotSwapTime = System.currentTimeMillis();
+            Log.i(TAG, "[HOT-SWAP] Complete — now using port " + shadowPort);
+            return true;
+
+        } catch (Exception e) {
+            Log.e(TAG, "[HOT-SWAP] Failed", e);
+            // Clean up shadow process on failure
+            if (shadowProcess != null) {
+                try { shadowProcess.destroyForcibly(); } catch (Exception ignored) {}
+            }
+            if (shadowConfigFile != null && shadowConfigFile.exists()) {
+                try { shadowConfigFile.delete(); } catch (Exception ignored) {}
+            }
+            return false;
+        }
+    }
+
+    /**
+     * Restart tun2socks to point at a new SOCKS port.
+     * This is the minimal-interruption path — only ~1-2 seconds of traffic gap.
+     */
+    private void restartTun2SocksForPort(int newPort) {
+        try {
+            // Stop current tun2socks on background thread (fdsan safety)
+            Thread tt = tun2socksThread;
+            tun2socksThread = null;
+            if (tt != null) tt.interrupt();
+            Thread stopThread = new Thread(() -> {
+                try { Engine.stop(); } catch (Throwable ignored) {}
+            }, "tun2socks-stop");
+            stopThread.start();
+            try { stopThread.join(2000); } catch (Exception ignored) {}
+            if (tt != null) {
+                try { tt.join(1000); } catch (Exception ignored) {}
+            }
+
+            // Brief pause for cleanup
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+
+            // Re-setup TUN if fd is invalid
+            if (tunFd < 0) {
+                Log.w(TAG, "[HOT-SWAP] TUN fd invalid, re-establishing");
+                if (!setupTunInterface()) {
+                    Log.e(TAG, "[HOT-SWAP] Failed to re-establish TUN");
                     return;
                 }
             }
 
-            // Wait for new SOCKS port
-            boolean portAlive = waitForPortAlive(XRAY_SOCKS_PORT, 8000);
-            if (!portAlive) {
-                Log.e(TAG, "[UPGRADE] SOCKS port not alive after balancer upgrade");
+            // Start tun2socks with new port
+            if (!gomobileInitialized) {
+                Seq.setContext(getApplicationContext());
+                gomobileInitialized = true;
+            }
+            Engine.touch();
+
+            final Key key = new Key();
+            key.setDevice("fd://" + tunFd);
+            key.setProxy("socks5://127.0.0.1:" + newPort);
+            key.setMTU((long) TUN_MTU);
+            key.setLogLevel("warning");
+            key.setRestAPI("");
+            key.setMark(0L);
+
+            Engine.insert(key);
+            Engine.touch();
+
+            Thread t = new Thread(() -> {
+                try {
+                    Engine.start();
+                    while (!Thread.currentThread().isInterrupted() && isRunning.get()) {
+                        try { Thread.sleep(1000); } catch (InterruptedException e) { break; }
+                    }
+                } catch (Throwable e) {
+                    Log.e(TAG, "tun2socks crashed after hot-swap", e);
+                }
+            }, "tun2socks");
+            t.setDaemon(false);
+            tun2socksThread = t;
+            t.start();
+
+            // Wait for tun2socks to initialize
+            try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
+            Log.i(TAG, "[HOT-SWAP] tun2socks restarted on port " + newPort);
+
+        } catch (Throwable e) {
+            Log.e(TAG, "[HOT-SWAP] Failed to restart tun2socks", e);
+        }
+    }
+
+    /**
+     * SOCKS5 TCP connect test on a specific port (used for shadow port verification).
+     */
+    private boolean checkSocksTcpConnectOnPort(int port, int timeoutMs) {
+        Socket socket = null;
+        try {
+            socket = new Socket();
+            socket.connect(new InetSocketAddress("127.0.0.1", port), timeoutMs);
+            socket.setSoTimeout(timeoutMs);
+            OutputStream os = socket.getOutputStream();
+            InputStream is = socket.getInputStream();
+            os.write(new byte[]{0x05, 0x01, 0x00});
+            os.flush();
+            int ver = is.read();
+            int method = is.read();
+            if (ver != 0x05 || method != 0x00) return false;
+            // CONNECT to 8.8.8.8:53
+            byte[] req = new byte[]{0x05, 0x01, 0x00, 0x01, 0x08, 0x08, 0x08, 0x08, 0x00, 0x35};
+            os.write(req);
+            os.flush();
+            int rVer = is.read();
+            int rep = is.read();
+            return rVer == 0x05 && rep == 0x00;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            if (socket != null) { try { socket.close(); } catch (Exception ignored) {} }
+        }
+    }
+
+    /**
+     * Inject new configs from cache into the running VPN.
+     * Called by ConfigMonitorService when it finds new working configs.
+     * Uses hot-swap to upgrade the balancer without interrupting traffic.
+     */
+    private void injectNewConfigsFromCache() {
+        if (!isRunning.get()) return;
+
+        try {
+            if (configManager == null) return;
+            List<ConfigManager.ConfigItem> topConfigs = configManager.getTopConfigs();
+            if (topConfigs.isEmpty()) return;
+
+            // Build new config pool from top cache
+            List<JSONObject> newPool = new ArrayList<>();
+            Set<String> seen = new HashSet<>();
+            for (ConfigManager.ConfigItem config : topConfigs) {
+                if (newPool.size() >= 8) break; // Max 8 backends in balancer
+                if (config == null || config.uri == null) continue;
+                if (!isSupportedUri(config.uri)) continue;
+                if (config.latency <= 0) continue;
+                if (seen.contains(config.uri)) continue;
+                seen.add(config.uri);
+
+                try {
+                    JSONObject cfg = new JSONObject();
+                    cfg.put("uri", config.uri);
+                    cfg.put("ps", config.name);
+                    cfg.put("protocol", config.protocol);
+                    cfg.put("latency_ms", config.latency);
+                    cfg.put("telegram_latency", config.telegram_latency);
+                    newPool.add(cfg);
+                } catch (Exception ignored) {}
+            }
+
+            if (newPool.size() < 2) {
+                Log.d(TAG, "[INJECT] Not enough new configs (" + newPool.size() + "), skipping");
                 return;
             }
 
-            String msg = uris.size() > 1
-                ? "Connected (" + uris.size() + " balanced)"
-                : "Connected";
-            updateNotification(msg, NotificationState.CONNECTED);
-            broadcastStatus("Connected", msg, true);
-            Log.i(TAG, "[UPGRADE] Balancer upgrade complete with " + uris.size() + " servers");
+            // Check if pool actually changed
+            int currentPoolSize;
+            synchronized (activeConfigPool) {
+                currentPoolSize = activeConfigPool.size();
+            }
+            if (newPool.size() <= currentPoolSize) {
+                Log.d(TAG, "[INJECT] Pool not improved (" + newPool.size() + " vs " + currentPoolSize + "), skipping");
+                return;
+            }
 
+            Log.i(TAG, "[INJECT] Upgrading balancer: " + currentPoolSize + " → " + newPool.size() + " configs");
+
+            // Collect URIs for balanced config
+            List<String> uris = new ArrayList<>();
+            for (JSONObject cfg : newPool) {
+                String uri = cfg.optString("uri", "");
+                if (!uri.isEmpty()) uris.add(uri);
+            }
+
+            boolean success = hotSwapXRay(uris, null);
+            if (success) {
+                synchronized (activeConfigPool) {
+                    activeConfigPool.clear();
+                    activeConfigPool.addAll(newPool);
+                }
+                String msg = "Connected (" + uris.size() + " balanced)";
+                updateNotification(msg, NotificationState.CONNECTED);
+                broadcastStatus("Connected", msg, true);
+                broadcastConfigPoolUpdate();
+                Log.i(TAG, "[INJECT] Balancer upgraded to " + uris.size() + " configs");
+            }
         } catch (Exception e) {
-            Log.e(TAG, "[UPGRADE] Failed to upgrade to balanced config", e);
+            Log.e(TAG, "[INJECT] Failed to inject configs", e);
         }
+    }
+
+    /**
+     * Broadcast config pool update to UI for display.
+     */
+    private void broadcastConfigPoolUpdate() {
+        try {
+            Intent intent = new Intent(BROADCAST_CONFIG_POOL);
+            int poolSize;
+            synchronized (activeConfigPool) {
+                poolSize = activeConfigPool.size();
+            }
+            intent.putExtra("pool_size", poolSize);
+            intent.putExtra("active_port", activePort);
+            LocalBroadcastManager.getInstance(this).sendBroadcast(intent);
+        } catch (Exception ignored) {}
+    }
+
+    /**
+     * Get the current active config pool size (for UI display).
+     */
+    public int getActivePoolSize() {
+        synchronized (activeConfigPool) {
+            return activeConfigPool.size();
+        }
+    }
+
+    /**
+     * Check if continuous scan is enabled.
+     */
+    public boolean isContinuousScanEnabled() {
+        return getSharedPreferences("vpn_settings", MODE_PRIVATE)
+            .getBoolean(PREF_CONTINUOUS_SCAN, true); // Default ON
     }
 
     private boolean startXRayBalancedProcess(List<String> uris) {
@@ -1957,7 +2391,7 @@ public class VpnService extends android.net.VpnService {
         Socket socket = null;
         try {
             socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+            socket.connect(new InetSocketAddress("127.0.0.1", activePort), timeoutMs);
             socket.setSoTimeout(timeoutMs);
 
             OutputStream os = socket.getOutputStream();
@@ -2045,7 +2479,7 @@ public class VpnService extends android.net.VpnService {
         Socket socket = null;
         try {
             socket = new Socket();
-            socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+            socket.connect(new InetSocketAddress("127.0.0.1", activePort), timeoutMs);
             socket.setSoTimeout(timeoutMs);
 
             OutputStream os = socket.getOutputStream();
@@ -2154,7 +2588,7 @@ public class VpnService extends android.net.VpnService {
             Socket socket = null;
             try {
                 socket = new Socket();
-                socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+                socket.connect(new InetSocketAddress("127.0.0.1", activePort), timeoutMs);
                 socket.setSoTimeout(timeoutMs);
 
                 OutputStream os = socket.getOutputStream();
@@ -2239,13 +2673,24 @@ public class VpnService extends android.net.VpnService {
             currentConfig = null;
             currentTelegramLatency = Integer.MAX_VALUE;
             currentInstagramLatency = Integer.MAX_VALUE;
+            activePort = XRAY_SOCKS_PORT; // Reset to primary port for next start
+            synchronized (activeConfigPool) { activeConfigPool.clear(); }
 
-            stopTun2SocksOnly();
+            // CRITICAL: Stop XRay FIRST so all SOCKS connections from tun2socks
+            // to XRay fail/close naturally. This lets Go's tun2socks clean up its
+            // own socket FDs via normal error handling. If we call Engine.stop()
+            // while connections are still active, Go's cleanup closes FDs that
+            // Java's fdsan tracks as owned by SocketImpl → SIGABRT crash.
             stopXRayOnly();
+
+            // Wait for Go's tun2socks to notice dead connections and close sockets
+            try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+
+            // Now safe to stop tun2socks — Go has already closed its sockets
+            stopTun2SocksOnly();
 
             // TUN fd was detached via detachFd() and given to tun2socks.
             // Engine.stop() already closed the fd, so we just reset state.
-            // tunInterface.close() is a safe no-op since fd was detached.
             tunFd = -1;
             if (tunInterface != null) {
                 try {
@@ -2257,8 +2702,6 @@ public class VpnService extends android.net.VpnService {
             try {
                 stopForeground(true);
             } catch (Exception ignored) {}
-            // Don't call stopSelf() - keep service alive for quick reconnection
-            // User must use explicit "Exit" action to fully kill the service
 
             // Broadcast state change to UI
             broadcastStatus("Disconnected", "Tap to connect", false);
@@ -2283,39 +2726,45 @@ public class VpnService extends android.net.VpnService {
 
     private void stopTun2SocksOnly() {
         Log.i(TAG, "Stopping tun2socks...");
-        
-        // Stop the engine using global Engine.stop()
-        try {
-            Engine.stop();
-            Log.i(TAG, "Engine.stop() called");
-        } catch (Throwable e) {
-            Log.w(TAG, "Engine.stop() failed", e);
-        }
 
+        // Interrupt the tun2socks keep-alive thread first
         Thread tt = tun2socksThread;
         tun2socksThread = null;
-        if (tt == null) {
-            Log.i(TAG, "tun2socks not running");
-            return;
+        if (tt != null) {
+            tt.interrupt();
         }
 
+        // Run Engine.stop() on a background thread to isolate any fdsan issues.
+        // By this point XRay is already dead and Go has had time to close its
+        // sockets naturally, so Engine.stop() should be safe. But if any stale
+        // FDs remain, running on a separate thread prevents UI thread issues.
+        Thread stopThread = new Thread(() -> {
+            try {
+                Engine.stop();
+                Log.i(TAG, "Engine.stop() completed");
+            } catch (Throwable e) {
+                Log.w(TAG, "Engine.stop() failed: " + e.getMessage());
+            }
+        }, "tun2socks-stop");
+        stopThread.start();
+
+        // Wait for Engine.stop() to complete (max 2s)
         try {
-            if (Thread.currentThread() != tt) {
-                tt.interrupt();
-                tt.join(1000); // Wait up to 1s for thread to stop
+            stopThread.join(2000);
+        } catch (InterruptedException ignored) {}
+
+        // Wait for tun2socks thread to exit
+        if (tt != null) {
+            try {
+                tt.join(1000);
                 if (tt.isAlive()) {
                     Log.w(TAG, "tun2socks thread still alive after interrupt");
                 }
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to join tun2socks thread", e);
             }
-        } catch (Exception e) {
-            Log.w(TAG, "Failed to stop tun2socks thread", e);
         }
-        
-        // Small delay to ensure cleanup
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException ignored) {}
-        
+
         Log.i(TAG, "tun2socks stopped");
     }
 
@@ -2426,86 +2875,138 @@ public class VpnService extends android.net.VpnService {
     }
 
     /**
-     * Active Telegram stability monitoring thread.
-     * Checks Telegram DC connectivity every 90 seconds and tracks:
-     * - Consecutive failures (triggers switch after 2)
-     * - Latency trend (triggers switch if latency doubles from baseline)
-     * - Finds better config from top cache when current degrades
+     * Active health monitoring thread.
+     * Checks connectivity every 30 seconds and tracks:
+     * - Consecutive failures (triggers hot-swap after 2)
+     * - Latency trend (triggers hot-swap if latency > 2.5x baseline)
+     * - Proactively refreshes config pool via continuous scan
+     * Uses hot-swap for zero-downtime switching — user never sees "connecting" in Telegram.
      */
     private void startAutoSwitchThread() {
         autoSwitchThread = new Thread(() -> {
             int consecutiveFailures = 0;
-            int baselineLatency = -1;    // Best observed latency (ms)
+            int baselineLatency = -1;
             int lastLatency = -1;
-            final int CHECK_INTERVAL_MS = 90_000;       // 90 seconds
-            final int MAX_CONSECUTIVE_FAILURES = 2;      // Switch after 2 failures
-            final double LATENCY_SPIKE_FACTOR = 2.5;     // Switch if latency > 2.5x baseline
+            final int CHECK_INTERVAL_MS = 30_000;         // 30 seconds (was 90)
+            final int MAX_CONSECUTIVE_FAILURES = 2;
+            final double LATENCY_SPIKE_FACTOR = 2.5;
+            int checkCount = 0;
 
-            // Initial delay — let proxy stabilize before first check
-            try { Thread.sleep(30_000); } catch (InterruptedException e) { return; }
+            // Initial delay — let proxy stabilize
+            try { Thread.sleep(15_000); } catch (InterruptedException e) { return; }
 
             while (isRunning.get() && !Thread.currentThread().isInterrupted()) {
                 try {
-                    // Measure current Telegram DC latency
+                    checkCount++;
                     int latency = measureTelegramDCLatency(6000);
 
                     if (latency >= 0) {
-                        // Telegram is reachable
                         consecutiveFailures = 0;
                         lastLatency = latency;
-
-                        // Update baseline (use the best observed latency)
                         if (baselineLatency < 0 || latency < baselineLatency) {
                             baselineLatency = latency;
                         }
                         currentTelegramLatency = latency;
 
-                        // Check for latency spike
                         if (baselineLatency > 0 && latency > baselineLatency * LATENCY_SPIKE_FACTOR) {
-                            Log.w(TAG, "[TG-MON] Latency spike: " + latency + "ms (baseline=" + baselineLatency + "ms)");
-                            // Try to find a better config
-                            JSONObject better = findBetterTelegramConfig();
-                            if (better != null) {
-                                Log.i(TAG, "[TG-MON] Switching to config with better Telegram latency");
-                                switchToConfig(better);
-                                baselineLatency = -1; // Reset baseline for new config
-                            }
+                            Log.w(TAG, "[HEALTH] Latency spike: " + latency + "ms (baseline=" + baselineLatency + "ms)");
+                            boolean swapped = tryHotSwapToBetter();
+                            if (swapped) baselineLatency = -1;
                         } else {
-                            Log.d(TAG, "[TG-MON] Telegram OK: " + latency + "ms (baseline=" + baselineLatency + "ms)");
+                            Log.d(TAG, "[HEALTH] OK: " + latency + "ms (baseline=" + baselineLatency + "ms, pool=" + getActivePoolSize() + ")");
                         }
                     } else {
-                        // Telegram unreachable
                         consecutiveFailures++;
                         currentTelegramLatency = Integer.MAX_VALUE;
-                        Log.w(TAG, "[TG-MON] Telegram FAIL #" + consecutiveFailures
-                            + " (last good=" + lastLatency + "ms)");
+                        Log.w(TAG, "[HEALTH] FAIL #" + consecutiveFailures + " (last good=" + lastLatency + "ms)");
 
                         if (consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                            Log.w(TAG, "[TG-MON] " + consecutiveFailures + " consecutive failures — searching for better config");
-                            JSONObject better = findBetterTelegramConfig();
-                            if (better != null) {
-                                Log.i(TAG, "[TG-MON] Switching to config with working Telegram");
-                                switchToConfig(better);
+                            Log.w(TAG, "[HEALTH] " + consecutiveFailures + " failures — hot-swapping");
+                            boolean swapped = tryHotSwapToBetter();
+                            if (swapped) {
                                 consecutiveFailures = 0;
                                 baselineLatency = -1;
-                            } else {
-                                Log.w(TAG, "[TG-MON] No better config found — keeping current");
                             }
                         }
                     }
 
+                    // Every 5th check (~2.5 min), try to inject better configs from cache
+                    if (checkCount % 5 == 0 && isContinuousScanEnabled()) {
+                        injectNewConfigsFromCache();
+                    }
+
                     Thread.sleep(CHECK_INTERVAL_MS);
                 } catch (InterruptedException e) {
-                    Log.i(TAG, "[TG-MON] Monitor thread interrupted");
+                    Log.i(TAG, "[HEALTH] Monitor interrupted");
                     break;
                 } catch (Exception e) {
-                    Log.w(TAG, "[TG-MON] Error in monitor", e);
+                    Log.w(TAG, "[HEALTH] Error", e);
                     try { Thread.sleep(CHECK_INTERVAL_MS); } catch (InterruptedException ie) { break; }
                 }
             }
-        }, "TelegramMonitor");
+        }, "HealthMonitor");
         autoSwitchThread.setDaemon(true);
         autoSwitchThread.start();
+    }
+
+    /**
+     * Try to hot-swap to a better config from the cache.
+     * Builds a balanced config from top cache and hot-swaps.
+     * Returns true if swap succeeded.
+     */
+    private boolean tryHotSwapToBetter() {
+        try {
+            if (configManager == null) return false;
+            List<ConfigManager.ConfigItem> topConfigs = configManager.getTopConfigs();
+            if (topConfigs.isEmpty()) return false;
+
+            String currentUri = currentConfig != null ? currentConfig.optString("uri", "") : "";
+
+            // Build balanced URIs from top cache, excluding current
+            List<String> uris = new ArrayList<>();
+            for (ConfigManager.ConfigItem cfg : topConfigs) {
+                if (uris.size() >= 5) break;
+                if (cfg.uri == null || !isSupportedUri(cfg.uri)) continue;
+                if (cfg.latency <= 0) continue;
+                // Put current URI last (it might still work for some traffic)
+                if (cfg.uri.equals(currentUri)) continue;
+                uris.add(cfg.uri);
+            }
+            // Add current as fallback
+            if (!currentUri.isEmpty() && uris.size() < 5) {
+                uris.add(currentUri);
+            }
+
+            if (uris.isEmpty()) return false;
+
+            if (uris.size() > 1) {
+                boolean success = hotSwapXRay(uris, null);
+                if (success) {
+                    String msg = "Connected (" + uris.size() + " balanced)";
+                    updateNotification(msg, NotificationState.CONNECTED);
+                    broadcastStatus("Connected", msg, true);
+                    Log.i(TAG, "[HEALTH] Hot-swapped to " + uris.size() + " balanced configs");
+                    return true;
+                }
+            } else {
+                // Single config fallback
+                JSONObject single = new JSONObject();
+                ConfigManager.ConfigItem best = topConfigs.get(0);
+                single.put("uri", best.uri);
+                single.put("ps", best.name);
+                single.put("protocol", best.protocol);
+                boolean success = hotSwapXRay(null, single);
+                if (success) {
+                    currentConfig = single;
+                    updateNotification("Switched to better server", NotificationState.CONNECTED);
+                    broadcastStatus("Connected", "Switched to better server", true);
+                    return true;
+                }
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "[HEALTH] Error in hot-swap attempt", e);
+        }
+        return false;
     }
 
     /**
@@ -2528,7 +3029,7 @@ public class VpnService extends android.net.VpnService {
             try {
                 long start = System.currentTimeMillis();
                 socket = new Socket();
-                socket.connect(new InetSocketAddress("127.0.0.1", XRAY_SOCKS_PORT), timeoutMs);
+                socket.connect(new InetSocketAddress("127.0.0.1", activePort), timeoutMs);
                 socket.setSoTimeout(timeoutMs);
 
                 OutputStream os = socket.getOutputStream();
@@ -2647,55 +3148,49 @@ public class VpnService extends android.net.VpnService {
         return null;
     }
 
+    /**
+     * Switch to a new config using zero-downtime hot-swap.
+     * Builds balanced config from new config + top cache, then hot-swaps.
+     */
     private void switchToConfig(JSONObject newConfig) {
         try {
-            // Stop current XRay
-            stopXRayOnly();
-
-            // Update current config
             currentConfig = newConfig;
 
-            // Try balanced mode first with URIs from top configs
+            // Build balanced URIs from new config + top cache
             List<String> uris = new ArrayList<>();
-            uris.add(newConfig.optString("uri", ""));
+            String newUri = newConfig.optString("uri", "");
+            if (!newUri.isEmpty()) uris.add(newUri);
+
             if (configManager != null) {
                 List<ConfigManager.ConfigItem> top = configManager.getTopConfigs();
                 for (ConfigManager.ConfigItem cfg : top) {
-                    if (!cfg.uri.equals(uris.get(0)) && uris.size() < 5) {
-                        if (cfg.telegram_latency > 0 && cfg.telegram_latency < Integer.MAX_VALUE) {
-                            uris.add(cfg.uri);
-                        }
+                    if (uris.size() >= 5) break;
+                    if (cfg.uri.equals(newUri)) continue;
+                    if (cfg.telegram_latency > 0 && cfg.telegram_latency < Integer.MAX_VALUE) {
+                        uris.add(cfg.uri);
                     }
                 }
             }
 
-            boolean started = false;
+            boolean success;
             if (uris.size() > 1) {
-                started = startXRayBalancedProcess(uris);
-                if (started) {
-                    Log.i(TAG, "[TG-MON] Switched to balanced config with " + uris.size() + " servers");
-                }
-            }
-            if (!started) {
-                started = startXRaySocksProcess(newConfig);
+                success = hotSwapXRay(uris, null);
+            } else {
+                success = hotSwapXRay(null, newConfig);
             }
 
-            if (started) {
-                boolean portAlive = waitForPortAlive(XRAY_SOCKS_PORT, 8000);
-                if (portAlive) {
-                    String msg = uris.size() > 1 && started
-                        ? "Switched (" + uris.size() + " balanced)"
-                        : "Switched to better server";
-                    updateNotification(msg, NotificationState.CONNECTED);
-                    broadcastStatus("Connected", msg, true);
-                } else {
-                    Log.w(TAG, "[TG-MON] SOCKS port not alive after switch");
-                }
+            if (success) {
+                String msg = uris.size() > 1
+                    ? "Switched (" + uris.size() + " balanced)"
+                    : "Switched to better server";
+                updateNotification(msg, NotificationState.CONNECTED);
+                broadcastStatus("Connected", msg, true);
+                Log.i(TAG, "[SWITCH] Hot-swapped successfully");
             } else {
-                Log.w(TAG, "[TG-MON] Failed to start new config after switch");
+                Log.w(TAG, "[SWITCH] Hot-swap failed");
             }
         } catch (Exception e) {
-            Log.e(TAG, "[TG-MON] Error switching config", e);
+            Log.e(TAG, "[SWITCH] Error", e);
         }
     }
 
