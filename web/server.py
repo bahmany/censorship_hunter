@@ -11,10 +11,15 @@ import collections
 import json
 import logging
 import os
+import platform
 import queue
+import re
+import socket
+import subprocess
+import sys
 import threading
 import time
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
 from flask import Flask, Response, jsonify, render_template, request
 
@@ -30,6 +35,10 @@ _auth_bridge = AuthBridge()
 # Log subscriber queues for SSE
 _log_subscribers = []
 _log_lock = threading.Lock()
+
+# Traffic stats collector
+_traffic_history: collections.deque = collections.deque(maxlen=120)  # 2 min at 1s
+_traffic_lock = threading.Lock()
 
 
 class WebLogHandler(logging.Handler):
@@ -198,13 +207,45 @@ def create_app():
                 loop.close()
 
         async def _async_login(sess, aid, ahash, ph):
-            client = TelegramClient(sess, aid, ahash)
+            # Build proxy: try SSH tunnel first, then balancer SOCKS, then direct
+            proxy = None
+            proxy_method = 'direct'
+            try:
+                import socks as _socks_mod
+                # 1) Try SSH tunnel from orchestrator's scraper
+                if _orchestrator and hasattr(_orchestrator, 'telegram_scraper') and _orchestrator.telegram_scraper:
+                    scraper = _orchestrator.telegram_scraper
+                    ssh_port = scraper.establish_ssh_tunnel()
+                    if ssh_port:
+                        proxy = (_socks_mod.SOCKS5, '127.0.0.1', ssh_port)
+                        proxy_method = f'SSH tunnel (port {ssh_port})'
+                        logger.info(f"[WebLogin] Using SSH tunnel proxy on port {ssh_port}")
+                # 2) Try balancer SOCKS port
+                if proxy is None and _orchestrator and hasattr(_orchestrator, 'balancer') and _orchestrator.balancer:
+                    bal = _orchestrator.balancer
+                    if bal._running and bal._backends:
+                        proxy = (_socks_mod.SOCKS5, '127.0.0.1', bal.port)
+                        proxy_method = f'Balancer SOCKS (port {bal.port})'
+                        logger.info(f"[WebLogin] Using balancer proxy on port {bal.port}")
+                # 3) Try env proxy
+                if proxy is None:
+                    ph_env = os.environ.get('HUNTER_TELEGRAM_PROXY_HOST')
+                    pp_env = os.environ.get('HUNTER_TELEGRAM_PROXY_PORT')
+                    if ph_env and pp_env:
+                        proxy = (_socks_mod.SOCKS5, ph_env, int(pp_env))
+                        proxy_method = f'Env proxy ({ph_env}:{pp_env})'
+            except ImportError:
+                pass
+
+            logger.info(f"[WebLogin] Connecting via {proxy_method}...")
+            client = TelegramClient(sess, aid, ahash, proxy=proxy,
+                                    connection_retries=2, auto_reconnect=False)
             await client.connect()
 
             if await client.is_user_authorized():
                 me = await client.get_me()
                 await client.disconnect()
-                return {'ok': True, 'message': f'Already logged in as {me.first_name} ({me.phone})'}
+                return {'ok': True, 'message': f'Already logged in as {me.first_name} ({me.phone}) via {proxy_method}'}
 
             logger.info(f"[WebLogin] Sending verification code to {ph}...")
             await client.send_code_request(ph)
@@ -227,9 +268,9 @@ def create_app():
 
             if await client.is_user_authorized():
                 me = await client.get_me()
-                logger.info(f"[WebLogin] Successfully logged in as {me.first_name} ({me.phone})")
+                logger.info(f"[WebLogin] Logged in as {me.first_name} ({me.phone}) via {proxy_method}. Session saved.")
                 await client.disconnect()
-                return {'ok': True, 'message': f'Logged in as {me.first_name} ({me.phone}). Session saved.'}
+                return {'ok': True, 'message': f'Logged in as {me.first_name} ({me.phone}) via {proxy_method}. Session saved.'}
             else:
                 await client.disconnect()
                 return {'ok': False, 'error': 'Authentication failed'}
@@ -290,7 +331,173 @@ def create_app():
 
         return jsonify({'ok': False, 'message': f'Unknown command: {cmd}'})
 
+    # --- Traffic stats ---
+    @app.route('/api/traffic')
+    def api_traffic():
+        with _traffic_lock:
+            data = list(_traffic_history)
+        return jsonify(data)
+
+    # --- Connected clients (who is using the proxy) ---
+    @app.route('/api/clients')
+    def api_clients():
+        clients = _get_proxy_clients()
+        return jsonify(clients)
+
+    # --- Top configs ---
+    @app.route('/api/configs/top')
+    def api_top_configs():
+        configs = []
+        if _orchestrator:
+            bal = getattr(_orchestrator, 'balancer', None)
+            if bal:
+                with bal._lock:
+                    for b in bal._backends:
+                        configs.append({
+                            'uri_short': _shorten_uri(b.get('uri', '')),
+                            'latency': round(b.get('latency', 0)),
+                            'healthy': b.get('healthy', False),
+                        })
+        return jsonify(configs)
+
+    # --- Config export ---
+    @app.route('/api/configs/export')
+    def api_export_configs():
+        tier = request.args.get('tier', 'gold')
+        base = os.path.dirname(os.path.dirname(__file__))
+        fname = f'HUNTER_{tier}.txt'
+        fpath = os.path.join(base, 'runtime', fname)
+        if os.path.exists(fpath):
+            try:
+                with open(fpath, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                lines = [l.strip() for l in content.splitlines() if l.strip()]
+                return jsonify({'ok': True, 'file': fname, 'count': len(lines), 'configs': lines})
+            except Exception as e:
+                return jsonify({'ok': False, 'error': str(e)})
+        return jsonify({'ok': True, 'file': fname, 'count': 0, 'configs': []})
+
+    # --- System info ---
+    @app.route('/api/system')
+    def api_system():
+        info = {
+            'platform': platform.platform(),
+            'python': platform.python_version(),
+            'cpu_count': os.cpu_count(),
+            'hostname': socket.gethostname(),
+            'pid': os.getpid(),
+        }
+        try:
+            import psutil
+            mem = psutil.virtual_memory()
+            info['memory_total_gb'] = round(mem.total / (1024**3), 1)
+            info['memory_used_gb'] = round(mem.used / (1024**3), 1)
+            info['memory_pct'] = mem.percent
+            info['cpu_pct'] = psutil.cpu_percent(interval=0.5)
+            disk = psutil.disk_usage('.')
+            info['disk_total_gb'] = round(disk.total / (1024**3), 1)
+            info['disk_used_gb'] = round(disk.used / (1024**3), 1)
+            info['disk_pct'] = disk.percent
+            net = psutil.net_io_counters()
+            info['net_sent_mb'] = round(net.bytes_sent / (1024**2), 1)
+            info['net_recv_mb'] = round(net.bytes_recv / (1024**2), 1)
+        except ImportError:
+            pass
+        return jsonify(info)
+
     return app
+
+
+def _shorten_uri(uri: str) -> str:
+    """Shorten a proxy URI for display."""
+    if not uri:
+        return '-'
+    proto = uri.split('://', 1)[0] if '://' in uri else '?'
+    # Extract host from URI
+    try:
+        rest = uri.split('://', 1)[1] if '://' in uri else uri
+        # For base64 URIs, just show protocol + first chars
+        if len(rest) > 60:
+            return f"{proto}://...{rest[-20:]}"
+        return f"{proto}://{rest[:40]}"
+    except Exception:
+        return uri[:50]
+
+
+def _get_proxy_clients() -> List[Dict]:
+    """Get list of IPs connected to balancer SOCKS ports."""
+    clients = {}
+    ports_to_check = set()
+    if _orchestrator:
+        bal = getattr(_orchestrator, 'balancer', None)
+        if bal:
+            ports_to_check.add(bal.port)
+            ports_to_check.add(bal.port + 100)  # HTTP port
+        gbal = getattr(_orchestrator, 'gemini_balancer', None)
+        if gbal:
+            ports_to_check.add(gbal.port)
+    if not ports_to_check:
+        ports_to_check = {10808, 10908}
+
+    try:
+        if sys.platform == 'win32':
+            result = subprocess.run(
+                ['netstat', '-an'],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+        else:
+            result = subprocess.run(
+                ['netstat', '-an'], capture_output=True, text=True, timeout=5
+            )
+        for line in result.stdout.splitlines():
+            if 'ESTABLISHED' not in line:
+                continue
+            parts = line.split()
+            if len(parts) < 3:
+                continue
+            local = parts[1] if sys.platform != 'win32' else parts[1]
+            remote = parts[2] if sys.platform != 'win32' else parts[2]
+            # Check if local port matches our proxy ports
+            try:
+                local_port = int(local.rsplit(':', 1)[-1])
+            except (ValueError, IndexError):
+                continue
+            if local_port in ports_to_check:
+                remote_ip = remote.rsplit(':', 1)[0].strip('[]')
+                if remote_ip in ('127.0.0.1', '::1', '0.0.0.0'):
+                    continue
+                if remote_ip not in clients:
+                    clients[remote_ip] = {'ip': remote_ip, 'connections': 0, 'port': local_port}
+                clients[remote_ip]['connections'] += 1
+    except Exception:
+        pass
+    return list(clients.values())
+
+
+def _collect_traffic_stats():
+    """Background thread: collect network I/O stats every second."""
+    try:
+        import psutil
+    except ImportError:
+        return
+    prev = psutil.net_io_counters()
+    while True:
+        time.sleep(1)
+        try:
+            cur = psutil.net_io_counters()
+            sent_rate = (cur.bytes_sent - prev.bytes_sent)  # bytes/sec
+            recv_rate = (cur.bytes_recv - prev.bytes_recv)
+            entry = {
+                't': int(time.time()),
+                'up': round(sent_rate / 1024, 1),    # KB/s
+                'down': round(recv_rate / 1024, 1),
+            }
+            with _traffic_lock:
+                _traffic_history.append(entry)
+            prev = cur
+        except Exception:
+            pass
 
 
 def start_server(dashboard=None, orchestrator=None, host='0.0.0.0', port=8585):
@@ -315,6 +522,9 @@ def start_server(dashboard=None, orchestrator=None, host='0.0.0.0', port=8585):
 
     # Mark auth bridge as active
     _auth_bridge.active = True
+
+    # Start traffic stats collector
+    threading.Thread(target=_collect_traffic_stats, daemon=True, name='traffic-stats').start()
 
     app = create_app()
 
