@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="horizontal"
+    android:gravity="center_vertical"
+    android:paddingHorizontal="16dp"
+    android:paddingVertical="10dp"
+    android:background="?attr/selectableItemBackground">
+
+    <CheckBox
+        android:id="@+id/config_checkbox"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:buttonTint="@color/accent_cyan" />
+
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_weight="1"
+        android:layout_marginStart="8dp"
+        android:orientation="vertical">
+
+        <TextView
+            android:id="@+id/config_name"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Config"
+            android:textColor="@color/text_primary"
+            android:textSize="14sp"
+            android:maxLines="1"
+            android:ellipsize="end" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="2dp"
+            android:orientation="horizontal">
+
+            <TextView
+                android:id="@+id/config_protocol"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="vless"
+                android:textColor="@color/accent_purple"
+                android:textSize="11sp"
+                android:textAllCaps="true" />
+
+            <TextView
+                android:id="@+id/config_latency"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text="--ms"
+                android:textColor="@color/accent_green"
+                android:textSize="11sp" />
+
+            <TextView
+                android:id="@+id/config_telegram"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginStart="12dp"
+                android:text=""
+                android:textColor="@color/accent_cyan"
+                android:textSize="11sp"
+                android:visibility="gone" />
+
+        </LinearLayout>
+
+    </LinearLayout>
+
+</LinearLayout>
