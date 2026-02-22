@@ -6,6 +6,7 @@ scraping, benchmarking, caching, and load balancing.
 """
 
 import asyncio
+import hashlib
 import logging
 import os
 import sys
@@ -728,7 +729,7 @@ class HunterOrchestrator:
 
     async def report_status(self):
         """Report current status to Telegram."""
-        reporter = self.bot_reporter or self.telegram_reporter
+        reporter = self.telegram_reporter or self.bot_reporter
         if reporter is None or self.balancer is None:
             return
         try:
@@ -736,6 +737,92 @@ class HunterOrchestrator:
             await reporter.report_status(status)
         except Exception as e:
             self.logger.info(f"Status report skipped: {e}")
+
+    def _telegram_outbox_path(self) -> str:
+        try:
+            state_file = str(self.config.get("state_file", "") or "")
+            if state_file:
+                base_dir = os.path.dirname(state_file)
+                if base_dir:
+                    return os.path.join(base_dir, "HUNTER_telegram_outbox.json")
+        except Exception:
+            pass
+        return os.path.join(os.path.dirname(__file__), "runtime", "HUNTER_telegram_outbox.json")
+
+    def _load_telegram_outbox(self) -> List[Dict[str, Any]]:
+        path = self._telegram_outbox_path()
+        payload = load_json(path, default={})
+        items = payload.get("items") if isinstance(payload, dict) else None
+        if not isinstance(items, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if not isinstance(it.get("gold_uris"), list):
+                continue
+            out.append(it)
+        out.sort(key=lambda x: int(x.get("created_at", 0)))
+        return out
+
+    def _save_telegram_outbox(self, items: List[Dict[str, Any]]) -> None:
+        path = self._telegram_outbox_path()
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+        except Exception:
+            pass
+        max_items = int(os.getenv("HUNTER_TELEGRAM_OUTBOX_MAX", "20"))
+        if max_items > 0 and len(items) > max_items:
+            items = items[-max_items:]
+        save_json(path, {"saved_at": now_ts(), "items": items})
+
+    def _enqueue_telegram_outbox(self, gold_uris: List[str], gemini_uris: Optional[List[str]] = None) -> str:
+        max_lines = int(os.getenv("HUNTER_TELEGRAM_MAX_LINES", "200"))
+        gold = [u for u in (gold_uris or []) if isinstance(u, str) and u][:max_lines]
+        gem = [u for u in (gemini_uris or []) if isinstance(u, str) and u][:max_lines] if gemini_uris else []
+        raw = ("\n".join(gold) + "\n---\n" + "\n".join(gem)).encode("utf-8", errors="ignore")
+        item_id = hashlib.sha1(raw).hexdigest()[:16]
+        items = self._load_telegram_outbox()
+        if any(it.get("id") == item_id for it in items):
+            return item_id
+        items.append({
+            "id": item_id,
+            "created_at": now_ts(),
+            "attempts": 0,
+            "gold_uris": gold,
+            "gemini_uris": gem,
+        })
+        self._save_telegram_outbox(items)
+        return item_id
+
+    async def _flush_telegram_outbox(self, reporter: Any) -> Tuple[int, int]:
+        items = self._load_telegram_outbox()
+        if not items:
+            return (0, 0)
+        sent = 0
+        kept: List[Dict[str, Any]] = []
+        for it in items:
+            try:
+                it["attempts"] = int(it.get("attempts", 0)) + 1
+            except Exception:
+                it["attempts"] = 1
+            ok = False
+            try:
+                ok = bool(await reporter.report_config_files(
+                    gold_uris=it.get("gold_uris", []),
+                    gemini_uris=it.get("gemini_uris", None) or None,
+                ))
+            except Exception:
+                ok = False
+            if ok:
+                sent += 1
+                continue
+            kept.append(it)
+            break
+        for it in items[sent + len(kept):]:
+            kept.append(it)
+        self._save_telegram_outbox(kept)
+        return (sent, len(kept))
 
     async def run_cycle(self):
         """Run one complete hunter cycle."""
@@ -990,9 +1077,19 @@ class HunterOrchestrator:
                 pass
 
         # Report to Telegram (Bot API primary, Telethon fallback)
-        reporter = self.bot_reporter or self.telegram_reporter
+        reporter = self.telegram_reporter or self.bot_reporter
         all_validated = gold_configs + silver_configs
-        if reporter is not None and all_validated:
+        try:
+            outbox_pending = len(self._load_telegram_outbox())
+        except Exception:
+            outbox_pending = 0
+
+        if reporter is not None and (all_validated or outbox_pending):
+            self.ui.status.update(phase="reporting")
+            self.ui.status.update(tg_status=f"sending(outbox:{outbox_pending})" if outbox_pending else "sending")
+            if self.dashboard:
+                self.dashboard.update(phase="reporting", tg_status=f"sending...(outbox:{outbox_pending})" if outbox_pending else "sending...")
+
             try:
                 await reporter.report_gold_configs([
                     {
@@ -1006,12 +1103,64 @@ class HunterOrchestrator:
                 self.logger.info(f"Config report skipped: {e}")
 
             try:
-                await reporter.report_config_files(
-                    gold_uris=[r.uri for r in all_validated],
-                    gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
-                )
+                out_sent, out_left = (0, 0)
+                try:
+                    out_sent, out_left = await self._flush_telegram_outbox(reporter)
+                except Exception:
+                    pass
+                if self.dashboard and (out_sent or out_left):
+                    self.dashboard.update(tg_status=f"outbox_sent:{out_sent} left:{out_left}")
+                if out_sent or out_left:
+                    self.ui.status.update(tg_status=f"outbox_sent:{out_sent} left:{out_left}")
+
+                ok = True
+                if all_validated:
+                    ok = bool(await reporter.report_config_files(
+                        gold_uris=[r.uri for r in all_validated],
+                        gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
+                    ))
+                    if not ok:
+                        self._enqueue_telegram_outbox(
+                            gold_uris=[r.uri for r in all_validated],
+                            gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
+                        )
+
+                if self.dashboard:
+                    left = len(self._load_telegram_outbox())
+                    if ok and left == 0:
+                        self.dashboard.update(tg_status="sent")
+                    elif ok and left:
+                        self.dashboard.update(tg_status=f"sent + outbox:{left}")
+                    else:
+                        self.dashboard.update(tg_status=f"queued(outbox:{left})")
+                try:
+                    left = len(self._load_telegram_outbox())
+                    if ok and left == 0:
+                        self.ui.status.update(tg_status="sent")
+                    elif ok and left:
+                        self.ui.status.update(tg_status=f"sent+outbox:{left}")
+                    else:
+                        self.ui.status.update(tg_status=f"queued(outbox:{left})")
+                except Exception:
+                    pass
             except Exception as e:
                 self.logger.info(f"Config file report skipped: {e}")
+                try:
+                    if all_validated:
+                        self._enqueue_telegram_outbox(
+                            gold_uris=[r.uri for r in all_validated],
+                            gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
+                        )
+                    if self.dashboard:
+                        left = len(self._load_telegram_outbox())
+                        self.dashboard.update(tg_status=f"queued(outbox:{left})")
+                    try:
+                        left = len(self._load_telegram_outbox())
+                        self.ui.status.update(tg_status=f"queued(outbox:{left})")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
 
         # Save to files
         self._save_to_files(gold_configs, silver_configs)
@@ -1272,9 +1421,9 @@ class HunterOrchestrator:
 
     async def manual_publish_telegram(self) -> Dict[str, Any]:
         """Manually publish current configs to Telegram group."""
-        reporter = self.bot_reporter or self.telegram_reporter
+        reporter = self.telegram_reporter or self.bot_reporter
         if reporter is None:
-            return {"ok": False, "error": "No Telegram reporter configured (TOKEN/CHAT_ID missing)"}
+            return {"ok": False, "error": "No Telegram reporter configured"}
         try:
             # Get current gold+silver from files
             gold_file = str(self.config.get("gold_file", "") or "")
@@ -1290,7 +1439,10 @@ class HunterOrchestrator:
                 return {"ok": False, "error": "No configs to publish"}
             self.logger.info(f"[Manual] Publishing {len(all_uris)} configs to Telegram...")
             # Send as file
-            await reporter.report_config_files(gold_uris=all_uris)
+            ok = bool(await reporter.report_config_files(gold_uris=all_uris))
+            if not ok:
+                self._enqueue_telegram_outbox(gold_uris=all_uris)
+                return {"ok": False, "error": "Publish failed - queued to outbox", "count": len(all_uris)}
             return {"ok": True, "count": len(all_uris)}
         except Exception as e:
             self.logger.error(f"[Manual] Publish failed: {e}")

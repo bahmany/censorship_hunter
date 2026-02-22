@@ -20,12 +20,8 @@ def update_secrets_file():
     ssh_config = """
 # SSH Servers Configuration for Telegram Tunnel
 SSH_SERVERS_JSON=[
-  {"host": "71.143.156.145", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-  {"host": "71.143.156.146", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-  {"host": "71.143.156.147", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-  {"host": "71.143.156.148", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-  {"host": "71.143.156.149", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-  {"host": "50.114.11.18", "port": 22, "username": "deployer", "password": "009100mohammad_mrb"}
+  {"host": "YOUR_SSH_HOST_1", "port": 22, "username": "YOUR_USER", "password": "YOUR_PASS"},
+  {"host": "YOUR_SSH_HOST_2", "port": 22, "username": "YOUR_USER", "password": "YOUR_PASS"}
 ]
 
 # SSH Tunnel Configuration

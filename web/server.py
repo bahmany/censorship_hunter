@@ -168,10 +168,23 @@ def create_app():
     @app.route('/api/telegram/status')
     def telegram_status():
         """Check if Telegram session is valid."""
-        session_file = os.path.join(
-            os.path.dirname(os.path.dirname(__file__)),
-            os.environ.get('HUNTER_SESSION_NAME', 'hunter_session') + '.session'
-        )
+        session_file = None
+        try:
+            if _orchestrator and getattr(_orchestrator, 'telegram_scraper', None):
+                scraper = _orchestrator.telegram_scraper
+                base = scraper._session_base_path()
+                session_file = base + '.session'
+        except Exception:
+            session_file = None
+        if not session_file:
+            runtime_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'runtime')
+            name = (
+                os.environ.get('HUNTER_SESSION')
+                or os.environ.get('TELEGRAM_SESSION')
+                or os.environ.get('HUNTER_SESSION_NAME')
+                or 'hunter_session'
+            )
+            session_file = os.path.join(runtime_dir, name + '.session')
         has_session = os.path.exists(session_file)
         return jsonify({
             'has_session': has_session,
@@ -191,7 +204,12 @@ def create_app():
         api_id = os.environ.get('HUNTER_API_ID') or os.environ.get('TELEGRAM_API_ID')
         api_hash = os.environ.get('HUNTER_API_HASH') or os.environ.get('TELEGRAM_API_HASH')
         phone = os.environ.get('HUNTER_PHONE') or os.environ.get('TELEGRAM_PHONE')
-        session_name = os.environ.get('HUNTER_SESSION_NAME', 'hunter_session')
+        session_name = (
+            os.environ.get('HUNTER_SESSION')
+            or os.environ.get('TELEGRAM_SESSION')
+            or os.environ.get('HUNTER_SESSION_NAME')
+            or 'hunter_session'
+        )
 
         if not api_id or not api_hash or not phone:
             return jsonify({'ok': False, 'error': 'Missing HUNTER_API_ID, HUNTER_API_HASH, or HUNTER_PHONE in env'}), 400
@@ -208,26 +226,58 @@ def create_app():
                 loop.close()
 
         async def _async_login(sess, aid, ahash, ph):
-            # Build proxy: try SSH tunnel first, then balancer SOCKS, then direct
             proxy = None
             proxy_method = 'direct'
+            lock_obj = None
+            acquired_lock = False
+            client = None
+
+            try:
+                if not os.path.isabs(sess) and ('/' not in sess and '\\' not in sess):
+                    runtime_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'runtime')
+                    sess = os.path.join(runtime_dir, sess)
+            except Exception:
+                pass
+
             try:
                 import socks as _socks_mod
+
                 # 1) Try SSH tunnel from orchestrator's scraper
-                if _orchestrator and hasattr(_orchestrator, 'telegram_scraper') and _orchestrator.telegram_scraper:
+                if _orchestrator and getattr(_orchestrator, 'telegram_scraper', None):
                     scraper = _orchestrator.telegram_scraper
+
+                    try:
+                        lock_obj = getattr(scraper, '_telegram_lock', None)
+                        if lock_obj is not None:
+                            acquired_lock = lock_obj.acquire(blocking=False)
+                            if not acquired_lock:
+                                logger.info("[WebLogin] Another Telegram operation in progress, waiting...")
+                                while not lock_obj.acquire(blocking=False):
+                                    await asyncio.sleep(0.5)
+                                acquired_lock = True
+                    except Exception:
+                        lock_obj = None
+                        acquired_lock = False
+
+                    try:
+                        sess = scraper._session_base_path()
+                    except Exception:
+                        pass
+
                     ssh_port = scraper.establish_ssh_tunnel()
                     if ssh_port:
                         proxy = (_socks_mod.SOCKS5, '127.0.0.1', ssh_port)
                         proxy_method = f'SSH tunnel (port {ssh_port})'
                         logger.info(f"[WebLogin] Using SSH tunnel proxy on port {ssh_port}")
+
                 # 2) Try balancer SOCKS port
-                if proxy is None and _orchestrator and hasattr(_orchestrator, 'balancer') and _orchestrator.balancer:
+                if proxy is None and _orchestrator and getattr(_orchestrator, 'balancer', None):
                     bal = _orchestrator.balancer
-                    if bal._running and bal._backends:
+                    if bal and getattr(bal, '_running', False) and getattr(bal, '_backends', None):
                         proxy = (_socks_mod.SOCKS5, '127.0.0.1', bal.port)
                         proxy_method = f'Balancer SOCKS (port {bal.port})'
                         logger.info(f"[WebLogin] Using balancer proxy on port {bal.port}")
+
                 # 3) Try env proxy
                 if proxy is None:
                     ph_env = os.environ.get('HUNTER_TELEGRAM_PROXY_HOST')
@@ -235,46 +285,79 @@ def create_app():
                     if ph_env and pp_env:
                         proxy = (_socks_mod.SOCKS5, ph_env, int(pp_env))
                         proxy_method = f'Env proxy ({ph_env}:{pp_env})'
+
             except ImportError:
                 pass
 
-            logger.info(f"[WebLogin] Connecting via {proxy_method}...")
-            client = TelegramClient(sess, aid, ahash, proxy=proxy,
-                                    connection_retries=2, auto_reconnect=False)
-            await client.connect()
-
-            if await client.is_user_authorized():
-                me = await client.get_me()
-                await client.disconnect()
-                return {'ok': True, 'message': f'Already logged in as {me.first_name} ({me.phone}) via {proxy_method}'}
-
-            logger.info(f"[WebLogin] Sending verification code to {ph}...")
-            await client.send_code_request(ph)
-
-            logger.info("[WebLogin] Waiting for code via web dashboard...")
-            code = _auth_bridge.request_code(ph, timeout=300)
-            if not code:
-                await client.disconnect()
-                return {'ok': False, 'error': 'No verification code received (timeout or cancelled)'}
-
             try:
-                await client.sign_in(phone=ph, code=code)
-            except SessionPasswordNeededError:
-                logger.info("[WebLogin] 2FA required, waiting for password via web dashboard...")
-                password = _auth_bridge.request_2fa(timeout=300)
-                if not password:
-                    await client.disconnect()
-                    return {'ok': False, 'error': 'No 2FA password received (timeout or cancelled)'}
-                await client.sign_in(password=password)
+                logger.info(f"[WebLogin] Connecting via {proxy_method}...")
+                client = TelegramClient(
+                    sess,
+                    aid,
+                    ahash,
+                    proxy=proxy,
+                    connection_retries=2,
+                    auto_reconnect=False,
+                )
+                await client.connect()
 
-            if await client.is_user_authorized():
-                me = await client.get_me()
-                logger.info(f"[WebLogin] Logged in as {me.first_name} ({me.phone}) via {proxy_method}. Session saved.")
-                await client.disconnect()
-                return {'ok': True, 'message': f'Logged in as {me.first_name} ({me.phone}) via {proxy_method}. Session saved.'}
-            else:
-                await client.disconnect()
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    return {
+                        'ok': True,
+                        'message': f'Already logged in as {me.first_name} ({me.phone}) via {proxy_method}'
+                    }
+
+                logger.info(f"[WebLogin] Sending verification code to {ph}...")
+                await client.send_code_request(ph)
+
+                logger.info("[WebLogin] Waiting for code via web dashboard...")
+                code = _auth_bridge.request_code(ph, timeout=300)
+                if not code:
+                    return {'ok': False, 'error': 'No verification code received (timeout or cancelled)'}
+
+                try:
+                    await client.sign_in(phone=ph, code=code)
+                except SessionPasswordNeededError:
+                    logger.info("[WebLogin] 2FA required, waiting for password via web dashboard...")
+                    password = _auth_bridge.request_2fa(timeout=300)
+                    if not password:
+                        return {'ok': False, 'error': 'No 2FA password received (timeout or cancelled)'}
+                    await client.sign_in(password=password)
+
+                if await client.is_user_authorized():
+                    me = await client.get_me()
+                    logger.info(
+                        f"[WebLogin] Logged in as {me.first_name} ({me.phone}) via {proxy_method}. Session saved."
+                    )
+                    return {
+                        'ok': True,
+                        'message': f'Logged in as {me.first_name} ({me.phone}) via {proxy_method}. Session saved.'
+                    }
+
                 return {'ok': False, 'error': 'Authentication failed'}
+
+            finally:
+                if client is not None:
+                    try:
+                        await client.disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        sess_obj = getattr(client, 'session', None)
+                        if sess_obj is not None:
+                            try:
+                                sess_obj.close()
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+
+                if lock_obj is not None and acquired_lock:
+                    try:
+                        lock_obj.release()
+                    except Exception:
+                        pass
 
         # Run login in background thread (it blocks waiting for user input via bridge)
         result_holder = [None]

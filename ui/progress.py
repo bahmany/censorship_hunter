@@ -158,6 +158,7 @@ class LiveStatus:
             "phase": "idle",
             "next_in": 0,
             "uptime": 0,
+            "tg_status": "",
         }
         self._start_time = time.monotonic()
 
@@ -200,6 +201,7 @@ class LiveStatus:
             "scraping": ICONS["telegram"],
             "validating": ICONS["bolt"],
             "balancing": ICONS["gear"],
+            "reporting": ICONS["telegram"],
             "sleeping": ICONS["wave"],
         }.get(phase, ICONS["dot"])
 
@@ -209,6 +211,9 @@ class LiveStatus:
         mem_pct = d.get("memory_pct", 0)
         mem_color = "31" if mem_pct > 85 else ("33" if mem_pct > 70 else "32")
 
+        tg = (d.get("tg_status") or "").strip()
+        tg_str = f" tg:{tg}" if tg else ""
+
         line = (
             f"\r\033[36m{ICONS['gear']} HUNTER\033[0m "
             f"C#{d.get('cycle', 0)} "
@@ -217,7 +222,7 @@ class LiveStatus:
             f"bal:{d.get('balancer', 0)} "
             f"\033[{mem_color}mmem:{mem_pct:.0f}%\033[0m "
             f"{phase_icon} {phase} "
-            f"next:{next_str} "
+            f"next:{next_str}{tg_str} "
             f"up:{uptime_str}"
         )
         cols = shutil.get_terminal_size((120, 24)).columns

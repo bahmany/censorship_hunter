@@ -198,6 +198,8 @@ class HunterConfig:
             "TELEGRAM_GROUP_ID": ("report_channel", lambda x: int(x) if x.lstrip('-').isdigit() else x),
             "HUNTER_SESSION": ("session_name", str),
             "TELEGRAM_SESSION": ("session_name", str),
+            "HUNTER_SESSION_NAME": ("session_name", str),
+            "TELEGRAM_SESSION_NAME": ("session_name", str),
             "HUNTER_TELEGRAM_LIMIT": ("telegram_limit", int),
             "HUNTER_XRAY_PATH": ("xray_path", str),
             "HUNTER_TEST_URL": ("test_url", str),

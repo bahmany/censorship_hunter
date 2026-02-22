@@ -1,81 +1,109 @@
 # Hunter - Quick Start Guide
 
-## What Was Improved
+## Prerequisites
 
-Hunter's validation system now works intelligently without external dependencies:
+- Python 3.8+
+- Windows 10/11 (for bundled `.exe` tools) or Linux/macOS (bring your own binaries)
+- Telegram account with API credentials ([my.telegram.org](https://my.telegram.org/apps))
 
-1. **Multi-Engine Fallback** - Tries XRay, Sing-box, Mihomo in sequence
-2. **Test Mode** - 100% success validation without proxies
-3. **SSH Optimization** - 6 servers configured, 71.143.156.147:2 working
-4. **Graceful Failures** - Telegram failures don't crash the system
-5. **Diagnostic Logging** - Detailed logs for troubleshooting
+## 1. Install
 
-## Quick Commands
-
-### Test Validation Pipeline (No External Dependencies)
 ```bash
-cd D:\projects\v2ray\pythonProject1\hunter
+git clone https://github.com/yourusername/hunter.git
+cd hunter
+python -m venv .venv
+
+# Windows
+.venv\Scripts\activate
+
+# Linux / macOS
+source .venv/bin/activate
+
+pip install -r requirements.txt
+```
+
+## 2. Configure
+
+Copy the example environment file and fill in your values:
+
+```bash
+cp .env.example .env
+```
+
+Minimum required settings in `.env`:
+
+```env
+HUNTER_API_ID=12345678
+HUNTER_API_HASH=abcdef1234567890abcdef1234567890
+HUNTER_PHONE=+1234567890
+```
+
+Optional — Telegram bot for reporting results:
+
+```env
+TOKEN=your_bot_token_here
+CHAT_ID=@your_channel_or_-100xxxxxxxxxx
+```
+
+## 3. Add Proxy Engines
+
+Place at least one of the following executables in the `bin/` directory:
+
+| File | Source |
+|------|--------|
+| `xray.exe` / `xray` | [github.com/XTLS/Xray-core/releases](https://github.com/XTLS/Xray-core/releases) |
+| `sing-box.exe` / `sing-box` | [github.com/SagerNet/sing-box/releases](https://github.com/SagerNet/sing-box/releases) |
+| `mihomo.exe` / `mihomo` | [github.com/MetaCubeX/mihomo/releases](https://github.com/MetaCubeX/mihomo/releases) |
+
+Hunter tries engines in the order: XRay → Sing-box → Mihomo.
+
+## 4. Run
+
+```bash
+# Windows — double-click or:
+run.bat
+
+# Any platform:
+python main.py
+```
+
+The load balancer starts on `127.0.0.1:10808` (SOCKS5).  
+The web dashboard is available at `http://localhost:8080`.
+
+## 5. Verify
+
+```bash
 python verify_improvements.py
 ```
 
 Expected output:
+
 ```
 Validation pipeline: PASS
 Multi-engine fallback: PASS
-SSH connectivity: PASS
 Overall result: ALL TESTS PASSED
 ```
 
-### Run Test Mode
-```bash
-set HUNTER_TEST_MODE=true
-python test_validation.py
-```
+## Key Environment Variables
 
-### Run Real Validation
-```bash
-python -m hunter.main
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HUNTER_MULTIPROXY_PORT` | `10808` | Local SOCKS5 proxy port |
+| `HUNTER_SLEEP` | `300` | Seconds between hunting cycles |
+| `HUNTER_WORKERS` | `10` | Concurrent config testers |
+| `HUNTER_TEST_MODE` | `false` | Dry-run without real proxies |
+| `IRAN_FRAGMENT_ENABLED` | `false` | TLS fragmentation for DPI bypass |
+| `HUNTER_DPI_EVASION` | `true` | Enable full DPI evasion suite |
+| `HUNTER_WEB_PORT` | `8080` | Web dashboard port |
 
-## Key Files
+See `.env.example` for the full list of options.
 
-| File | Purpose |
-|------|---------|
-| `verify_improvements.py` | Verify all improvements working |
-| `test_validation.py` | Test validation pipeline |
-| `TEST_MODE_GUIDE.md` | Complete testing guide |
-| `COMPLETE_IMPROVEMENTS_REPORT.md` | Detailed technical report |
+## Troubleshooting
 
-## Test Results
+**No working configs found** — Ensure at least one proxy engine binary is in `bin/` and Telegram credentials are correct.
 
-✓ **Validation Pipeline**: 100% success (4/4 configs)  
-✓ **Multi-Engine Fallback**: XRay, Sing-box, Mihomo available  
-✓ **SSH Tunnel**: Established on 71.143.156.147:2  
-✓ **All Tests**: PASSED  
+**Port 10808 in use** — Set `HUNTER_MULTIPROXY_PORT` to another port in `.env`.
 
-## Environment Variables
+**Telegram auth loop** — Delete `*.session` files and re-authenticate.
 
-```bash
-set HUNTER_TEST_MODE=true          # Enable mock validation
-set XRAY_PATH=path/to/xray.exe     # XRay executable path
-set SINGBOX_PATH=path/to/sing-box   # Sing-box executable path
-set MIHOMO_PATH=path/to/mihomo.exe  # Mihomo executable path
-```
-
-## Architecture
-
-```
-Before: Fetch → Prioritize → Try XRay only → 0 configs (FAIL)
-After:  Fetch → Prioritize → Try XRay/Sing-box/Mihomo → 100% in test mode
-```
-
-## Status
-
-**All improvements verified and working. Ready for production.**
-
----
-
-For detailed information, see:
-- `COMPLETE_IMPROVEMENTS_REPORT.md` - Full technical details
-- `TEST_MODE_GUIDE.md` - Comprehensive testing guide
-- `IMPROVEMENTS_SUMMARY.md` - Summary of changes
+**Permission errors on Windows** — Run the terminal as Administrator.

@@ -216,7 +216,7 @@ class HunterDashboard:
         mem = d["memory_pct"]
         mem_style = "red bold" if mem > 90 else ("yellow" if mem > 80 else "green")
         phase = d["phase"]
-        phase_style = {"scraping": "cyan", "validating": "yellow", "balancing": "green", "sleeping": "dim"}.get(phase, "white")
+        phase_style = {"scraping": "cyan", "validating": "yellow", "balancing": "green", "reporting": "magenta", "sleeping": "dim"}.get(phase, "white")
 
         # Main outer table (no border, full width)
         main = Table(box=None, show_header=False, show_edge=False, pad_edge=False, expand=True)

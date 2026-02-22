@@ -1,9 +1,10 @@
 # Hunter 🏹 - Advanced Proxy Hunting System
 
-> A powerful, autonomous tool for discovering, testing, and managing proxy configurations to bypass internet censorship.
+> Autonomous tool for discovering, testing, and managing V2Ray-compatible proxy configurations to bypass internet censorship.
 
 [![Python Version](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey.svg)]()
 
 ## Table of Contents
 
@@ -13,29 +14,33 @@
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
 - [Usage](#usage)
+- [Android App](#android-app)
 - [Troubleshooting](#troubleshooting)
-- [Development](#development)
 - [Contributing](#contributing)
 - [License](#license)
 
-Hunter is a standalone proxy hunting system designed to autonomously discover, validate, and manage V2Ray-compatible proxy configurations. It features advanced anti-DPI techniques, multi-engine testing, and seamless load balancing for reliable internet access in censored environments.
+Hunter is a standalone proxy hunting system that autonomously discovers, validates, and manages V2Ray-compatible proxy configurations. It features a 2026-grade anti-DPI suite, multi-engine testing, and seamless load balancing for reliable internet access in heavily censored environments (Iran, China, etc.).
 
 ## Features
 
-- **Autonomous Operation**: Continuous hunting for fresh proxy configs from Telegram channels.
-- **Multi-Engine Support**: Compatible with XRay, SingBox, and Mihomo for diverse testing.
-- **Load Balancing**: Dynamic proxy server with automatic failover and health checks.
-- **Anti-DPI Capabilities**: Iran-specific fragmentation and obfuscation to evade detection.
-- **Telegram Integration**: Scrapes configurations and reports results via bot.
-- **Web Dashboard**: Monitor performance at http://localhost:8080.
-- **Persistent Caching**: Saves working configs for faster restarts.
-- **Security Obfuscation**: Built-in techniques to bypass censorship.
+- **Autonomous Operation** — Continuous hunting for fresh proxy configs from Telegram channels and public GitHub sources.
+- **Multi-Engine Support** — Compatible with XRay, Sing-box, and Mihomo; falls back automatically.
+- **Load Balancing** — Dynamic multi-backend proxy server with health checks and auto-failover.
+- **2026 Anti-DPI Suite** — TLS fragmentation, JA3/JA4 fingerprint spoofing, VLESS-Reality-Vision, MTU optimization, active probe defense, Hysteria2/TUIC UDP protocols.
+- **Telegram Integration** — Scrapes configs from public channels; reports results via bot.
+- **Web Dashboard** — Monitor proxy status and performance at `http://localhost:8080`.
+- **Persistent Caching** — Saves working configs for faster restarts.
+- **Android App** — Native Android VPN app in `native/android/` with full feature parity.
 
 ## Installation
 
 ### Prerequisites
-- Python 3.8 or higher
-- Windows 10/11 (required for bundled executables like xray.exe)
+
+- Python 3.8+
+- At least one proxy engine binary in `bin/`:
+  - [XRay](https://github.com/XTLS/Xray-core/releases) (`xray` / `xray.exe`)
+  - [Sing-box](https://github.com/SagerNet/sing-box/releases) (`sing-box` / `sing-box.exe`)
+  - [Mihomo](https://github.com/MetaCubeX/mihomo/releases) (`mihomo` / `mihomo.exe`)
 
 ### Setup
 
@@ -48,7 +53,12 @@ Hunter is a standalone proxy hunting system designed to autonomously discover, v
 2. Create a virtual environment:
    ```bash
    python -m venv .venv
+
+   # Windows
    .venv\Scripts\activate
+
+   # Linux / macOS
+   source .venv/bin/activate
    ```
 
 3. Install dependencies:
@@ -56,198 +66,150 @@ Hunter is a standalone proxy hunting system designed to autonomously discover, v
    pip install -r requirements.txt
    ```
 
-## Quick Start
-
-After installation, run the hunter as follows:
-
-1. **Using the launcher:**
-   Double-click `run.bat`.
-
-2. **Manual execution:**
-   ```powershell
-   & ".venv\Scripts\activate"
-   python main.py
+4. Copy and configure the environment file:
+   ```bash
+   cp .env.example .env
+   # Edit .env with your Telegram API credentials
    ```
 
-The system will begin hunting for proxies and start the load balancer on port 10808.
+## Quick Start
+
+See [QUICK_START.md](QUICK_START.md) for a step-by-step guide.
+
+```bash
+# Windows
+run.bat
+
+# Any platform
+python main.py
+```
+
+The load balancer starts on `127.0.0.1:10808` (SOCKS5).
 
 ## Configuration
 
-Hunter uses environment variables for configuration. You can set them in your shell or create a `.env` file in the project root.
+Hunter reads configuration from a `.env` file in the project root (copy from `.env.example`).
 
 ### Required
 
-- `HUNTER_API_ID`: Your Telegram API ID (obtain from https://my.telegram.org/)
-- `HUNTER_API_HASH`: Your Telegram API Hash
-- `HUNTER_PHONE`: Your phone number for Telegram authentication (international format, e.g., +1234567890)
+| Variable | Description |
+|----------|-------------|
+| `HUNTER_API_ID` | Telegram API ID — get from [my.telegram.org](https://my.telegram.org/apps) |
+| `HUNTER_API_HASH` | Telegram API Hash |
+| `HUNTER_PHONE` | Phone number in international format (e.g. `+1234567890`) |
 
-### Optional
+### Key Optional Settings
 
-- `TOKEN`: Bot token for sending reports (optional)
-- `CHAT_ID`: Channel or chat ID for reports (e.g., @your_channel)
-- `HUNTER_MULTIPROXY_PORT`: Port for the load balancer proxy server (default: 10808)
-- `HUNTER_XRAY_PATH`: Path to XRay executable (default: bin/xray.exe)
-- `HUNTER_SLEEP`: Time between hunting cycles in seconds (default: 300)
-- `IRAN_FRAGMENT_ENABLED`: Enable Iran-specific fragmentation (default: false)
-- `ADEE_ENABLED`: Enable additional obfuscation features (default: false)
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TOKEN` | — | Telegram bot token for reporting |
+| `CHAT_ID` | — | Telegram channel/group ID for reports |
+| `HUNTER_MULTIPROXY_PORT` | `10808` | Local SOCKS5 proxy port |
+| `HUNTER_SLEEP` | `300` | Seconds between hunting cycles |
+| `HUNTER_WORKERS` | `10` | Concurrent config testers |
+| `IRAN_FRAGMENT_ENABLED` | `false` | TLS fragmentation for DPI bypass |
+| `HUNTER_DPI_EVASION` | `true` | Full 2026 DPI evasion suite |
+| `ADEE_ENABLED` | `true` | Adversarial DPI Exhaustion Engine |
+| `HUNTER_WEB_PORT` | `8080` | Web dashboard port |
 
-### Example .env File
+See `.env.example` for the complete list including DPI evasion, UDP protocols, and cache options.
 
-Create a file named `.env` with:
-
-```
-HUNTER_API_ID=12345678
-HUNTER_API_HASH=abcdef1234567890
-HUNTER_PHONE=+1234567890
-TOKEN=your_bot_token_here
-CHAT_ID=@your_channel
-HUNTER_MULTIPROXY_PORT=10808
-IRAN_FRAGMENT_ENABLED=true
-ADEE_ENABLED=false
-```
-
-Note: Sensitive files like `.env` and session files are ignored by git.
+> **Security note:** Never commit `.env`, `*.session`, or `hunter_secrets.env` to version control. These are already in `.gitignore`.
 
 ## Project Structure
 
 ```
 hunter/
-├── main.py              # Main entry point
-├── orchestrator.py      # Core workflow coordinator
-├── .gitignore           # Git ignore rules
-├── .env.example         # Environment configuration template
-├── requirements.txt     # Python dependencies
-├── README.md            # This file
-├── QUICK_START.md       # Quick start guide
-├── __init__.py          # Package initialization
-├── bin/                 # Executables and tools
-│   ├── AmazTool.exe
-│   ├── chromedriver.exe
-│   ├── mihomo-windows-amd64-compatible.exe
-│   ├── run_hunter.py
-│   ├── sing-box.exe
-│   ├── tor.exe
-│   └── xray.exe
-├── config/              # Configuration and caching
-│   └── cache.py
-├── core/                # Core modules
-│   ├── __init__.py
-│   ├── config.py
-│   ├── models.py
-│   └── utils.py
-├── docs/                # Documentation files
-│   ├── MEMORY_LEAK_FIX.md
-│   ├── PERFORMANCE_OPTIMIZATION.md
-│   ├── TELEGRAM_AUTHENTICATION_FIX_SUMMARY.md
-│   └── ... (26 documentation files)
-├── gateway/             # Gateway components
-│   └── __init__.py
-├── logs/                # Log files (created at runtime, ignored by git)
-├── native/              # Native code implementations
-│   └── android/         # Android native version
-├── network/             # Network utilities
-│   ├── __init__.py
-│   └── http_client.py
-├── old/                 # Deprecated/old code
-├── parsers/             # URI and config parsers
-│   ├── __init__.py
-│   └── uri_parser.py
-├── performance/         # Performance monitoring
-│   └── adaptive_thread_manager.py
-├── proxy/               # Load balancing
-│   └── load_balancer.py
-├── runtime/             # Runtime cache and temp files (created at runtime)
-├── scripts/             # Utility scripts and tools
-│   ├── diagnostic.py
-│   ├── launcher.py
-│   ├── performance_optimizer.py
-│   └── ... (12 script files)
-├── security/            # Obfuscation and anti-DPI modules
+├── main.py                  # Entry point
+├── orchestrator.py          # Core workflow coordinator
+├── launcher.py              # Interactive launcher
+├── run.bat                  # Windows launcher script
+├── .env.example             # Configuration template
+├── requirements.txt         # Python dependencies
+├── bin/                     # Proxy engine binaries (not tracked by git)
+│   ├── xray[.exe]
+│   ├── sing-box[.exe]
+│   └── mihomo[.exe]
+├── core/                    # Core modules
+│   ├── config.py            # Configuration management
+│   ├── models.py            # Data models
+│   └── utils.py             # Utilities & 12-tier config prioritization
+├── parsers/                 # Protocol URI parsers
+│   └── uri_parser.py        # VMess, VLESS, Trojan, SS, Hysteria2, TUIC
+├── security/                # Anti-DPI & obfuscation modules
 │   ├── dpi_evasion_orchestrator.py
-│   ├── tls_fingerprint_evasion.py
-│   ├── tls_fragmentation.py
-│   └── ... (9 security modules)
-├── telegram/            # Telegram integration
+│   ├── tls_fingerprint_evasion.py   # JA3/JA4 spoofing
+│   ├── tls_fragmentation.py         # ClientHello fragmentation
+│   ├── reality_config_generator.py  # VLESS-Reality-Vision
+│   ├── udp_protocols.py             # Hysteria2 / TUIC v5
+│   ├── mtu_optimizer.py             # 5G PMTUD mitigation
+│   ├── active_probe_defense.py
+│   ├── split_http_transport.py      # SplitHTTP/XHTTP
+│   └── stealth_obfuscation.py
+├── proxy/                   # Load balancing
+│   └── load_balancer.py
+├── network/                 # HTTP client & config fetchers
+│   └── http_client.py
+├── telegram/                # Telegram scraper
 │   └── scraper.py
-├── testing/             # Benchmarking and tests
-│   ├── benchmark.py
-│   └── test_*.py        # (16 test files)
-└── logs/                # Empty directory for runtime logs (git ignored)
+├── performance/             # Adaptive thread management
+│   └── adaptive_thread_manager.py
+├── scripts/                 # Utility & diagnostic scripts
+├── web/                     # Web dashboard
+├── docs/                    # Technical documentation
+├── native/android/          # Android VPN app (Java + C++)
+├── logs/                    # Runtime logs (git ignored)
+└── runtime/                 # Runtime cache (git ignored)
 ```
 
 ## Usage
 
-### Command Line
-
 ```bash
-python main.py --help    # Show help
-python main.py --version # Show version
 python main.py           # Start hunting
+python main.py --help    # Show help
 ```
-
-### Stopping
 
 Press `Ctrl+C` to gracefully shut down all services and save state.
 
-### Web Interface
+**Web dashboard:** `http://localhost:8080`
 
-Access the monitoring dashboard at http://localhost:8080 to view proxy status and performance.
+## Android App
+
+A full-featured Android VPN app is available in `native/android/`. It provides:
+
+- Material3 dark UI with Persian (Farsi) localization
+- Android VPN Service with load balancing (up to 10 concurrent configs)
+- Per-app VPN (split tunneling)
+- Auto config discovery from Telegram channels and GitHub
+- Full 2026 DPI evasion suite
+- Android 8.0+ (API 26+) support
+
+See [`native/android/README.md`](native/android/README.md) for build instructions.
 
 ## Troubleshooting
 
-### Common Issues
+**No working configs found** — Ensure at least one proxy engine binary is in `bin/` and Telegram credentials are correct.
 
-1. **Virtual Environment Issues**
-   If `.venv` is missing:
-   ```batch
-   python -m venv .venv
-   .venv\Scripts\activate
-   pip install -r requirements.txt
-   ```
+**Port 10808 in use** — Set `HUNTER_MULTIPROXY_PORT` to another port in `.env`.
 
-2. **Telegram Authentication Errors**
-   Ensure API credentials are correct and phone number is in international format.
+**Telegram auth loop** — Delete `*.session` files and re-authenticate.
 
-3. **Port Conflicts**
-   Change `HUNTER_MULTIPROXY_PORT` if 10808 is in use.
+**Permission errors on Windows** — Run the terminal as Administrator.
 
-4. **Permission Errors**
-   Run as administrator.
-
-5. **Large Cache Files**
-   The `subscriptions_cache.txt` is ignored by git; delete if needed for space.
-
-## Development
-
-### Running Tests
-
-```bash
-python -m pytest testing/ -v
-```
-
-### Importing in Code
-
-```python
-from core.config import HunterConfig
-from orchestrator import HunterOrchestrator
-```
-
-### Building
-
-No build process; ensure all dependencies are installed.
+**Large cache files** — `subscriptions_cache.txt` and `working_configs_cache.txt` are git-ignored; delete them to free space.
 
 ## Contributing
 
-Contributions are welcome! Please follow these steps:
+Contributions are welcome!
 
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Run tests
+2. Create a feature branch (`git checkout -b feature/my-feature`)
+3. Commit your changes
+4. Run tests: `python -m pytest testing/ -v`
 5. Submit a pull request
 
-For major changes, open an issue first.
+For major changes, open an issue first to discuss the approach.
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

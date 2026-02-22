@@ -461,6 +461,15 @@ class TelegramScraper:
                 await self.client.disconnect()
         except Exception:
             pass
+        try:
+            sess = getattr(self.client, "session", None)
+            if sess is not None:
+                try:
+                    sess.close()
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Give Telethon's internal tasks time to clean up
         try:
             await asyncio.sleep(0.3)
@@ -468,14 +477,38 @@ class TelegramScraper:
             pass
         self.client = None
 
+    def _runtime_dir(self) -> str:
+        try:
+            state_file = str(self.config.get("state_file", "") or "")
+            if state_file:
+                base_dir = os.path.dirname(state_file)
+                if base_dir:
+                    return base_dir
+        except Exception:
+            pass
+        return os.path.join(os.path.dirname(os.path.dirname(__file__)), "runtime")
+
+    def _session_base_path(self) -> str:
+        try:
+            raw = str(self.config.get("session_name", "hunter_session") or "hunter_session")
+        except Exception:
+            raw = "hunter_session"
+
+        raw = raw.strip().strip('"').strip("'")
+        if raw.lower().endswith(".session"):
+            raw = raw[:-len(".session")]
+
+        if os.path.isabs(raw):
+            return raw
+        if any(sep in raw for sep in ("/", "\\")):
+            return os.path.abspath(raw)
+        return os.path.join(self._runtime_dir(), raw)
+
     def _delete_session_files(self) -> None:
         """Best-effort delete Telethon session files (requires re-login)."""
-        try:
-            session_name = str(self.config.get("session_name", "hunter_session") or "hunter_session")
-        except Exception:
-            session_name = "hunter_session"
-        for suffix in (".session", ".session-journal"):
-            path = session_name + suffix
+        base = self._session_base_path()
+        for suffix in (".session", ".session-journal", ".session-wal", ".session-shm"):
+            path = base + suffix
             try:
                 if os.path.exists(path):
                     os.remove(path)
@@ -555,7 +588,7 @@ class TelegramScraper:
         finally:
             self._telegram_lock.release()
 
-    async def _connect_inner(self, use_proxy_fallback: bool = True, _retry: bool = False) -> bool:
+    async def _connect_inner(self, use_proxy_fallback: bool = True, _retry: bool = False, _lock_retry: int = 0) -> bool:
         """Inner connection logic (must be called under _telegram_lock)."""
         if self.client and await self.heartbeat.check_connection(self.client):
             return True
@@ -592,7 +625,7 @@ class TelegramScraper:
             # Disable automatic reconnects - we manage reconnection manually
             # This prevents noisy reconnect loops and gives us control
             self.client = TelegramClient(
-                self.config.get("session_name", "hunter_session"),
+                self._session_base_path(),
                 self.config.get("api_id"),
                 self.config.get("api_hash"),
                 proxy=proxy,
@@ -661,10 +694,25 @@ class TelegramScraper:
             # Special handling for database locked error
             if "database is locked" in msg.lower():
                 self._db_locked_count += 1
-                self.logger.warning(f"Telegram session database is locked (attempt #{self._db_locked_count})")
+                try:
+                    sp = self._session_base_path() + ".session"
+                except Exception:
+                    sp = "(unknown)"
+                self.logger.warning(
+                    f"Telegram session database is locked (attempt #{self._db_locked_count}, lock_retry={_lock_retry}, session={sp})"
+                )
                 
                 # Properly disconnect the broken client first
                 await self._reset_client()
+
+                max_lock_retries = int(os.getenv("HUNTER_TELEGRAM_LOCK_RETRIES", "3"))
+                if _lock_retry < max_lock_retries:
+                    await asyncio.sleep(min(5.0, 0.8 * (_lock_retry + 1)))
+                    return await self._connect_inner(
+                        use_proxy_fallback=use_proxy_fallback,
+                        _retry=_retry,
+                        _lock_retry=_lock_retry + 1,
+                    )
                 
                 # Only attempt auto-reset once per session, and not on retry
                 if _retry:
@@ -687,7 +735,7 @@ class TelegramScraper:
                     
                     # Retry connection with fresh session (will require re-login)
                     self.logger.info("Retrying Telegram connection with fresh session...")
-                    return await self._connect_inner(use_proxy_fallback, _retry=True)
+                    return await self._connect_inner(use_proxy_fallback=use_proxy_fallback, _retry=True, _lock_retry=0)
                 else:
                     if other_hunter_running:
                         self.logger.warning("Other Hunter processes detected - not auto-resetting")
@@ -857,7 +905,7 @@ class TelegramScraper:
 
         return configs
 
-    async def send_report(self, report_text: str) -> bool:
+    async def send_report(self, report_text: str, parse_mode: Optional[str] = None) -> bool:
         """Send report to Telegram channel."""
         acquired = self._telegram_lock.acquire(blocking=False)
         if not acquired:
@@ -872,12 +920,30 @@ class TelegramScraper:
             if not channel:
                 return False
 
-            await self.client.send_message(channel, report_text)
-            self.logger.info("Report sent to Telegram")
-            return True
+            max_retries = int(os.getenv("HUNTER_TELEGRAM_SEND_RETRIES", "6"))
+            base_backoff = float(os.getenv("HUNTER_TELEGRAM_SEND_BACKOFF", "1.5"))
 
-        except Exception as e:
-            self.logger.error(f"Failed to send report: {e}")
+            for attempt in range(1, max_retries + 1):
+                try:
+                    await self.client.send_message(channel, report_text, parse_mode=parse_mode)
+                    self.logger.info("Report sent to Telegram")
+                    return True
+                except FloodWaitError as e:
+                    wait_s = int(min(max(e.seconds, 1), 60))
+                    self.logger.warning(f"Telegram FloodWait on send_message: {e.seconds}s (sleep {wait_s}s)")
+                    await asyncio.sleep(wait_s)
+                except Exception as e:
+                    self.logger.warning(f"Failed to send report (attempt {attempt}/{max_retries}): {e}")
+                    try:
+                        if not self.client or not self.client.is_connected():
+                            await self._reset_client()
+                            await self._connect_inner()
+                        else:
+                            await self.heartbeat.try_reconnect(self.client)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(min(10.0, base_backoff * attempt))
+
             return False
         finally:
             self._telegram_lock.release()
@@ -897,13 +963,32 @@ class TelegramScraper:
             if not channel:
                 return False
 
-            bio = io.BytesIO(content)
-            bio.name = filename
-            await self.client.send_file(channel, file=bio, caption=caption)
-            self.logger.info(f"File sent to Telegram: {filename}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to send file: {e}")
+            max_retries = int(os.getenv("HUNTER_TELEGRAM_SEND_RETRIES", "6"))
+            base_backoff = float(os.getenv("HUNTER_TELEGRAM_SEND_BACKOFF", "1.5"))
+
+            for attempt in range(1, max_retries + 1):
+                try:
+                    bio = io.BytesIO(content)
+                    bio.name = filename
+                    await self.client.send_file(channel, file=bio, caption=caption)
+                    self.logger.info(f"File sent to Telegram: {filename}")
+                    return True
+                except FloodWaitError as e:
+                    wait_s = int(min(max(e.seconds, 1), 60))
+                    self.logger.warning(f"Telegram FloodWait on send_file: {e.seconds}s (sleep {wait_s}s)")
+                    await asyncio.sleep(wait_s)
+                except Exception as e:
+                    self.logger.warning(f"Failed to send file '{filename}' (attempt {attempt}/{max_retries}): {e}")
+                    try:
+                        if not self.client or not self.client.is_connected():
+                            await self._reset_client()
+                            await self._connect_inner()
+                        else:
+                            await self.heartbeat.try_reconnect(self.client)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(min(12.0, base_backoff * attempt))
+
             return False
         finally:
             self._telegram_lock.release()
@@ -1079,48 +1164,52 @@ class BotReporter:
         gold_uris: List[str],
         gemini_uris: Optional[List[str]] = None,
         max_lines: int = 200,
-    ) -> None:
+    ) -> bool:
         """Send configs as copyable code-block posts + npvt file.
 
         Each post contains up to CONFIGS_PER_POST URIs in a <pre> block.
         User taps the block → all URIs in that post are copied at once.
         """
         if not gold_uris:
-            return
+            return False
 
         uris = gold_uris[:max_lines]
         batch = self.CONFIGS_PER_POST
         total_posts = (len(uris) + batch - 1) // batch
 
+        ok = True
         for idx in range(0, len(uris), batch):
             chunk = uris[idx : idx + batch]
             post_num = idx // batch + 1
             block = "\n".join(chunk)
-            # HTML <pre> so user can tap-to-copy the whole block
             msg = (
                 f"📌 <b>{post_num}/{total_posts}</b>\n"
                 f"<pre>{block}</pre>"
             )
-            await self.send_message(msg, parse_mode="HTML")
-            # small delay to keep order
+            sent = await self.send_message(msg, parse_mode="HTML")
+            ok = ok and bool(sent)
             await asyncio.sleep(0.3)
 
         # --- npvt file with ALL configs ---
         content = ("\n".join(uris) + "\n").encode("utf-8", errors="ignore")
-        await self.send_file(
+        sent_main = await self.send_file(
             filename="npvt.txt",
             content=content,
             caption=f"📂 HUNTER npvt — {len(uris)} validated configs",
         )
+        ok = ok and bool(sent_main)
 
         # --- gemini file if present ---
         if gemini_uris:
             g_content = ("\n".join(gemini_uris[:max_lines]) + "\n").encode("utf-8", errors="ignore")
-            await self.send_file(
+            sent_g = await self.send_file(
                 filename="npvt_gemini.txt",
                 content=g_content,
                 caption=f"♊ Gemini — {len(gemini_uris)} configs",
             )
+            ok = ok and bool(sent_g)
+
+        return ok
 
     async def report_status(self, status: Dict[str, Any]):
         report = "📊 *Hunter Status*\n\n"
@@ -1137,21 +1226,36 @@ class TelegramReporter:
         self.scraper = scraper
         self.logger = logging.getLogger(__name__)
 
+    CONFIGS_PER_POST = 5
+
     async def report_gold_configs(self, configs: List[Dict[str, Any]]):
         """Report gold-tier configs to Telegram."""
         if not configs:
-            return
-
-        report = "🏆 **Hunter Gold Configs Report**\n\n"
-        for i, config in enumerate(configs[:10], 1):  # Limit to top 10
-            report += f"{i}. {config.get('ps', 'Unknown')} - {config.get('latency_ms', 0)}ms\n"
-
-        report += f"\nTotal: {len(configs)} gold configs available"
+            return False
 
         try:
-            await self.scraper.send_report(report)
+            import datetime
+            now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+            gold = [c for c in configs if c.get("tier") == "gold"]
+            silver = [c for c in configs if c.get("tier") != "gold"]
+            summary = f"🏆 <b>Hunter — {now}</b>\n\n"
+            for i, cfg in enumerate(configs[:20], 1):
+                tier = "🥇" if cfg.get("tier") == "gold" else "🥈"
+                ps = cfg.get("ps", "—")
+                lat = cfg.get("latency_ms", 0)
+                summary += f"{tier} {ps}  <code>{float(lat):.0f}ms</code>\n"
+            parts = []
+            if gold:
+                parts.append(f"🥇 {len(gold)} gold")
+            if silver:
+                parts.append(f"🥈 {len(silver)} silver")
+            if parts:
+                summary += f"\n{'  •  '.join(parts)}"
+            ok = await self.scraper.send_report(summary, parse_mode="html")
+            return bool(ok)
         except Exception as e:
-            self.logger.debug(f"Failed to report gold configs to Telegram: {e}")
+            self.logger.info(f"Failed to report gold configs to Telegram: {e}")
+            return False
 
     async def report_config_files(
         self,
@@ -1160,29 +1264,42 @@ class TelegramReporter:
         max_lines: int = 200,
     ) -> None:
         if not gold_uris and not gemini_uris:
-            return
+            return False
 
-        try:
-            if gold_uris:
-                content = ("\n".join(gold_uris[:max_lines]) + "\n").encode("utf-8", errors="ignore")
-                await self.scraper.send_file(
-                    filename="HUNTER_gold.txt",
-                    content=content,
-                    caption=f"HUNTER Gold (top {min(len(gold_uris), max_lines)}/{len(gold_uris)})",
-                )
-        except Exception:
-            pass
+        ok = True
 
-        try:
-            if gemini_uris:
-                content = ("\n".join(gemini_uris[:max_lines]) + "\n").encode("utf-8", errors="ignore")
-                await self.scraper.send_file(
-                    filename="HUNTER_gemini.txt",
-                    content=content,
-                    caption=f"HUNTER Gemini (top {min(len(gemini_uris), max_lines)}/{len(gemini_uris)})",
-                )
-        except Exception:
-            pass
+        uris = (gold_uris or [])[:max_lines]
+        if uris:
+            batch = self.CONFIGS_PER_POST
+            total_posts = (len(uris) + batch - 1) // batch
+            for idx in range(0, len(uris), batch):
+                chunk = uris[idx : idx + batch]
+                post_num = idx // batch + 1
+                block = "\n".join(chunk)
+                msg = f"📌 <b>{post_num}/{total_posts}</b>\n<pre>{block}</pre>"
+                sent = await self.scraper.send_report(msg, parse_mode="html")
+                ok = ok and bool(sent)
+                await asyncio.sleep(0.3)
+
+            content = ("\n".join(uris) + "\n").encode("utf-8", errors="ignore")
+            sent_file = await self.scraper.send_file(
+                filename="npvt.txt",
+                content=content,
+                caption=f"HUNTER npvt — {len(uris)} validated configs",
+            )
+            ok = ok and bool(sent_file)
+
+        if gemini_uris:
+            g_uris = gemini_uris[:max_lines]
+            g_content = ("\n".join(g_uris) + "\n").encode("utf-8", errors="ignore")
+            sent_g = await self.scraper.send_file(
+                filename="npvt_gemini.txt",
+                content=g_content,
+                caption=f"Gemini — {len(g_uris)} configs",
+            )
+            ok = ok and bool(sent_g)
+
+        return ok
 
     async def report_status(self, status: Dict[str, Any]):
         """Report system status to Telegram."""

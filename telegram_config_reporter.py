@@ -115,7 +115,19 @@ class TelegramConfigReporter:
     async def disconnect(self):
         """Disconnect from Telegram."""
         if self.client:
-            await self.client.disconnect()
+            try:
+                await self.client.disconnect()
+            except Exception:
+                pass
+            try:
+                sess = getattr(self.client, "session", None)
+                if sess is not None:
+                    try:
+                        sess.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             self.client = None
     
     async def send_configs(self, validated_configs: List[Dict[str, Any]], 
