@@ -10,7 +10,6 @@ Usage:
     or
     python main.py
 """
-
 import asyncio
 import gc
 import logging
@@ -32,10 +31,8 @@ except ImportError:
 # Initialize colorama for Windows
 init(autoreset=True)
 
-# Add current directory AND parent to path for imports
-# Parent is needed so 'hunter.*' package imports work (e.g. from hunter.core.config import ...)
+# Add current directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
     from cryptography.utils import CryptographyDeprecationWarning
@@ -460,6 +457,19 @@ async def main():
         # Create and start orchestrator
         logger.info("Initializing Hunter Orchestrator...")
         orchestrator = HunterOrchestrator(config)
+
+        # Start web admin dashboard
+        try:
+            from web.server import start_server as start_web_server
+            web_port = int(os.environ.get('HUNTER_WEB_PORT', '8585'))
+            start_web_server(
+                dashboard=orchestrator.dashboard,
+                orchestrator=orchestrator,
+                host='0.0.0.0',
+                port=web_port
+            )
+        except Exception as e:
+            logger.warning(f"Web dashboard failed to start: {e}")
 
         logger.info("Starting autonomous hunting service...")
         await orchestrator.start()

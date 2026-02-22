@@ -9,7 +9,10 @@ import socket
 import time
 from typing import Dict
 
-from hunter.core.utils import now_ts
+try:
+    from hunter.core.utils import now_ts
+except ImportError:
+    from core.utils import now_ts
 
 CDN_WHITELIST_DOMAINS = [
     "cloudflare.com", "cdn.cloudflare.com", "cloudflare-dns.com",

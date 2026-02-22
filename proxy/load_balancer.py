@@ -11,10 +11,16 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from hunter.core.models import HunterParsedConfig
-from hunter.core.utils import (resolve_executable_path, kill_process_on_port, now_ts, read_lines, append_unique_lines)
-from hunter.parsers import UniversalParser
-from hunter.security.obfuscation import StealthObfuscationEngine
+try:
+    from hunter.core.models import HunterParsedConfig
+    from hunter.core.utils import (resolve_executable_path, kill_process_on_port, now_ts, read_lines, append_unique_lines)
+    from hunter.parsers import UniversalParser
+    from hunter.security.obfuscation import StealthObfuscationEngine
+except ImportError:
+    from core.models import HunterParsedConfig
+    from core.utils import (resolve_executable_path, kill_process_on_port, now_ts, read_lines, append_unique_lines)
+    from parsers import UniversalParser
+    from security.obfuscation import StealthObfuscationEngine
 
 XRAY_PATH_FALLBACKS = [
     os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "xray.exe")

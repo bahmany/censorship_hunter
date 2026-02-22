@@ -3,8 +3,14 @@ Configuration cache helpers used to persist harvested proxies.
 """
 from typing import Dict, List, Optional, Set
 
-from hunter.core.utils import append_unique_lines, load_json, read_lines, save_json, write_lines
-from hunter.core.utils import now_ts
+try:
+    from hunter.core.utils import append_unique_lines, load_json, read_lines, save_json, write_lines
+except ImportError:
+    from core.utils import append_unique_lines, load_json, read_lines, save_json, write_lines
+try:
+    from hunter.core.utils import now_ts
+except ImportError:
+    from core.utils import now_ts
 
 
 class SmartCache:

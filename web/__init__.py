@@ -1,0 +1,1 @@
+"""Hunter Web Admin Dashboard."""

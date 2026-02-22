@@ -10,8 +10,12 @@ import json
 from typing import Any, Dict, Optional
 from urllib.parse import parse_qs, unquote, urlparse
 
-from hunter.core.utils import safe_b64decode, clean_ps_string
-from hunter.core.models import HunterParsedConfig
+try:
+    from hunter.core.utils import safe_b64decode, clean_ps_string
+    from hunter.core.models import HunterParsedConfig
+except ImportError:
+    from core.utils import safe_b64decode, clean_ps_string
+    from core.models import HunterParsedConfig
 
 
 class VMessParser:

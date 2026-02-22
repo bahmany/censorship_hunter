@@ -17,6 +17,17 @@ class InteractiveTelegramAuth:
     
     def __init__(self, logger=None):
         self.logger = logger or logging.getLogger(__name__)
+
+    def _get_web_bridge(self):
+        """Get web auth bridge if active (checked dynamically each call)."""
+        try:
+            from web.auth_bridge import AuthBridge
+            bridge = AuthBridge()
+            if bridge.active:
+                return bridge
+        except ImportError:
+            pass
+        return None
     
     def get_user_input(self, prompt: str, mask: bool = False) -> str:
         """Get user input with optional masking for passwords."""
@@ -41,7 +52,17 @@ class InteractiveTelegramAuth:
             return ""
     
     def get_telegram_code(self, phone: str) -> Optional[str]:
-        """Get Telegram verification code from user."""
+        """Get Telegram verification code from user (web or console)."""
+        # Route through web dashboard if active
+        web_bridge = self._get_web_bridge()
+        if web_bridge:
+            self.logger.info("Waiting for verification code via web dashboard...")
+            code = web_bridge.request_code(phone, timeout=300)
+            if code and code.isdigit() and len(code) == 5:
+                return code
+            self.logger.warning("No valid code received from web dashboard")
+            return None
+
         print("\n" + "=" * 60)
         print("TELEGRAM AUTHENTICATION")
         print("=" * 60)
@@ -85,7 +106,17 @@ class InteractiveTelegramAuth:
         return None
     
     def get_2fa_password(self) -> Optional[str]:
-        """Get 2FA password from user."""
+        """Get 2FA password from user (web or console)."""
+        # Route through web dashboard if active
+        web_bridge = self._get_web_bridge()
+        if web_bridge:
+            self.logger.info("Waiting for 2FA password via web dashboard...")
+            password = web_bridge.request_2fa(timeout=300)
+            if password:
+                return password
+            self.logger.warning("No 2FA password received from web dashboard")
+            return None
+
         print("\n" + "=" * 60)
         print("TWO-FACTOR AUTHENTICATION")
         print("=" * 60)

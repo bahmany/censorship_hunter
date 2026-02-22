@@ -535,8 +535,14 @@ class TelegramScraper:
                     self.logger.info("Phone number not set - Telegram scraping disabled")
                     return False
 
-                # Only attempt interactive auth if stdin is a TTY (not background/piped)
-                if not sys.stdin or not sys.stdin.isatty():
+                # Only attempt interactive auth if stdin is a TTY or web dashboard is active
+                _web_active = False
+                try:
+                    from web.auth_bridge import AuthBridge
+                    _web_active = AuthBridge().active
+                except ImportError:
+                    pass
+                if not _web_active and (not sys.stdin or not sys.stdin.isatty()):
                     self.logger.info("Non-interactive mode - Telegram user auth skipped (use Bot API for reporting)")
                     return False
 

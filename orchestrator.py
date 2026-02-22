@@ -34,47 +34,25 @@ try:
     from hunter.ui.dashboard import HunterDashboard
 except ImportError:
     # Fallback for direct execution
+    from core.config import HunterConfig
+    from core.models import HunterBenchResult
+    from network.http_client import HTTPClientManager, ConfigFetcher
+    from parsers import UniversalParser
+    from testing.benchmark import ProxyBenchmark
+    from proxy.load_balancer import MultiProxyServer
+    from telegram.scraper import TelegramScraper, TelegramReporter, BotReporter
+    from config.cache import SmartCache
+    from security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
+    from security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
+    from core.utils import load_json, now_ts, read_lines, save_json, write_lines
+    from telegram_config_reporter import ConfigReportingService
+    from ui.progress import HunterUI, LiveStatus, ServiceManager
+    from ui.dashboard import HunterDashboard
     try:
-        from core.config import HunterConfig
-        from core.models import HunterBenchResult
-        from network.http_client import HTTPClientManager, ConfigFetcher
-        from parsers import UniversalParser
-        from testing.benchmark import ProxyBenchmark
-        from proxy.load_balancer import MultiProxyServer
-        from telegram.scraper import TelegramScraper, TelegramReporter, BotReporter
-        from config.cache import SmartCache
-        from security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
-        from security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
-        from core.utils import load_json, now_ts, read_lines, save_json, write_lines
-        from telegram_config_reporter import ConfigReportingService
         from config.dns_servers import DNSManager, get_dns_config
-        from ui.progress import HunterUI, LiveStatus, ServiceManager
-        from ui.dashboard import HunterDashboard
     except ImportError:
-        # Final fallback - set to None if imports fail
-        HunterConfig = None
-        HunterBenchResult = None
-        HTTPClientManager = None
-        ConfigFetcher = None
-        UniversalParser = None
-        ProxyBenchmark = None
-        MultiProxyServer = None
-        TelegramScraper = None
-        TelegramReporter = None
-        BotReporter = None
-        SmartCache = None
-        StealthObfuscationEngine = None
-        ObfuscationConfig = None
-        ProxyStealthWrapper = None
-        DPIEvasionOrchestrator = None
-        load_json = None
-        now_ts = None
-        save_json = None
-        write_lines = None
-        ConfigReportingService = None
         DNSManager = None
         get_dns_config = None
-        HunterDashboard = None
 
 
 class HunterOrchestrator:

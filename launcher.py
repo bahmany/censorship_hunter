@@ -6,12 +6,10 @@ Hunter Launcher - Python-based launcher that properly loads environment variable
 import os
 import sys
 import json
-import subprocess
 from pathlib import Path
 
-# Add the hunter directory AND parent to Python path
+# Add the project directory to Python path
 sys.path.insert(0, str(Path(__file__).parent))
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
 def load_secrets():
     """Load environment variables from hunter_secrets.env."""
@@ -132,29 +130,20 @@ def main():
     print()
     print("Starting Hunter...")
     
-    # Run main.py
+    # Run main directly (no subprocess - keeps everything in one process)
     try:
-        # Get the path to main.py
-        main_path = Path(__file__).parent / "main.py"
-        
-        # Set PYTHONPATH to include hunter directory
-        env = os.environ.copy()
-        env['PYTHONPATH'] = str(Path(__file__).parent)
-        
-        # Run main.py as a module from parent directory
-        parent_dir = Path(__file__).parent.parent
-        result = subprocess.run([sys.executable, "-m", "hunter.main"], 
-                              cwd=parent_dir,
-                              env=env)
-        
-        return result.returncode
+        import asyncio
+        from main import main as hunter_main
+        return asyncio.run(hunter_main())
         
     except KeyboardInterrupt:
         print("\nHunter stopped by user.")
         return 0
     except Exception as e:
         print(f"Error running Hunter: {e}")
+        import traceback
+        traceback.print_exc()
         return 1
 
 if __name__ == "__main__":
-    sys.exit(main())
+    sys.exit(main() or 0)

@@ -1,0 +1,851 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Hunter Admin</title>
+<style>
+:root {
+  --bg: #0a0e14;
+  --bg-card: #131920;
+  --bg-card-hover: #1a2230;
+  --border: #1e2a36;
+  --text: #c5d0dc;
+  --text-dim: #6b7b8d;
+  --text-bright: #e8edf2;
+  --accent: #00bfff;
+  --accent-glow: rgba(0,191,255,.15);
+  --success: #00e676;
+  --warning: #ffab00;
+  --error: #ff5252;
+  --gold: #ffd700;
+  --silver: #c0c0c0;
+  --radius: 8px;
+  --gap: 12px;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.5;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+/* Header */
+.header {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 10px 20px;
+  background: var(--bg-card);
+  border-bottom: 1px solid var(--border);
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+.logo {
+  font-size: 16px;
+  font-weight: 800;
+  letter-spacing: 1px;
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.logo svg { width: 22px; height: 22px; }
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 10px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+}
+.badge-phase {
+  background: var(--accent-glow);
+  color: var(--accent);
+  border: 1px solid rgba(0,191,255,.3);
+}
+.badge-phase.scraping { background: rgba(0,191,255,.15); color: #00bfff; border-color: rgba(0,191,255,.3); }
+.badge-phase.validating { background: rgba(255,171,0,.12); color: #ffab00; border-color: rgba(255,171,0,.3); }
+.badge-phase.balancing { background: rgba(0,230,118,.12); color: #00e676; border-color: rgba(0,230,118,.3); }
+.badge-phase.sleeping { background: rgba(107,123,141,.12); color: #6b7b8d; border-color: rgba(107,123,141,.3); }
+.badge-phase.starting { background: rgba(255,82,82,.12); color: #ff5252; border-color: rgba(255,82,82,.3); }
+.header-stats {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.header-stats .stat-val { color: var(--text-bright); font-weight: 600; }
+.dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  display: inline-block;
+  animation: pulse 2s ease-in-out infinite;
+}
+.dot-ok { background: var(--success); box-shadow: 0 0 6px var(--success); }
+.dot-warn { background: var(--warning); box-shadow: 0 0 6px var(--warning); }
+.dot-err { background: var(--error); box-shadow: 0 0 6px var(--error); }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .5; } }
+
+/* Main grid */
+.main {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  grid-template-rows: auto auto 1fr auto;
+  gap: var(--gap);
+  padding: var(--gap);
+  max-width: 1440px;
+  margin: 0 auto;
+  min-height: calc(100vh - 50px);
+}
+
+/* Cards */
+.card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .8px;
+  color: var(--text-dim);
+}
+.card-header .icon { margin-right: 6px; }
+.card-body { padding: 10px 14px; }
+
+/* Tables */
+table { width: 100%; border-collapse: collapse; }
+th {
+  text-align: left;
+  padding: 6px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+}
+td {
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(30,42,54,.5);
+  font-size: 12px;
+}
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: rgba(0,191,255,.03); }
+td.num { text-align: right; font-family: 'SF Mono', 'Cascadia Code', monospace; font-weight: 600; }
+.status-dot {
+  width: 7px; height: 7px; border-radius: 50%; display: inline-block; margin-right: 6px;
+}
+.st-done { background: var(--success); }
+.st-fetching { background: var(--accent); animation: pulse 1s infinite; }
+.st-waiting { background: var(--text-dim); }
+.st-failed { background: var(--error); }
+
+/* Metric cards row */
+.metrics {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: var(--gap);
+}
+.metric-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  text-align: center;
+}
+.metric-card .label { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .5px; margin-bottom: 4px; }
+.metric-card .value { font-size: 22px; font-weight: 800; font-family: 'SF Mono', 'Cascadia Code', monospace; }
+.metric-card .value.gold { color: var(--gold); }
+.metric-card .value.silver { color: var(--silver); }
+.metric-card .value.success { color: var(--success); }
+.metric-card .value.error { color: var(--error); }
+.metric-card .value.accent { color: var(--accent); }
+
+/* Progress bar */
+.progress-bar {
+  height: 6px;
+  background: var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+  margin-top: 6px;
+}
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--success));
+  border-radius: 3px;
+  transition: width .5s ease;
+}
+
+/* Log panel */
+.log-panel {
+  grid-column: 1 / -1;
+}
+.log-container {
+  height: 280px;
+  overflow-y: auto;
+  padding: 6px 10px;
+  font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace;
+  font-size: 11.5px;
+  line-height: 1.7;
+}
+.log-entry { white-space: nowrap; }
+.log-time { color: var(--text-dim); }
+.log-level { font-weight: 700; margin: 0 4px; }
+.log-level.INFO { color: var(--accent); }
+.log-level.WARNING { color: var(--warning); }
+.log-level.ERROR { color: var(--error); }
+.log-level.DEBUG { color: var(--text-dim); }
+.log-msg { color: var(--text); }
+
+/* Command bar */
+.cmd-bar {
+  grid-column: 1 / -1;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.cmd-bar .card { flex: 1; display: flex; align-items: center; padding: 0; }
+.cmd-input {
+  flex: 1;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  padding: 10px 14px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  font-size: 12px;
+  outline: none;
+}
+.cmd-input::placeholder { color: var(--text-dim); }
+.btn {
+  padding: 8px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all .15s;
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  white-space: nowrap;
+}
+.btn:hover { background: var(--bg-card-hover); border-color: var(--accent); color: var(--accent); }
+.btn-primary { background: rgba(0,191,255,.12); border-color: var(--accent); color: var(--accent); }
+.btn-primary:hover { background: rgba(0,191,255,.25); }
+.btn-danger { border-color: var(--error); color: var(--error); }
+.btn-danger:hover { background: rgba(255,82,82,.12); }
+
+/* Auth Modal */
+.modal-overlay {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.7);
+  backdrop-filter: blur(4px);
+  z-index: 200;
+  justify-content: center;
+  align-items: center;
+}
+.modal-overlay.active { display: flex; }
+.modal {
+  background: var(--bg-card);
+  border: 1px solid var(--accent);
+  border-radius: 12px;
+  padding: 28px;
+  width: 380px;
+  max-width: 90vw;
+  box-shadow: 0 0 40px rgba(0,191,255,.15);
+}
+.modal h2 {
+  font-size: 16px;
+  color: var(--accent);
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.modal p { color: var(--text-dim); font-size: 12px; margin-bottom: 16px; }
+.modal input {
+  width: 100%;
+  padding: 12px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-bright);
+  font-size: 18px;
+  font-family: 'SF Mono', 'Cascadia Code', monospace;
+  text-align: center;
+  letter-spacing: 8px;
+  outline: none;
+  margin-bottom: 16px;
+}
+.modal input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
+.modal input.password-input { letter-spacing: 4px; }
+.modal-actions { display: flex; gap: 8px; }
+.modal-actions .btn { flex: 1; padding: 10px; text-align: center; }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .main { grid-template-columns: 1fr; }
+  .header { flex-wrap: wrap; gap: 8px; }
+  .header-stats { margin-left: 0; flex-wrap: wrap; }
+  .log-container { height: 200px; }
+  .metrics { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 480px) {
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+  body { font-size: 12px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <div class="logo">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+      <circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/>
+    </svg>
+    HUNTER
+  </div>
+  <span class="badge badge-phase" id="phase-badge">STARTING</span>
+  <span style="color:var(--text-dim);font-size:12px">C#<span id="cycle" class="stat-val">0</span></span>
+  <div class="header-stats">
+    <span><span class="dot dot-ok" id="status-dot"></span> <span id="mode">NORMAL</span></span>
+    <span>Mem: <span id="mem-pct" class="stat-val">0%</span> <span id="mem-detail" style="color:var(--text-dim)"></span></span>
+    <span>Up: <span id="uptime" class="stat-val">0m00s</span></span>
+  </div>
+</div>
+
+<!-- Main Grid -->
+<div class="main">
+
+  <!-- Metric Cards -->
+  <div class="metrics">
+    <div class="metric-card"><div class="label">Scraped</div><div class="value accent" id="m-scraped">0</div></div>
+    <div class="metric-card"><div class="label">Tested</div><div class="value" id="m-tested">0</div></div>
+    <div class="metric-card"><div class="label">Gold</div><div class="value gold" id="m-gold">0</div></div>
+    <div class="metric-card"><div class="label">Silver</div><div class="value silver" id="m-silver">0</div></div>
+    <div class="metric-card"><div class="label">Dead</div><div class="value" id="m-dead" style="color:var(--text-dim)">0</div></div>
+    <div class="metric-card"><div class="label">Failed</div><div class="value error" id="m-failed">0</div></div>
+    <div class="metric-card" style="grid-column: span 2;">
+      <div class="label">Benchmark Progress</div>
+      <div style="display:flex;align-items:center;gap:8px;justify-content:center;margin-top:4px;">
+        <span id="bench-text" style="font-size:12px;color:var(--text-dim)">Waiting</span>
+      </div>
+      <div class="progress-bar"><div class="progress-fill" id="bench-bar" style="width:0%"></div></div>
+    </div>
+  </div>
+
+  <!-- Sources -->
+  <div class="card">
+    <div class="card-header">
+      <span><span class="icon">📡</span> Sources</span>
+      <span id="total-scraped" style="color:var(--accent)">0 configs</span>
+    </div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Source</th><th>Status</th><th style="text-align:right">Configs</th></tr></thead>
+        <tbody id="sources-body">
+          <tr><td colspan="3" style="color:var(--text-dim);text-align:center;padding:20px">Waiting for data...</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- Balancers -->
+  <div class="card">
+    <div class="card-header">
+      <span><span class="icon">⚖️</span> Load Balancers</span>
+    </div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Port</th><th>Backends</th><th>Status</th><th>Latency</th></tr></thead>
+        <tbody id="balancers-body">
+          <tr>
+            <td id="bal-main-port">10808</td>
+            <td class="num" id="bal-main-backends">0</td>
+            <td id="bal-main-status"><span class="status-dot st-waiting"></span>starting</td>
+            <td id="bal-main-latency" class="num">-</td>
+          </tr>
+          <tr>
+            <td id="bal-gemini-port">10809</td>
+            <td class="num" id="bal-gemini-backends">0</td>
+            <td id="bal-gemini-status"><span class="status-dot st-waiting"></span>starting</td>
+            <td class="num">-</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-header" style="border-top:1px solid var(--border);border-bottom:none;">
+      <span><span class="icon">🛡️</span> DPI Evasion</span>
+    </div>
+    <div class="card-body">
+      <div style="display:flex;gap:16px;font-size:12px;">
+        <span>Strategy: <strong id="dpi-strategy" style="color:var(--accent)">-</strong></span>
+        <span>Network: <strong id="dpi-network">-</strong></span>
+        <span>Telegram: <strong id="tg-status">-</strong></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Telegram Auth -->
+  <div class="card" style="grid-column: 1 / -1;">
+    <div class="card-header">
+      <span><span class="icon">✈️</span> Telegram Authentication</span>
+      <span id="tg-session-badge" class="badge" style="font-size:10px">checking...</span>
+    </div>
+    <div class="card-body" style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+      <div style="flex:1;min-width:200px;">
+        <div style="font-size:12px;color:var(--text-dim);margin-bottom:4px;">Session Status</div>
+        <div id="tg-session-info" style="font-size:13px;">Checking session...</div>
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button class="btn btn-primary" id="tg-login-btn" onclick="telegramLogin()">
+          🔑 Login Telegram
+        </button>
+        <button class="btn" id="tg-check-btn" onclick="checkTelegramStatus()">
+          🔄 Check
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Logs -->
+  <div class="card log-panel">
+    <div class="card-header">
+      <span><span class="icon">📋</span> Real-Time Logs</span>
+      <div style="display:flex;gap:6px;">
+        <button class="btn" onclick="toggleAutoScroll()" id="autoscroll-btn" title="Toggle auto-scroll">⬇ Auto</button>
+        <button class="btn" onclick="clearLogs()" title="Clear log view">Clear</button>
+      </div>
+    </div>
+    <div class="log-container" id="log-container"></div>
+  </div>
+
+  <!-- Command Bar -->
+  <div class="cmd-bar">
+    <div class="card">
+      <input class="cmd-input" id="cmd-input" type="text" placeholder="Type a command... (status, force_cycle, clear_pid)" 
+             onkeydown="if(event.key==='Enter')sendCommand()">
+    </div>
+    <button class="btn btn-primary" onclick="sendCommand()">Send</button>
+    <button class="btn" onclick="sendCmd('force_cycle')">Force Cycle</button>
+    <button class="btn btn-danger" onclick="sendCmd('clear_pid')">Clear PID</button>
+  </div>
+
+</div>
+
+<!-- Auth Modal -->
+<div class="modal-overlay" id="auth-modal">
+  <div class="modal">
+    <h2>
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      <span id="auth-title">Telegram Authentication</span>
+    </h2>
+    <p id="auth-message">Enter the verification code sent to your Telegram app.</p>
+    <input type="text" id="auth-input" placeholder="12345" maxlength="20" autocomplete="off"
+           onkeydown="if(event.key==='Enter')submitAuth()">
+    <div class="modal-actions">
+      <button class="btn btn-primary" onclick="submitAuth()">Submit</button>
+      <button class="btn btn-danger" onclick="cancelAuth()">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// State
+let autoScroll = true;
+let logCount = 0;
+const MAX_LOG_LINES = 500;
+let lastAuthPending = null;
+
+// DOM refs
+const logContainer = document.getElementById('log-container');
+const authModal = document.getElementById('auth-modal');
+const authInput = document.getElementById('auth-input');
+const authTitle = document.getElementById('auth-title');
+const authMessage = document.getElementById('auth-message');
+
+// SSE Log Streaming
+function startLogStream() {
+  const evtSource = new EventSource('/api/logs/stream');
+  evtSource.onmessage = (e) => {
+    try {
+      const entry = JSON.parse(e.data);
+      appendLog(entry);
+    } catch(err) {}
+  };
+  evtSource.onerror = () => {
+    evtSource.close();
+    setTimeout(startLogStream, 3000);
+  };
+}
+
+function appendLog(entry) {
+  const div = document.createElement('div');
+  div.className = 'log-entry';
+  const lvl = entry.level || 'INFO';
+  div.innerHTML = `<span class="log-time">${entry.timestamp}</span> <span class="log-level ${lvl}">${lvl.padEnd(7)}</span> <span class="log-msg">${escapeHtml(entry.message)}</span>`;
+  logContainer.appendChild(div);
+  logCount++;
+  // Trim old entries
+  while (logContainer.children.length > MAX_LOG_LINES) {
+    logContainer.removeChild(logContainer.firstChild);
+  }
+  if (autoScroll) {
+    logContainer.scrollTop = logContainer.scrollHeight;
+  }
+}
+
+function escapeHtml(text) {
+  const d = document.createElement('div');
+  d.textContent = text;
+  return d.innerHTML;
+}
+
+function clearLogs() {
+  logContainer.innerHTML = '';
+  logCount = 0;
+}
+
+function toggleAutoScroll() {
+  autoScroll = !autoScroll;
+  const btn = document.getElementById('autoscroll-btn');
+  btn.style.borderColor = autoScroll ? 'var(--accent)' : 'var(--border)';
+  btn.style.color = autoScroll ? 'var(--accent)' : 'var(--text-dim)';
+}
+
+// Status Polling
+function pollStatus() {
+  fetch('/api/status')
+    .then(r => r.json())
+    .then(updateDashboard)
+    .catch(() => {});
+}
+
+function updateDashboard(s) {
+  // Header
+  const phase = s.phase || 'starting';
+  const phaseBadge = document.getElementById('phase-badge');
+  phaseBadge.textContent = phase.toUpperCase();
+  phaseBadge.className = 'badge badge-phase ' + phase;
+
+  document.getElementById('cycle').textContent = s.cycle || 0;
+  document.getElementById('mode').textContent = s.mode || 'NORMAL';
+
+  const memPct = (s.memory_pct || 0).toFixed(0);
+  document.getElementById('mem-pct').textContent = memPct + '%';
+  document.getElementById('mem-pct').style.color = memPct > 90 ? 'var(--error)' : memPct > 80 ? 'var(--warning)' : 'var(--success)';
+  if (s.memory_total_gb > 0) {
+    document.getElementById('mem-detail').textContent = `(${(s.memory_used_gb||0).toFixed(1)}/${(s.memory_total_gb||0).toFixed(1)}GB)`;
+  }
+  document.getElementById('uptime').textContent = s.uptime || '0m00s';
+
+  // Status dot
+  const dot = document.getElementById('status-dot');
+  dot.className = 'dot ' + (memPct > 90 ? 'dot-err' : memPct > 80 ? 'dot-warn' : 'dot-ok');
+
+  // Metrics
+  const totalScraped = Object.values(s.sources || {}).reduce((sum, src) => sum + (src.count || 0), 0);
+  document.getElementById('m-scraped').textContent = totalScraped;
+  document.getElementById('m-tested').textContent = s.total_tested || 0;
+  document.getElementById('m-gold').textContent = s.gold || 0;
+  document.getElementById('m-silver').textContent = s.silver || 0;
+  document.getElementById('m-dead').textContent = s.dead || 0;
+  document.getElementById('m-failed').textContent = s.failed || 0;
+
+  // Benchmark
+  const bt = s.bench_total || 0;
+  const bd = s.bench_done || 0;
+  if (bt > 0) {
+    const pct = Math.round(bd * 100 / bt);
+    document.getElementById('bench-text').textContent = `${bd}/${bt} (${pct}%)`;
+    document.getElementById('bench-bar').style.width = pct + '%';
+  } else {
+    document.getElementById('bench-text').textContent = 'Waiting';
+    document.getElementById('bench-bar').style.width = '0%';
+  }
+
+  // Sources table
+  const sources = s.sources || {};
+  const srcBody = document.getElementById('sources-body');
+  const srcKeys = Object.keys(sources);
+  if (srcKeys.length > 0) {
+    srcBody.innerHTML = '';
+    let total = 0;
+    srcKeys.forEach(name => {
+      const src = sources[name];
+      const st = src.status || 'waiting';
+      const cnt = src.count || 0;
+      total += cnt;
+      const dotCls = st === 'done' ? 'st-done' : st === 'fetching' ? 'st-fetching' : st === 'failed' ? 'st-failed' : 'st-waiting';
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${escapeHtml(name)}</td><td><span class="status-dot ${dotCls}"></span>${st}</td><td class="num">${cnt}</td>`;
+      srcBody.appendChild(tr);
+    });
+    document.getElementById('total-scraped').textContent = total + ' configs';
+  }
+
+  // Balancers
+  updateBalancer('main', s);
+  document.getElementById('bal-gemini-port').textContent = s.bal_gemini_port || 10809;
+  document.getElementById('bal-gemini-backends').textContent = s.bal_gemini_backends || 0;
+  const gs = s.bal_gemini_status || 'starting';
+  const gsDot = gs === 'OK' ? 'st-done' : gs === 'starting' ? 'st-waiting' : 'st-failed';
+  document.getElementById('bal-gemini-status').innerHTML = `<span class="status-dot ${gsDot}"></span>${gs}`;
+
+  // DPI
+  document.getElementById('dpi-strategy').textContent = s.dpi_strategy || '-';
+  document.getElementById('dpi-network').textContent = s.dpi_network || '-';
+  document.getElementById('tg-status').textContent = s.tg_status || '-';
+
+  // Auth modal
+  handleAuth(s.auth_pending);
+}
+
+function updateBalancer(prefix, s) {
+  const port = s[`bal_${prefix}_port`] || (prefix === 'main' ? 10808 : 10809);
+  const backends = s[`bal_${prefix}_backends`] || 0;
+  const status = s[`bal_${prefix}_status`] || 'starting';
+  const latency = s[`bal_${prefix}_latency`] || '';
+  const dotCls = status === 'OK' ? 'st-done' : status === 'starting' ? 'st-waiting' : 'st-failed';
+  document.getElementById(`bal-${prefix}-port`).textContent = port;
+  document.getElementById(`bal-${prefix}-backends`).textContent = backends;
+  document.getElementById(`bal-${prefix}-status`).innerHTML = `<span class="status-dot ${dotCls}"></span>${status}`;
+  if (document.getElementById(`bal-${prefix}-latency`)) {
+    document.getElementById(`bal-${prefix}-latency`).textContent = latency || '-';
+  }
+}
+
+// Auth
+function handleAuth(pending) {
+  if (pending && (!lastAuthPending || lastAuthPending.type !== pending.type)) {
+    lastAuthPending = pending;
+    if (pending.type === 'code') {
+      authTitle.textContent = 'Telegram Verification Code';
+      authMessage.textContent = pending.message || 'Enter the 5-digit code sent to your Telegram app.';
+      authInput.placeholder = '12345';
+      authInput.type = 'text';
+      authInput.className = '';
+      authInput.maxLength = 5;
+    } else if (pending.type === '2fa') {
+      authTitle.textContent = 'Two-Factor Authentication';
+      authMessage.textContent = pending.message || 'Enter your Telegram 2FA password.';
+      authInput.placeholder = '••••••••';
+      authInput.type = 'password';
+      authInput.className = 'password-input';
+      authInput.maxLength = 100;
+    }
+    authInput.value = '';
+    authModal.classList.add('active');
+    setTimeout(() => authInput.focus(), 100);
+  } else if (!pending) {
+    lastAuthPending = null;
+    authModal.classList.remove('active');
+  }
+}
+
+function submitAuth() {
+  const val = authInput.value.trim();
+  if (!val) return;
+  fetch('/api/auth/submit', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({value: val})
+  }).then(r => r.json()).then(d => {
+    if (d.ok) {
+      authModal.classList.remove('active');
+      lastAuthPending = null;
+    }
+  });
+}
+
+function cancelAuth() {
+  fetch('/api/auth/cancel', {method: 'POST'}).then(() => {
+    authModal.classList.remove('active');
+    lastAuthPending = null;
+  });
+}
+
+// Commands
+function sendCommand() {
+  const input = document.getElementById('cmd-input');
+  const cmd = input.value.trim();
+  if (!cmd) return;
+  sendCmd(cmd);
+  input.value = '';
+}
+
+function sendCmd(cmd) {
+  fetch('/api/command', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({command: cmd})
+  }).then(r => r.json()).then(d => {
+    appendLog({
+      timestamp: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+      level: d.ok ? 'INFO' : 'WARNING',
+      message: `[CMD] ${cmd}: ${d.message || (d.ok ? 'OK' : 'Failed')}`
+    });
+  }).catch(() => {
+    appendLog({timestamp: '--:--:--', level: 'ERROR', message: `[CMD] ${cmd}: Network error`});
+  });
+}
+
+// Telegram Login
+let tgLoginInProgress = false;
+
+function checkTelegramStatus() {
+  fetch('/api/telegram/status')
+    .then(r => r.json())
+    .then(d => {
+      const badge = document.getElementById('tg-session-badge');
+      const info = document.getElementById('tg-session-info');
+      const btn = document.getElementById('tg-login-btn');
+      if (d.has_session) {
+        badge.textContent = 'SESSION OK';
+        badge.style.background = 'rgba(0,230,118,.12)';
+        badge.style.color = 'var(--success)';
+        badge.style.border = '1px solid rgba(0,230,118,.3)';
+        info.innerHTML = '<span style="color:var(--success)">✓</span> Session file found: <strong>' + escapeHtml(d.session_file) + '</strong>';
+        btn.textContent = '🔑 Re-Login';
+      } else {
+        badge.textContent = 'NO SESSION';
+        badge.style.background = 'rgba(255,82,82,.12)';
+        badge.style.color = 'var(--error)';
+        badge.style.border = '1px solid rgba(255,82,82,.3)';
+        info.innerHTML = '<span style="color:var(--error)">✗</span> No session found. Click <strong>Login Telegram</strong> to authenticate.';
+        btn.textContent = '🔑 Login Telegram';
+      }
+    })
+    .catch(() => {});
+}
+
+function telegramLogin() {
+  if (tgLoginInProgress) return;
+  tgLoginInProgress = true;
+  const btn = document.getElementById('tg-login-btn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Connecting...';
+  btn.style.opacity = '0.6';
+
+  appendLog({
+    timestamp: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+    level: 'INFO',
+    message: '[Telegram] Starting login flow...'
+  });
+
+  fetch('/api/telegram/login', {method: 'POST'})
+    .then(r => r.json())
+    .then(d => {
+      if (d.waiting) {
+        // Code sent, auth modal will appear via polling
+        btn.textContent = '⏳ Waiting for code...';
+        appendLog({
+          timestamp: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+          level: 'INFO',
+          message: '[Telegram] ' + d.message
+        });
+        // Poll until auth completes
+        pollLoginResult();
+      } else if (d.ok) {
+        appendLog({
+          timestamp: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+          level: 'INFO',
+          message: '[Telegram] ' + d.message
+        });
+        resetLoginBtn(true);
+      } else {
+        appendLog({
+          timestamp: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+          level: 'ERROR',
+          message: '[Telegram] ' + (d.error || 'Login failed')
+        });
+        resetLoginBtn(false);
+      }
+    })
+    .catch(err => {
+      appendLog({timestamp: '--:--:--', level: 'ERROR', message: '[Telegram] Network error: ' + err});
+      resetLoginBtn(false);
+    });
+}
+
+function pollLoginResult() {
+  // Keep checking auth pending status; when it clears, login is done
+  let checks = 0;
+  const maxChecks = 150; // 5 min at 2s intervals
+  const interval = setInterval(() => {
+    checks++;
+    fetch('/api/telegram/status').then(r => r.json()).then(d => {
+      if (!d.auth_pending && checks > 2) {
+        // Auth completed
+        clearInterval(interval);
+        checkTelegramStatus();
+        if (d.has_session) {
+          appendLog({
+            timestamp: new Date().toLocaleTimeString('en-US', {hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit'}),
+            level: 'INFO',
+            message: '[Telegram] Login completed successfully! Session saved.'
+          });
+          resetLoginBtn(true);
+        } else {
+          resetLoginBtn(false);
+        }
+      }
+    }).catch(() => {});
+    if (checks >= maxChecks) {
+      clearInterval(interval);
+      resetLoginBtn(false);
+    }
+  }, 2000);
+}
+
+function resetLoginBtn(success) {
+  tgLoginInProgress = false;
+  const btn = document.getElementById('tg-login-btn');
+  btn.disabled = false;
+  btn.style.opacity = '1';
+  btn.textContent = success ? '🔑 Re-Login' : '🔑 Login Telegram';
+  checkTelegramStatus();
+}
+
+// Init
+startLogStream();
+pollStatus();
+setInterval(pollStatus, 2000);
+checkTelegramStatus();
+setInterval(checkTelegramStatus, 10000);
+
+// Auto-scroll button initial state
+document.getElementById('autoscroll-btn').style.borderColor = 'var(--accent)';
+document.getElementById('autoscroll-btn').style.color = 'var(--accent)';
+</script>
+</body>
+</html>
