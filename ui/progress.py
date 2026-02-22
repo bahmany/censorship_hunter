@@ -458,7 +458,7 @@ class _BenchmarkTracker:
             )
             if success and name:
                 short_name = name[:20]
-                extra += f" \u2502 {short_name} {latency:.0f}ms"
+                extra += f" | {short_name} {latency:.0f}ms"
 
             if self._use_rich:
                 self._progress.update(self._task_id, advance=1, extra=extra)

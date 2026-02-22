@@ -77,6 +77,10 @@ class MultiProxyServer:
         }
         self._health_thread: Optional[threading.Thread] = None
 
+        # Force backend support
+        self._forced_backend: Optional[str] = None  # URI of forced backend
+        self._force_permanent: bool = False  # True = permanent, False = temporary (cleared on next refresh)
+
     def _is_xray_supported(self, parsed: HunterParsedConfig) -> bool:
         try:
             proto = str(parsed.outbound.get("protocol", "") or "").lower()
@@ -109,6 +113,71 @@ class MultiProxyServer:
                     continue
             filtered.append((uri, latency))
         return filtered
+
+    def set_forced_backend(self, uri: str, permanent: bool = False) -> bool:
+        """Force a specific backend URI. If permanent=True, survives refreshes."""
+        parsed = self._parser.parse(uri)
+        if not parsed or not self._is_xray_supported(parsed):
+            return False
+        with self._lock:
+            self._forced_backend = uri
+            self._force_permanent = permanent
+        self.logger.info(f"[Balancer] Forced backend set ({'permanent' if permanent else 'temporary'}): {uri[:60]}")
+        # Rebuild with forced backend
+        forced = [{"uri": uri, "latency": 0, "healthy": True, "added_at": now_ts(), "forced": True}]
+        self._write_and_start(forced)
+        with self._lock:
+            self._backends = forced
+        return True
+
+    def clear_forced_backend(self) -> None:
+        """Remove forced backend and revert to normal balancing."""
+        with self._lock:
+            self._forced_backend = None
+            self._force_permanent = False
+        self.logger.info("[Balancer] Forced backend cleared, reverting to normal")
+        self._refresh_backends()
+
+    def set_manual_backends(self, uris: List[str]) -> int:
+        """Manually set specific backend URIs. Returns count of accepted backends."""
+        backends = []
+        for uri in uris:
+            parsed = self._parser.parse(uri)
+            if parsed and self._is_xray_supported(parsed):
+                backends.append({"uri": uri, "latency": 0, "healthy": True, "added_at": now_ts(), "manual": True})
+        if not backends:
+            return 0
+        if self._write_and_start(backends):
+            with self._lock:
+                self._backends = backends
+            self.logger.info(f"[Balancer] Manual backends set: {len(backends)}")
+            return len(backends)
+        return 0
+
+    def get_all_backends_detail(self) -> List[Dict[str, Any]]:
+        """Get detailed info for all current backends."""
+        with self._lock:
+            backends = list(self._backends)
+            forced = self._forced_backend
+            force_perm = self._force_permanent
+        result = []
+        for b in backends:
+            result.append({
+                "uri": b.get("uri", ""),
+                "uri_short": b.get("uri", "")[:80],
+                "latency": round(b.get("latency", 0)),
+                "healthy": b.get("healthy", False),
+                "added_at": b.get("added_at", ""),
+                "forced": b.get("forced", False),
+                "manual": b.get("manual", False),
+            })
+        return result
+
+    def get_available_configs_list(self) -> List[Dict[str, Any]]:
+        """Get available config pool for UI selection."""
+        with self._lock:
+            configs = list(self._available_configs)
+        return [{"uri": uri, "uri_short": uri[:80], "latency": round(lat)} for uri, lat in configs[:100]]
 
     def _create_balanced_config(self, backends: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Create xray config with load balancer across multiple backends."""
@@ -336,7 +405,7 @@ class MultiProxyServer:
             return None
         if not self._is_xray_supported(parsed):
             return None
-        port = self.port + 100 + (hash(uri) % 50)
+        port = self.port + 200 + (abs(hash(uri)) % 50)
         config = {
             "log": {"loglevel": "none"},
             "inbounds": [{"port": port, "listen": "127.0.0.1", "protocol": "socks", "settings": {"auth": "noauth", "udp": False}}],
@@ -498,6 +567,17 @@ class MultiProxyServer:
 
     def _refresh_backends(self) -> None:
         """Restart XRay - first try existing backends, then find new ones."""
+        # If permanent forced backend, don't refresh
+        with self._lock:
+            if self._forced_backend and self._force_permanent:
+                forced = [{"uri": self._forced_backend, "latency": 0, "healthy": True, "added_at": now_ts(), "forced": True}]
+                self._write_and_start(forced)
+                self._backends = forced
+                return
+            # Clear temporary forced backend on refresh
+            if self._forced_backend and not self._force_permanent:
+                self._forced_backend = None
+
         # Clear stale failed URIs periodically
         with self._lock:
             if len(self._failed_uris) > 100:
@@ -592,10 +672,15 @@ class MultiProxyServer:
     def get_status(self) -> Dict[str, Any]:
         with self._lock:
             backends = list(self._backends)
+            forced = self._forced_backend
+            force_perm = self._force_permanent
         return {
             "running": self._running,
             "port": self.port,
             "backends": sum(1 for b in backends if b.get("healthy")),
             "total_backends": len(backends),
             "stats": self._stats.copy(),
+            "forced_backend": forced[:80] if forced else None,
+            "force_permanent": force_perm,
+            "available_pool": len(self._available_configs),
         }

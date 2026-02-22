@@ -60,14 +60,10 @@ except ImportError:
 class TelegramScraper:
     """Handles Telegram scraping for proxy configurations."""
 
-    DEFAULT_SSH_SERVERS = [
-        {"host": "71.143.156.145", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-        {"host": "71.143.156.146", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-        {"host": "71.143.156.147", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-        {"host": "71.143.156.148", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-        {"host": "71.143.156.149", "port": 2, "username": "deployer", "password": "009100mohammad_mrb"},
-        {"host": "50.114.11.18", "port": 22, "username": "deployer", "password": "009100mohammad_mrb"},
-    ]
+    # SECURITY: SSH credentials MUST be provided via environment variables.
+    # Set SSH_SERVERS env var as JSON array, or individual SSH{idx}_HOST/PORT/USER/PASS vars.
+    # Example: SSH_SERVERS='[{"host":"1.2.3.4","port":22,"username":"user","password":"pass"}]'
+    DEFAULT_SSH_SERVERS = []
     DEFAULT_SSH_SOCKS_HOST = "127.0.0.1"
     DEFAULT_SSH_SOCKS_PORT = 1088
 
@@ -812,7 +808,7 @@ class BotReporter:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             resp = await loop.run_in_executor(
                 None,
@@ -854,7 +850,7 @@ class BotReporter:
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
             method="POST",
         )
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             resp = await loop.run_in_executor(
                 None,

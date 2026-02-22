@@ -7,6 +7,7 @@ Runs a Flask web server alongside Hunter, providing:
 - Command execution
 """
 
+import asyncio
 import collections
 import json
 import logging
@@ -124,7 +125,7 @@ def create_app():
                         yield f"data: {json.dumps(entry)}\n\n"
                     except queue.Empty:
                         yield ": keepalive\n\n"
-            except GeneratorExit:
+            finally:
                 with _log_lock:
                     if q in _log_subscribers:
                         _log_subscribers.remove(q)
@@ -317,7 +318,17 @@ def create_app():
         elif cmd == 'force_cycle':
             if _orchestrator:
                 logger.info("[WebAdmin] Force cycle requested by user")
-                return jsonify({'ok': True, 'message': 'Force cycle signal sent'})
+                def _run_cycle():
+                    loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(loop)
+                    try:
+                        loop.run_until_complete(_orchestrator.run_cycle())
+                    except Exception as e:
+                        logger.error(f"[WebAdmin] Force cycle failed: {e}")
+                    finally:
+                        loop.close()
+                threading.Thread(target=_run_cycle, daemon=True, name='force-cycle').start()
+                return jsonify({'ok': True, 'message': 'Force cycle started in background'})
             return jsonify({'ok': False, 'message': 'Orchestrator not available'})
 
         elif cmd == 'clear_pid':
@@ -330,6 +341,178 @@ def create_app():
             return jsonify({'ok': True, 'message': 'No PID file found'})
 
         return jsonify({'ok': False, 'message': f'Unknown command: {cmd}'})
+
+    # --- Balancer Backend Management ---
+    @app.route('/api/balancer/details')
+    def api_balancer_details():
+        """Get detailed backend info for both balancers."""
+        result = {'main': None, 'gemini': None}
+        if _orchestrator:
+            bal = getattr(_orchestrator, 'balancer', None)
+            if bal:
+                result['main'] = {
+                    'status': bal.get_status(),
+                    'backends': bal.get_all_backends_detail(),
+                    'pool': bal.get_available_configs_list(),
+                }
+            gbal = getattr(_orchestrator, 'gemini_balancer', None)
+            if gbal:
+                result['gemini'] = {
+                    'status': gbal.get_status(),
+                    'backends': gbal.get_all_backends_detail(),
+                    'pool': gbal.get_available_configs_list(),
+                }
+        return jsonify(result)
+
+    @app.route('/api/balancer/force', methods=['POST'])
+    def api_balancer_force():
+        """Force a specific backend for a balancer."""
+        data = request.get_json() or {}
+        uri = data.get('uri', '').strip()
+        permanent = data.get('permanent', False)
+        target = data.get('balancer', 'main')  # 'main' or 'gemini'
+        if not uri:
+            return jsonify({'ok': False, 'error': 'No URI provided'}), 400
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        bal = getattr(_orchestrator, 'balancer', None) if target == 'main' else getattr(_orchestrator, 'gemini_balancer', None)
+        if not bal:
+            return jsonify({'ok': False, 'error': f'Balancer "{target}" not available'}), 404
+        ok = bal.set_forced_backend(uri, permanent=permanent)
+        if ok:
+            return jsonify({'ok': True, 'message': f'Backend forced ({"permanent" if permanent else "temporary"})'})
+        return jsonify({'ok': False, 'error': 'Invalid or unsupported config URI'}), 400
+
+    @app.route('/api/balancer/unforce', methods=['POST'])
+    def api_balancer_unforce():
+        """Remove forced backend."""
+        data = request.get_json() or {}
+        target = data.get('balancer', 'main')
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        bal = getattr(_orchestrator, 'balancer', None) if target == 'main' else getattr(_orchestrator, 'gemini_balancer', None)
+        if not bal:
+            return jsonify({'ok': False, 'error': f'Balancer "{target}" not available'}), 404
+        bal.clear_forced_backend()
+        return jsonify({'ok': True, 'message': 'Force cleared'})
+
+    @app.route('/api/balancer/set-backends', methods=['POST'])
+    def api_balancer_set_backends():
+        """Manually set backend URIs for a balancer."""
+        data = request.get_json() or {}
+        uris = data.get('uris', [])
+        target = data.get('balancer', 'main')
+        if not uris or not isinstance(uris, list):
+            return jsonify({'ok': False, 'error': 'No URIs provided'}), 400
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        bal = getattr(_orchestrator, 'balancer', None) if target == 'main' else getattr(_orchestrator, 'gemini_balancer', None)
+        if not bal:
+            return jsonify({'ok': False, 'error': f'Balancer "{target}" not available'}), 404
+        count = bal.set_manual_backends(uris)
+        if count > 0:
+            return jsonify({'ok': True, 'count': count, 'message': f'{count} backends set'})
+        return jsonify({'ok': False, 'error': 'No valid backends accepted'}), 400
+
+    # --- Config Categories ---
+    @app.route('/api/configs/categories')
+    def api_config_categories():
+        """Get configs categorized by service access."""
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'})
+        categories = _orchestrator.categorize_backends()
+        return jsonify({'ok': True, 'categories': categories})
+
+    @app.route('/api/configs/test-access', methods=['POST'])
+    def api_test_config_access():
+        """Test which services a specific config can access."""
+        data = request.get_json() or {}
+        uri = data.get('uri', '').strip()
+        if not uri:
+            return jsonify({'ok': False, 'error': 'No URI provided'}), 400
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        # Run in thread to avoid blocking
+        result_holder = [None]
+        done = threading.Event()
+        def _test():
+            try:
+                result_holder[0] = _orchestrator.test_config_access(uri)
+            except Exception as e:
+                result_holder[0] = {'error': str(e)}
+            done.set()
+        t = threading.Thread(target=_test, daemon=True)
+        t.start()
+        done.wait(timeout=60)
+        if result_holder[0] is None:
+            return jsonify({'ok': False, 'error': 'Test timed out'}), 504
+        if 'error' in result_holder[0]:
+            return jsonify({'ok': False, 'error': result_holder[0]['error']}), 500
+        return jsonify({'ok': True, 'access': result_holder[0]})
+
+    # --- Manual Engine Commands ---
+    @app.route('/api/engine/rescan', methods=['POST'])
+    def api_engine_rescan():
+        """Re-run the config finder engine."""
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        logger.info('[WebAdmin] Manual rescan triggered')
+        def _run():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                return loop.run_until_complete(_orchestrator.manual_rescan())
+            finally:
+                loop.close()
+        # Run async in background thread
+        threading.Thread(target=_run, daemon=True, name='manual-rescan').start()
+        return jsonify({'ok': True, 'message': 'Rescan started in background'})
+
+    @app.route('/api/telegram/fetch-configs', methods=['POST'])
+    def api_telegram_fetch():
+        """Manually fetch configs from Telegram."""
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        result_holder = [None]
+        done = threading.Event()
+        def _run():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result_holder[0] = loop.run_until_complete(_orchestrator.manual_telegram_fetch())
+            except Exception as e:
+                result_holder[0] = {'ok': False, 'error': str(e)}
+            finally:
+                loop.close()
+                done.set()
+        threading.Thread(target=_run, daemon=True, name='manual-tg-fetch').start()
+        done.wait(timeout=130)
+        if result_holder[0] is None:
+            return jsonify({'ok': False, 'error': 'Telegram fetch timed out'}), 504
+        return jsonify(result_holder[0])
+
+    @app.route('/api/telegram/publish', methods=['POST'])
+    def api_telegram_publish():
+        """Publish current configs to Telegram group."""
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        result_holder = [None]
+        done = threading.Event()
+        def _run():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                result_holder[0] = loop.run_until_complete(_orchestrator.manual_publish_telegram())
+            except Exception as e:
+                result_holder[0] = {'ok': False, 'error': str(e)}
+            finally:
+                loop.close()
+                done.set()
+        threading.Thread(target=_run, daemon=True, name='manual-tg-publish').start()
+        done.wait(timeout=30)
+        if result_holder[0] is None:
+            return jsonify({'ok': False, 'error': 'Publish timed out'}), 504
+        return jsonify(result_holder[0])
 
     # --- Traffic stats ---
     @app.route('/api/traffic')

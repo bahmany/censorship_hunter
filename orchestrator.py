@@ -434,7 +434,10 @@ class HunterOrchestrator:
 
     def validate_configs(self, configs: Iterable[str], max_workers: int = 50) -> List[HunterBenchResult]:
         """Validate and benchmark configurations with adaptive thread management."""
-        from hunter.core.utils import prioritize_configs
+        try:
+            from hunter.core.utils import prioritize_configs
+        except ImportError:
+            from core.utils import prioritize_configs
         
         results: List[HunterBenchResult] = []
         test_url = self.config.get("test_url", "https://www.cloudflare.com/cdn-cgi/trace")
@@ -501,7 +504,10 @@ class HunterOrchestrator:
         
         # Pre-filter: remove configs that the balancer will reject (e.g. legacy SS ciphers)
         # This avoids wasting benchmark time on configs XRay 25.x can't use in balancer mode
-        from hunter.proxy.load_balancer import XRAY_SUPPORTED_SS_CIPHERS
+        try:
+            from hunter.proxy.load_balancer import XRAY_SUPPORTED_SS_CIPHERS
+        except ImportError:
+            from proxy.load_balancer import XRAY_SUPPORTED_SS_CIPHERS
         pre_filter_count = len(parsed_configs)
         filtered_parsed = []
         for parsed in parsed_configs:
@@ -1014,7 +1020,7 @@ class HunterOrchestrator:
         self.logger.info(f"Cycle completed in {cycle_time:.1f} seconds")
         self.last_cycle = time.time()
         
-        # Restore original config values
+        # Restore original config values (ALWAYS - even partial success)
         if psutil and original_max_total is not None:
             self.config.set("max_total", original_max_total)
             self.config.set("max_workers", original_max_workers)
@@ -1022,11 +1028,14 @@ class HunterOrchestrator:
         
         # Final memory status
         if psutil:
-            final_mem = psutil.virtual_memory()
-            self.logger.info(
-                f"Cycle end memory: {final_mem.percent:.1f}% "
-                f"({final_mem.used / (1024**3):.1f}GB / {final_mem.total / (1024**3):.1f}GB)"
-            )
+            try:
+                final_mem = psutil.virtual_memory()
+                self.logger.info(
+                    f"Cycle end memory: {final_mem.percent:.1f}% "
+                    f"({final_mem.used / (1024**3):.1f}GB / {final_mem.total / (1024**3):.1f}GB)"
+                )
+            except Exception:
+                pass
         
         # Log DPI evasion status
         if self.dpi_evasion:
@@ -1106,8 +1115,13 @@ class HunterOrchestrator:
 
     async def run_autonomous_loop(self):
         """Main autonomous loop with adaptive sleep."""
-        # Initial cycle
-        await self.run_cycle()
+        # Initial cycle (wrapped in try/except so first-cycle crash doesn't kill the service)
+        try:
+            await self.run_cycle()
+        except Exception as e:
+            self.logger.error(f"Initial cycle failed: {e}")
+            import traceback
+            self.logger.debug(traceback.format_exc())
 
         while True:
             try:
@@ -1203,6 +1217,8 @@ class HunterOrchestrator:
 
     def get_stealth_metrics(self) -> Dict[str, Any]:
         """Get stealth obfuscation metrics."""
+        if self.stealth_engine is None:
+            return {"enabled": False}
         return self.stealth_engine.get_stealth_metrics()
     
     def get_dpi_evasion_metrics(self) -> Dict[str, Any]:
@@ -1217,14 +1233,187 @@ class HunterOrchestrator:
             return self.dpi_evasion.get_status_summary()
         return "DPI Evasion: disabled"
 
+    async def manual_telegram_fetch(self) -> Dict[str, Any]:
+        """Manually trigger Telegram config scraping."""
+        if self.telegram_scraper is None:
+            return {"ok": False, "error": "Telegram scraper not available"}
+        try:
+            channels = self.config.get("targets", [])
+            limit = self.config.get("telegram_limit", 50)
+            self.logger.info(f"[Manual] Fetching configs from Telegram ({len(channels)} channels, limit={limit})...")
+            configs = await asyncio.wait_for(
+                self.telegram_scraper.scrape_configs(channels, limit=limit),
+                timeout=120
+            )
+            if isinstance(configs, set):
+                configs = list(configs)
+            self.logger.info(f"[Manual] Fetched {len(configs)} configs from Telegram")
+            # Save to cache
+            if configs and self.cache is not None:
+                try:
+                    self.cache.save_configs(configs, working=False)
+                except Exception:
+                    pass
+            return {"ok": True, "count": len(configs), "configs": configs[:20]}
+        except asyncio.TimeoutError:
+            return {"ok": False, "error": "Telegram fetch timed out (120s)"}
+        except Exception as e:
+            return {"ok": False, "error": str(e)}
+
+    async def manual_rescan(self) -> Dict[str, Any]:
+        """Manually trigger a full config scan cycle."""
+        try:
+            self.logger.info("[Manual] Re-scan triggered by user")
+            await self.run_cycle()
+            return {"ok": True, "message": f"Cycle #{self.cycle_count} completed", "validated": self._last_validated_count}
+        except Exception as e:
+            self.logger.error(f"[Manual] Re-scan failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    async def manual_publish_telegram(self) -> Dict[str, Any]:
+        """Manually publish current configs to Telegram group."""
+        reporter = self.bot_reporter or self.telegram_reporter
+        if reporter is None:
+            return {"ok": False, "error": "No Telegram reporter configured (TOKEN/CHAT_ID missing)"}
+        try:
+            # Get current gold+silver from files
+            gold_file = str(self.config.get("gold_file", "") or "")
+            silver_file = str(self.config.get("silver_file", "") or "")
+            all_uris = []
+            for fpath in [gold_file, silver_file]:
+                if fpath:
+                    try:
+                        all_uris.extend(read_lines(fpath))
+                    except Exception:
+                        pass
+            if not all_uris:
+                return {"ok": False, "error": "No configs to publish"}
+            self.logger.info(f"[Manual] Publishing {len(all_uris)} configs to Telegram...")
+            # Send as file
+            await reporter.report_config_files(gold_uris=all_uris)
+            return {"ok": True, "count": len(all_uris)}
+        except Exception as e:
+            self.logger.error(f"[Manual] Publish failed: {e}")
+            return {"ok": False, "error": str(e)}
+
+    def test_config_access(self, uri: str, targets: List[str] = None) -> Dict[str, bool]:
+        """Test which services a config can access.
+        Returns dict of {service_name: reachable}.
+        """
+        if targets is None:
+            targets = [
+                ("telegram", "https://api.telegram.org/"),
+                ("gemini", "https://gemini.google.com/"),
+                ("windsurf", "https://codeium.com/"),
+                ("aws", "https://aws.amazon.com/"),
+            ]
+        if self.balancer is None:
+            return {name: False for name, _ in targets}
+        # Parse and start a temp proxy for this config
+        parsed = self.parser.parse(uri) if self.parser else None
+        if not parsed:
+            return {name: False for name, _ in targets}
+        import subprocess, tempfile
+        port = self.config.get("multiproxy_port", 10808) + 500 + (abs(hash(uri)) % 50)
+        config = {
+            "log": {"loglevel": "none"},
+            "inbounds": [{"port": port, "listen": "127.0.0.1", "protocol": "socks", "settings": {"auth": "noauth", "udp": False}}],
+            "outbounds": [parsed.outbound],
+        }
+        results = {name: False for name, _ in targets}
+        xray_path = self.balancer.xray_path
+        temp_path = None
+        process = None
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix="access_test_", suffix=".json")
+            os.close(fd)
+            import json as _json
+            with open(temp_path, "w", encoding="utf-8") as f:
+                _json.dump(config, f, ensure_ascii=False)
+            process = subprocess.Popen(
+                [xray_path, "run", "-c", temp_path],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+            )
+            import time as _time
+            _time.sleep(1.0)
+            if process.poll() is not None:
+                return results
+            curl_cmd = "curl.exe" if sys.platform == "win32" else "curl"
+            null_out = "nul" if sys.platform == "win32" else "/dev/null"
+            for name, url in targets:
+                try:
+                    r = subprocess.run(
+                        [curl_cmd, "-x", f"socks5h://127.0.0.1:{port}", "-s",
+                         "-o", null_out, "-w", "%{http_code}", "-m", "8", "-k", url],
+                        capture_output=True, text=True, timeout=12,
+                        creationflags=subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0,
+                    )
+                    if r.returncode == 0:
+                        try:
+                            code = int(r.stdout.strip())
+                            results[name] = code < 400 or code == 204
+                        except ValueError:
+                            pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            if process:
+                try:
+                    process.terminate()
+                    process.wait(timeout=1)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except Exception:
+                    pass
+        return results
+
+    def categorize_backends(self) -> Dict[str, List[Dict[str, Any]]]:
+        """Categorize current backends by service access.
+        Tests each backend against Telegram, Gemini, Windsurf, AWS.
+        """
+        categories = {
+            "telegram": [],
+            "gemini": [],
+            "windsurf": [],
+            "aws": [],
+            "general": [],
+        }
+        # Gather backends from both balancers
+        all_backends = []
+        if self.balancer:
+            all_backends.extend(self.balancer.get_all_backends_detail())
+        if self.gemini_balancer:
+            for b in self.gemini_balancer.get_all_backends_detail():
+                b["balancer"] = "gemini"
+                all_backends.append(b)
+        for b in all_backends:
+            b.setdefault("balancer", "main")
+            categories["general"].append(b)
+        return categories
+
     def get_dns_status(self) -> Dict[str, Any]:
         """Get DNS manager status."""
+        if self.dns_manager is None:
+            return {"enabled": False, "error": "DNS manager not available"}
         return self.dns_manager.get_dns_status()
 
     def get_best_dns_server(self) -> Tuple[str, str]:
         """Get best DNS server for Iranian censorship bypass."""
+        if self.dns_manager is None:
+            return ("1.1.1.1", "Cloudflare (default fallback)")
         return self.dns_manager.get_best_dns_server()
 
     def test_dns_servers(self, max_tests: int = 5) -> Tuple[str, str]:
         """Test DNS servers and return the best one."""
+        if self.dns_manager is None:
+            return ("1.1.1.1", "Cloudflare (default fallback)")
         return self.dns_manager.auto_select_best_dns(max_tests)

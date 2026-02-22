@@ -122,6 +122,39 @@ td.n { text-align: right; font-family: 'Cascadia Code','SF Mono',monospace; font
 .chart-wrap { position: relative; height: 100px; padding: 4px 0; }
 canvas { width: 100% !important; height: 100% !important; }
 
+/* Tabs */
+.tab-bar { display: flex; gap: 2px; padding: 4px; background: var(--bg); border-radius: var(--radius); margin-bottom: 8px; }
+.tab-btn { flex: 1; padding: 5px 8px; border: none; background: transparent; color: var(--text-dim); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px; cursor: pointer; border-radius: 5px; transition: all .15s; text-align: center; }
+.tab-btn:hover { color: var(--text); background: var(--bg-card-hover); }
+.tab-btn.active { color: var(--accent); background: var(--accent-glow); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+
+/* Backend list items */
+.be-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid rgba(30,42,54,.4); font-size: 11px; }
+.be-item:last-child { border-bottom: none; }
+.be-uri { flex: 1; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--text); }
+.be-lat { font-family: monospace; font-weight: 600; min-width: 50px; text-align: right; }
+.be-tag { font-size: 8px; padding: 1px 5px; border-radius: 4px; font-weight: 700; text-transform: uppercase; }
+.be-tag-forced { background: rgba(255,171,0,.15); color: var(--warning); border: 1px solid rgba(255,171,0,.3); }
+.be-tag-manual { background: rgba(0,191,255,.12); color: var(--accent); border: 1px solid rgba(0,191,255,.3); }
+.be-actions { display: flex; gap: 3px; }
+
+/* Category badges */
+.cat-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 600; margin: 2px; }
+.cat-tg { background: rgba(0,136,204,.12); color: #0088cc; border: 1px solid rgba(0,136,204,.3); }
+.cat-gemini { background: rgba(66,133,244,.12); color: #4285f4; border: 1px solid rgba(66,133,244,.3); }
+.cat-windsurf { background: rgba(0,230,118,.12); color: #00e676; border: 1px solid rgba(0,230,118,.3); }
+.cat-aws { background: rgba(255,153,0,.12); color: #ff9900; border: 1px solid rgba(255,153,0,.3); }
+
+/* URI input */
+.uri-input { width: 100%; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: monospace; font-size: 11px; outline: none; resize: vertical; min-height: 32px; }
+.uri-input:focus { border-color: var(--accent); }
+
+/* Select dropdown */
+.sel { padding: 5px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 11px; outline: none; }
+.sel:focus { border-color: var(--accent); }
+
 /* Modal */
 .mo { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7); backdrop-filter: blur(4px); z-index: 200; justify-content: center; align-items: center; }
 .mo.active { display: flex; }
@@ -255,6 +288,125 @@ canvas { width: 100% !important; height: 100% !important; }
         <thead><tr><th>IP Address</th><th style="text-align:right">Connections</th><th>Port</th></tr></thead>
         <tbody id="clients-body"><tr><td colspan="3" style="color:var(--text-dim);text-align:center;padding:12px">No external clients</td></tr></tbody>
       </table>
+    </div>
+  </div>
+
+  <!-- Backend Management -->
+  <div class="card full">
+    <div class="card-h">
+      <span>🎛️ Backend Management</span>
+      <div style="display:flex;gap:4px;">
+        <button class="btn" onclick="loadBalancerDetails()" style="font-size:9px;padding:3px 8px;">Refresh</button>
+      </div>
+    </div>
+    <div class="card-b">
+      <div class="tab-bar">
+        <button class="tab-btn active" onclick="switchBalTab('main',this)">Main Balancer</button>
+        <button class="tab-btn" onclick="switchBalTab('gemini',this)">Gemini Balancer</button>
+        <button class="tab-btn" onclick="switchBalTab('pool',this)">Config Pool</button>
+        <button class="tab-btn" onclick="switchBalTab('force',this)">Force Backend</button>
+      </div>
+
+      <!-- Main Balancer Tab -->
+      <div class="tab-content active" id="bal-tab-main">
+        <div style="display:flex;gap:10px;margin-bottom:6px;font-size:11px;flex-wrap:wrap;">
+          <span>Status: <strong id="bal-main-st" style="color:var(--accent)">-</strong></span>
+          <span>Port: <strong id="bal-main-port">-</strong></span>
+          <span>Pool: <strong id="bal-main-pool">0</strong></span>
+          <span id="bal-main-forced" style="display:none">Forced: <span class="be-tag be-tag-forced" id="bal-main-forced-uri">-</span></span>
+        </div>
+        <div id="bal-main-backends" style="max-height:160px;overflow-y:auto;">
+          <div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Gemini Balancer Tab -->
+      <div class="tab-content" id="bal-tab-gemini">
+        <div style="display:flex;gap:10px;margin-bottom:6px;font-size:11px;flex-wrap:wrap;">
+          <span>Status: <strong id="bal-gem-st" style="color:var(--accent)">-</strong></span>
+          <span>Port: <strong id="bal-gem-port">-</strong></span>
+          <span>Pool: <strong id="bal-gem-pool">0</strong></span>
+          <span id="bal-gem-forced" style="display:none">Forced: <span class="be-tag be-tag-forced" id="bal-gem-forced-uri">-</span></span>
+        </div>
+        <div id="bal-gem-backends" style="max-height:160px;overflow-y:auto;">
+          <div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Config Pool Tab -->
+      <div class="tab-content" id="bal-tab-pool">
+        <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim);">Available configs in pool (select to force or set as backend)</div>
+        <div id="bal-pool-list" style="max-height:200px;overflow-y:auto;">
+          <div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">Loading...</div>
+        </div>
+      </div>
+
+      <!-- Force Backend Tab -->
+      <div class="tab-content" id="bal-tab-force">
+        <div style="margin-bottom:8px;">
+          <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px;">Paste config URI:</label>
+          <textarea class="uri-input" id="force-uri-input" rows="2" placeholder="vmess://... or vless://... or trojan://..."></textarea>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
+          <select class="sel" id="force-balancer-select">
+            <option value="main">Main Balancer</option>
+            <option value="gemini">Gemini Balancer</option>
+          </select>
+          <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
+            <input type="checkbox" id="force-permanent-check"> Permanent
+          </label>
+          <button class="btn btn-p" onclick="forceBackend()" style="font-size:10px;">⚡ Force</button>
+          <button class="btn btn-d" onclick="unforceBackend()" style="font-size:10px;">✕ Clear Force</button>
+        </div>
+        <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">
+          <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px;">Manual backends (one URI per line):</label>
+          <textarea class="uri-input" id="manual-backends-input" rows="3" placeholder="vmess://...&#10;vless://...&#10;trojan://..."></textarea>
+          <div style="display:flex;gap:6px;margin-top:6px;">
+            <select class="sel" id="manual-balancer-select">
+              <option value="main">Main Balancer</option>
+              <option value="gemini">Gemini Balancer</option>
+            </select>
+            <button class="btn btn-s" onclick="setManualBackends()" style="font-size:10px;">Set Backends</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Config Categories & Actions -->
+  <div class="card">
+    <div class="card-h">
+      <span>📂 Config Categories</span>
+      <button class="btn" onclick="loadCategories()" style="font-size:9px;padding:3px 8px;">Refresh</button>
+    </div>
+    <div class="card-b" id="categories-body">
+      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
+        <div class="cat-badge cat-tg">✈️ Telegram: <span id="cat-tg-count">?</span></div>
+        <div class="cat-badge cat-gemini">✦ Gemini: <span id="cat-gem-count">?</span></div>
+        <div class="cat-badge cat-windsurf">🌊 Windsurf: <span id="cat-ws-count">?</span></div>
+        <div class="cat-badge cat-aws">☁️ AWS: <span id="cat-aws-count">?</span></div>
+      </div>
+      <div style="font-size:10px;color:var(--text-dim);margin-bottom:6px;">Test a config's access to services:</div>
+      <div style="display:flex;gap:4px;">
+        <input class="uri-input" id="test-access-uri" placeholder="Paste URI to test..." style="min-height:28px;flex:1;">
+        <button class="btn btn-p" onclick="testConfigAccess()" id="test-access-btn" style="font-size:10px;white-space:nowrap;">🔍 Test</button>
+      </div>
+      <div id="test-access-result" style="margin-top:6px;font-size:11px;"></div>
+    </div>
+  </div>
+
+  <!-- Manual Actions -->
+  <div class="card">
+    <div class="card-h"><span>🔧 Manual Actions</span></div>
+    <div class="card-b" style="display:flex;flex-direction:column;gap:8px;">
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button class="btn btn-p" onclick="manualTelegramFetch()" id="tg-fetch-btn" style="flex:1;">📥 Fetch from Telegram</button>
+        <button class="btn btn-s" onclick="manualPublishTelegram()" id="tg-publish-btn" style="flex:1;">📤 Publish to Telegram</button>
+      </div>
+      <div style="display:flex;gap:6px;align-items:center;">
+        <button class="btn" onclick="manualRescan()" id="rescan-btn" style="flex:1;">🔄 Re-scan Configs (Full Cycle)</button>
+      </div>
+      <div id="manual-action-status" style="font-size:11px;color:var(--text-dim);"></div>
     </div>
   </div>
 
@@ -588,6 +740,234 @@ function loadSystemInfo(){
   }).catch(()=>{});
 }
 
+// --- Balancer Details ---
+let _balData = null;
+function loadBalancerDetails() {
+  fetch('/api/balancer/details').then(r=>r.json()).then(data => {
+    _balData = data;
+    renderBalancer('main', data.main, 'bal-main');
+    renderBalancer('gemini', data.gemini, 'bal-gem');
+    renderPool(data);
+  }).catch(()=>{});
+}
+function renderBalancer(name, info, prefix) {
+  if (!info) {
+    document.getElementById(prefix+'-st').textContent = 'N/A';
+    document.getElementById(prefix+'-backends').innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">Not available</div>';
+    return;
+  }
+  const st = info.status || {};
+  document.getElementById(prefix+'-st').textContent = st.running ? 'Running' : 'Stopped';
+  document.getElementById(prefix+'-st').style.color = st.running ? 'var(--success)' : 'var(--error)';
+  document.getElementById(prefix+'-port').textContent = st.port || '-';
+  document.getElementById(prefix+'-pool').textContent = st.available_pool || 0;
+  const forcedEl = document.getElementById(prefix+'-forced');
+  if (st.forced_backend) {
+    forcedEl.style.display = '';
+    document.getElementById(prefix+'-forced-uri').textContent = (st.force_permanent ? '🔒 ' : '⏱ ') + st.forced_backend;
+  } else {
+    forcedEl.style.display = 'none';
+  }
+  const container = document.getElementById(prefix+'-backends');
+  const backends = info.backends || [];
+  if (!backends.length) {
+    container.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">No backends</div>';
+    return;
+  }
+  let html = '';
+  backends.forEach((b,i) => {
+    const hc = b.healthy ? 'sd-ok' : 'sd-fail';
+    let tags = '';
+    if (b.forced) tags += '<span class="be-tag be-tag-forced">forced</span> ';
+    if (b.manual) tags += '<span class="be-tag be-tag-manual">manual</span> ';
+    html += `<div class="be-item">
+      <span class="sd ${hc}"></span>
+      <span class="be-uri" title="${esc(b.uri)}">${esc(b.uri_short)}</span>
+      ${tags}
+      <span class="be-lat">${b.latency}ms</span>
+      <div class="be-actions">
+        <button class="btn" style="font-size:8px;padding:2px 5px;" onclick="forceFromList('${name}','${esc(b.uri)}')" title="Force this backend">⚡</button>
+      </div>
+    </div>`;
+  });
+  container.innerHTML = html;
+}
+function renderPool(data) {
+  const container = document.getElementById('bal-pool-list');
+  let allPool = [];
+  if (data.main && data.main.pool) allPool = allPool.concat(data.main.pool.map(p=>({...p, bal:'main'})));
+  if (data.gemini && data.gemini.pool) allPool = allPool.concat(data.gemini.pool.map(p=>({...p, bal:'gemini'})));
+  // Dedupe by uri
+  const seen = new Set();
+  allPool = allPool.filter(p => { if (seen.has(p.uri)) return false; seen.add(p.uri); return true; });
+  if (!allPool.length) {
+    container.innerHTML = '<div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">No configs in pool</div>';
+    return;
+  }
+  let html = '';
+  allPool.slice(0, 50).forEach(p => {
+    html += `<div class="be-item">
+      <span class="be-uri" title="${esc(p.uri)}">${esc(p.uri_short)}</span>
+      <span class="be-lat">${p.latency}ms</span>
+      <div class="be-actions">
+        <button class="btn" style="font-size:8px;padding:2px 5px;" onclick="forceFromList('main','${esc(p.uri)}')" title="Force to Main">⚡M</button>
+        <button class="btn" style="font-size:8px;padding:2px 5px;" onclick="forceFromList('gemini','${esc(p.uri)}')" title="Force to Gemini">⚡G</button>
+      </div>
+    </div>`;
+  });
+  container.innerHTML = html;
+}
+function switchBalTab(tab, btn) {
+  document.querySelectorAll('#bal-tab-main,#bal-tab-gemini,#bal-tab-pool,#bal-tab-force').forEach(e=>e.classList.remove('active'));
+  document.getElementById('bal-tab-'+tab).classList.add('active');
+  btn.parentElement.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
+  btn.classList.add('active');
+}
+function forceFromList(balancer, uri) {
+  document.getElementById('force-uri-input').value = uri;
+  document.getElementById('force-balancer-select').value = balancer;
+  // Switch to force tab
+  document.querySelectorAll('#bal-tab-main,#bal-tab-gemini,#bal-tab-pool,#bal-tab-force').forEach(e=>e.classList.remove('active'));
+  document.getElementById('bal-tab-force').classList.add('active');
+  const tabs = document.querySelectorAll('.tab-btn');
+  tabs.forEach(b=>b.classList.remove('active'));
+  tabs[3].classList.add('active');
+}
+function forceBackend() {
+  const uri = document.getElementById('force-uri-input').value.trim();
+  if (!uri) { alert('Paste a config URI first'); return; }
+  const balancer = document.getElementById('force-balancer-select').value;
+  const permanent = document.getElementById('force-permanent-check').checked;
+  fetch('/api/balancer/force', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({uri, balancer, permanent})
+  }).then(r=>r.json()).then(d => {
+    appendLog({timestamp:ts(),level:d.ok?'INFO':'WARNING',message:'[Backend] '+(d.message||d.error||'Failed')});
+    if (d.ok) loadBalancerDetails();
+  }).catch(e=>appendLog({timestamp:ts(),level:'ERROR',message:'[Backend] '+e}));
+}
+function unforceBackend() {
+  const balancer = document.getElementById('force-balancer-select').value;
+  fetch('/api/balancer/unforce', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({balancer})
+  }).then(r=>r.json()).then(d => {
+    appendLog({timestamp:ts(),level:'INFO',message:'[Backend] '+(d.message||'Force cleared')});
+    loadBalancerDetails();
+  }).catch(()=>{});
+}
+function setManualBackends() {
+  const text = document.getElementById('manual-backends-input').value.trim();
+  if (!text) { alert('Paste config URIs (one per line)'); return; }
+  const uris = text.split('\n').map(l=>l.trim()).filter(l=>l.length>10);
+  const balancer = document.getElementById('manual-balancer-select').value;
+  fetch('/api/balancer/set-backends', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({uris, balancer})
+  }).then(r=>r.json()).then(d => {
+    appendLog({timestamp:ts(),level:d.ok?'INFO':'WARNING',message:'[Backend] '+(d.message||d.error||'Failed')});
+    if (d.ok) { document.getElementById('manual-backends-input').value=''; loadBalancerDetails(); }
+  }).catch(e=>appendLog({timestamp:ts(),level:'ERROR',message:'[Backend] '+e}));
+}
+
+// --- Config Categories ---
+function loadCategories() {
+  fetch('/api/configs/categories').then(r=>r.json()).then(d => {
+    if (!d.ok) return;
+    const c = d.categories || {};
+    document.getElementById('cat-tg-count').textContent = (c.telegram||[]).length;
+    document.getElementById('cat-gem-count').textContent = (c.gemini||[]).length;
+    document.getElementById('cat-ws-count').textContent = (c.windsurf||[]).length;
+    document.getElementById('cat-aws-count').textContent = (c.aws||[]).length;
+  }).catch(()=>{});
+}
+function testConfigAccess() {
+  const uri = document.getElementById('test-access-uri').value.trim();
+  if (!uri) return;
+  const btn = document.getElementById('test-access-btn');
+  const res = document.getElementById('test-access-result');
+  btn.disabled = true; btn.textContent = '⏳ Testing...';
+  res.innerHTML = '<span style="color:var(--text-dim)">Testing access (up to 60s)...</span>';
+  fetch('/api/configs/test-access', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({uri})
+  }).then(r=>r.json()).then(d => {
+    btn.disabled = false; btn.textContent = '🔍 Test';
+    if (!d.ok) { res.innerHTML = `<span style="color:var(--error)">${esc(d.error||'Failed')}</span>`; return; }
+    const a = d.access || {};
+    let html = '';
+    const labels = {telegram:'✈️ Telegram',gemini:'✦ Gemini',windsurf:'🌊 Windsurf',aws:'☁️ AWS'};
+    for (const [k,v] of Object.entries(a)) {
+      const ok = v ? 'var(--success)' : 'var(--error)';
+      const icon = v ? '✓' : '✗';
+      html += `<span style="color:${ok};margin-right:10px;">${icon} ${labels[k]||k}</span>`;
+    }
+    res.innerHTML = html;
+  }).catch(e => {
+    btn.disabled = false; btn.textContent = '🔍 Test';
+    res.innerHTML = `<span style="color:var(--error)">${esc(''+e)}</span>`;
+  });
+}
+
+// --- Manual Actions ---
+function manualTelegramFetch() {
+  const btn = document.getElementById('tg-fetch-btn');
+  const st = document.getElementById('manual-action-status');
+  btn.disabled = true; btn.textContent = '⏳ Fetching...';
+  st.textContent = 'Fetching configs from Telegram...';
+  appendLog({timestamp:ts(),level:'INFO',message:'[Manual] Fetching configs from Telegram...'});
+  fetch('/api/telegram/fetch-configs', {method:'POST'}).then(r=>r.json()).then(d => {
+    btn.disabled = false; btn.textContent = '📥 Fetch from Telegram';
+    if (d.ok) {
+      st.innerHTML = `<span style="color:var(--success)">✓ Fetched ${d.count} configs</span>`;
+      appendLog({timestamp:ts(),level:'INFO',message:`[Manual] Fetched ${d.count} configs from Telegram`});
+    } else {
+      st.innerHTML = `<span style="color:var(--error)">✗ ${esc(d.error||'Failed')}</span>`;
+      appendLog({timestamp:ts(),level:'WARNING',message:'[Manual] Telegram fetch: '+(d.error||'Failed')});
+    }
+  }).catch(e => {
+    btn.disabled = false; btn.textContent = '📥 Fetch from Telegram';
+    st.innerHTML = `<span style="color:var(--error)">✗ ${esc(''+e)}</span>`;
+  });
+}
+function manualPublishTelegram() {
+  const btn = document.getElementById('tg-publish-btn');
+  const st = document.getElementById('manual-action-status');
+  btn.disabled = true; btn.textContent = '⏳ Publishing...';
+  st.textContent = 'Publishing configs to Telegram...';
+  fetch('/api/telegram/publish', {method:'POST'}).then(r=>r.json()).then(d => {
+    btn.disabled = false; btn.textContent = '📤 Publish to Telegram';
+    if (d.ok) {
+      st.innerHTML = `<span style="color:var(--success)">✓ Published ${d.count} configs</span>`;
+      appendLog({timestamp:ts(),level:'INFO',message:`[Manual] Published ${d.count} configs to Telegram`});
+    } else {
+      st.innerHTML = `<span style="color:var(--error)">✗ ${esc(d.error||'Failed')}</span>`;
+      appendLog({timestamp:ts(),level:'WARNING',message:'[Manual] Publish: '+(d.error||'Failed')});
+    }
+  }).catch(e => {
+    btn.disabled = false; btn.textContent = '📤 Publish to Telegram';
+    st.innerHTML = `<span style="color:var(--error)">✗ ${esc(''+e)}</span>`;
+  });
+}
+function manualRescan() {
+  const btn = document.getElementById('rescan-btn');
+  const st = document.getElementById('manual-action-status');
+  btn.disabled = true; btn.textContent = '⏳ Scanning...';
+  st.textContent = 'Full config scan cycle started...';
+  appendLog({timestamp:ts(),level:'INFO',message:'[Manual] Full re-scan cycle started...'});
+  fetch('/api/engine/rescan', {method:'POST'}).then(r=>r.json()).then(d => {
+    btn.disabled = false; btn.textContent = '🔄 Re-scan Configs (Full Cycle)';
+    if (d.ok) {
+      st.innerHTML = `<span style="color:var(--success)">✓ ${esc(d.message||'Rescan started')}</span>`;
+    } else {
+      st.innerHTML = `<span style="color:var(--error)">✗ ${esc(d.error||'Failed')}</span>`;
+    }
+  }).catch(e => {
+    btn.disabled = false; btn.textContent = '🔄 Re-scan Configs (Full Cycle)';
+    st.innerHTML = `<span style="color:var(--error)">✗ ${esc(''+e)}</span>`;
+  });
+}
+
 // --- Init ---
 startLogStream();
 pollStatus(); setInterval(pollStatus, 2000);
@@ -596,6 +976,8 @@ updateTraffic(); setInterval(updateTraffic, 2000);
 loadTopConfigs(); setInterval(loadTopConfigs, 10000);
 loadClients(); setInterval(loadClients, 5000);
 loadSystemInfo(); setInterval(loadSystemInfo, 30000);
+loadBalancerDetails(); setInterval(loadBalancerDetails, 10000);
+loadCategories(); setInterval(loadCategories, 30000);
 document.getElementById('as-btn').style.borderColor='var(--accent)';
 document.getElementById('as-btn').style.color='var(--accent)';
 window.addEventListener('resize', drawTrafficChart);

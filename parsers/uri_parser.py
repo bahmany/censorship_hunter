@@ -60,10 +60,25 @@ class VMessParser:
                 },
             }
             
-            if j.get("net") == "ws":
+            net = j.get("net", "tcp")
+            if net == "ws":
                 outbound["streamSettings"]["wsSettings"] = {
                     "path": j.get("path", "/"),
                     "headers": {"Host": j.get("host", "")},
+                }
+            elif net == "grpc" or net == "gun":
+                outbound["streamSettings"]["grpcSettings"] = {
+                    "serviceName": j.get("path", ""),
+                }
+            elif net == "h2" or net == "http":
+                outbound["streamSettings"]["httpSettings"] = {
+                    "path": j.get("path", "/"),
+                    "host": [j.get("host", "")] if j.get("host") else [],
+                }
+            elif net == "httpupgrade":
+                outbound["streamSettings"]["httpupgradeSettings"] = {
+                    "path": j.get("path", "/"),
+                    "host": j.get("host", ""),
                 }
             
             if j.get("tls") == "tls":
@@ -71,6 +86,10 @@ class VMessParser:
                     "serverName": j.get("sni", host),
                     "allowInsecure": False,
                 }
+                # Add fingerprint if present
+                fp = j.get("fp", "")
+                if fp:
+                    outbound["streamSettings"]["tlsSettings"]["fingerprint"] = fp
             
             return HunterParsedConfig(uri=uri, outbound=outbound, host=host, port=port, identity=uuid, ps=ps)
         except Exception:
@@ -177,18 +196,42 @@ class TrojanParser:
             if not host or not password or host == "0.0.0.0":
                 return None
             
+            security = params.get("security", ["tls"])[0]
             outbound: Dict[str, Any] = {
                 "protocol": "trojan",
                 "settings": {"servers": [{"address": host, "port": int(port), "password": password}]},
                 "streamSettings": {
                     "network": params.get("type", ["tcp"])[0],
-                    "security": "tls",
-                    "tlsSettings": {
-                        "serverName": params.get("sni", [host])[0],
-                        "allowInsecure": params.get("allowInsecure", ["0"])[0] == "1",
-                    },
+                    "security": security,
                 },
             }
+            
+            if security == "reality":
+                outbound["streamSettings"]["realitySettings"] = {
+                    "serverName": params.get("sni", [host])[0],
+                    "fingerprint": params.get("fp", ["chrome"])[0],
+                    "publicKey": params.get("pbk", [""])[0],
+                    "shortId": params.get("sid", [""])[0],
+                }
+            else:
+                outbound["streamSettings"]["tlsSettings"] = {
+                    "serverName": params.get("sni", [host])[0],
+                    "allowInsecure": params.get("allowInsecure", ["0"])[0] == "1",
+                }
+                fp = params.get("fp", [""])[0]
+                if fp:
+                    outbound["streamSettings"]["tlsSettings"]["fingerprint"] = fp
+            
+            transport = params.get("type", [""])[0]
+            if transport == "ws":
+                outbound["streamSettings"]["wsSettings"] = {
+                    "path": params.get("path", ["/"])[0],
+                    "headers": {"Host": params.get("host", [""])[0]},
+                }
+            elif transport == "grpc":
+                outbound["streamSettings"]["grpcSettings"] = {
+                    "serviceName": params.get("serviceName", [""])[0],
+                }
             
             return HunterParsedConfig(uri=uri, outbound=outbound, host=host, port=int(port), identity=password, ps=ps)
         except Exception:

@@ -249,7 +249,7 @@ def kill_existing_hunter_processes(logger):
                                     ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/FORMAT:LIST"],
                                     capture_output=True, text=True, timeout=3
                                 )
-                                if "hunter" in cmd_result.stdout.lower() or "pythonProject1" in cmd_result.stdout:
+                                if ("hunter" in cmd_result.stdout.lower() or "pythonProject1" in cmd_result.stdout) and pid != str(os.getpid()):
                                     subprocess.run(["taskkill", "/F", "/PID", pid], 
                                                  capture_output=True, timeout=3)
                                     killed_count += 1
@@ -273,7 +273,7 @@ def kill_existing_hunter_processes(logger):
                     capture_output=True, text=True, timeout=3
                 )
                 for pid in result.stdout.strip().split('\n'):
-                    if pid:
+                    if pid and pid.strip() != str(os.getpid()):
                         try:
                             subprocess.run(["kill", "-9", pid], timeout=2)
                             killed_count += 1
@@ -476,12 +476,24 @@ async def main():
 
     except KeyboardInterrupt:
         logger.info("Shutting down gracefully...")
-        return 0
     except Exception as e:
         logger.error(f"Fatal error: {e}")
         import traceback
         traceback.print_exc()
         return 1
+    finally:
+        # Always clean up resources on exit
+        try:
+            if 'orchestrator' in dir():
+                await orchestrator.stop()
+                logger.info("Orchestrator stopped successfully")
+        except Exception as stop_err:
+            logger.warning(f"Error during shutdown: {stop_err}")
+        try:
+            if 'svc' in dir():
+                svc.unregister()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

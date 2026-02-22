@@ -273,7 +273,7 @@ class ConfigFetcher:
         # Try HTTP proxy on port+1 (use session to stay within pool limits)
         for proxy_port in live_ports[:1]:
             try:
-                http_port = proxy_port + 1
+                http_port = proxy_port + 100
                 proxies = {"http": f"http://127.0.0.1:{http_port}", "https": f"http://127.0.0.1:{http_port}"}
                 resp = session.get(url, headers=headers, timeout=timeout, verify=False, proxies=proxies)
                 if resp.status_code == 200 and resp.text:
@@ -306,7 +306,7 @@ class ConfigFetcher:
         for p in live_ports[:1]:
             attempts.append(("socks5", p))
         for p in live_ports[:1]:
-            attempts.append(("http", p + 1))
+            attempts.append(("http", p + 100))
         
         for proxy_type, proxy_port in attempts:
             try:
