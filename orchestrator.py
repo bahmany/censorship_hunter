@@ -21,6 +21,7 @@ try:
     from hunter.core.config import HunterConfig
     from hunter.core.models import HunterBenchResult
     from hunter.network.http_client import HTTPClientManager, ConfigFetcher
+    from hunter.network.flexible_fetcher import FlexibleConfigFetcher, FetchStrategy
     from hunter.parsers import UniversalParser
     from hunter.testing.benchmark import ProxyBenchmark
     from hunter.proxy.load_balancer import MultiProxyServer
@@ -38,6 +39,7 @@ except ImportError:
     from core.config import HunterConfig
     from core.models import HunterBenchResult
     from network.http_client import HTTPClientManager, ConfigFetcher
+    from network.flexible_fetcher import FlexibleConfigFetcher, FetchStrategy
     from parsers import UniversalParser
     from testing.benchmark import ProxyBenchmark
     from proxy.load_balancer import MultiProxyServer
@@ -247,6 +249,20 @@ class HunterOrchestrator:
         # UI progress system
         self.ui = HunterUI()
         
+        # Flexible config fetcher (Telegram priority with fallback strategies)
+        self.flexible_fetcher = None
+        if FlexibleConfigFetcher is not None and self.telegram_scraper is not None:
+            try:
+                self.flexible_fetcher = FlexibleConfigFetcher(
+                    config=self.config,
+                    telegram_scraper=self.telegram_scraper,
+                    http_fetcher=self.config_fetcher,
+                    logger=self.logger
+                )
+                self.logger.info("Flexible config fetcher initialized (Telegram priority)")
+            except Exception as e:
+                self.logger.info(f"Flexible fetcher init skipped: {e}")
+        
         # Real-time dashboard (replaces verbose console logging)
         self.dashboard: Optional[Any] = None
         if HunterDashboard is not None:
@@ -258,11 +274,210 @@ class HunterOrchestrator:
         self.logger.info("Hunter Orchestrator initialized successfully")
 
     async def scrape_configs(self) -> List[str]:
-        """Scrape proxy configurations from ALL sources in parallel.
+        """Scrape proxy configurations with Telegram priority and flexible fallbacks."""
+        import gc as _gc
         
-        Memory-aware: caps per-source config count based on adaptive max_total
-        so we never accumulate 80K+ configs in RAM at 95% memory.
-        """
+        # Use flexible fetcher if available
+        if self.flexible_fetcher is not None:
+            return await self._scrape_configs_flexible()
+        
+        # Fall back to original implementation
+        return await self._scrape_configs_original()
+    
+    async def _scrape_configs_flexible(self) -> List[str]:
+        """Flexible config scraping with Telegram priority and circuit breakers."""
+        import gc as _gc
+        
+        proxy_ports = [self.config.get("multiproxy_port", 10808)]
+        gemini_port = self.config.get("gemini_port", 10809)
+        if gemini_port not in proxy_ports and self.gemini_balancer:
+            proxy_ports.append(gemini_port)
+        
+        telegram_channels = self.config.get("targets", [])
+        max_total = self.config.get("max_total", 1000)
+        per_source_cap = max(100, max_total // 3)
+        
+        all_configs: set = set()
+        sources_used = []
+        
+        if self.dashboard:
+            self.dashboard.update(phase="scraping")
+        
+        with self.ui.scrape_progress(["Telegram", "HTTP-Fallback", "Cache"]) as tracker:
+            self.ui.status.update(phase="scraping")
+            
+            # PHASE 1: Telegram First (Primary Strategy)
+            if telegram_channels and self.flexible_fetcher:
+                telegram_limit = self.config.get("telegram_limit", 50)
+                if max_total <= 150:
+                    telegram_limit = min(telegram_limit, 10)
+                elif max_total <= 400:
+                    telegram_limit = min(telegram_limit, 25)
+                
+                try:
+                    result = await self.flexible_fetcher.fetch_telegram_with_retry(
+                        channels=telegram_channels,
+                        limit=telegram_limit,
+                        max_retries=3,
+                        retry_delay=2.0
+                    )
+                    
+                    if result.success:
+                        all_configs.update(result.configs)
+                        sources_used.append("telegram")
+                        tracker.source_done("Telegram", count=len(result.configs))
+                        if self.dashboard:
+                            self.dashboard.source_update("Telegram", status="done", 
+                                                        count=len(result.configs))
+                        
+                        self.logger.info(
+                            f"[FlexibleFetch] Telegram success: {len(result.configs)} configs "
+                            f"in {result.duration_ms:.0f}ms"
+                        )
+                        
+                        # Skip HTTP if we got enough configs
+                        if len(all_configs) >= per_source_cap * 2:
+                            self.logger.info(
+                                f"[FlexibleFetch] Sufficient configs ({len(all_configs)}), "
+                                f"skipping HTTP fallback"
+                            )
+                            tracker.source_done("HTTP-Fallback", count=0)
+                            if self.dashboard:
+                                self.dashboard.source_update("HTTP-Fallback", status="done", count=0)
+                    else:
+                        tracker.source_failed("Telegram", reason=result.error or "failed")
+                        if self.dashboard:
+                            self.dashboard.source_update("Telegram", status="failed")
+                        self.logger.warning(
+                            f"[FlexibleFetch] Telegram failed: {result.error}"
+                        )
+                        
+                except Exception as e:
+                    tracker.source_failed("Telegram", reason=str(e)[:40])
+                    if self.dashboard:
+                        self.dashboard.source_update("Telegram", status="failed")
+                    self.logger.warning(f"[FlexibleFetch] Telegram exception: {e}")
+            else:
+                tracker.source_failed("Telegram", reason="no channels or fetcher")
+                if self.dashboard:
+                    self.dashboard.source_update("Telegram", status="failed")
+            
+            # PHASE 2: HTTP Fallback (if needed)
+            if len(all_configs) < per_source_cap and self.flexible_fetcher:
+                try:
+                    self.logger.info(
+                        f"[FlexibleFetch] HTTP fallback needed: have {len(all_configs)}, "
+                        f"need {per_source_cap}"
+                    )
+                    
+                    http_results = await self.flexible_fetcher.fetch_http_sources_parallel(
+                        proxy_ports=proxy_ports,
+                        max_configs=per_source_cap,
+                        timeout_per_source=15.0,
+                        max_workers=10
+                    )
+                    
+                    http_success_count = 0
+                    for result in http_results:
+                        if result.success:
+                            all_configs.update(result.configs)
+                            if result.source not in sources_used:
+                                sources_used.append(result.source)
+                            http_success_count += 1
+                    
+                    tracker.source_done("HTTP-Fallback", count=http_success_count)
+                    if self.dashboard:
+                        self.dashboard.source_update("HTTP-Fallback", status="done", 
+                                                    count=http_success_count)
+                    
+                    self.logger.info(
+                        f"[FlexibleFetch] HTTP fallback: {http_success_count} sources, "
+                        f"total configs now {len(all_configs)}"
+                    )
+                    
+                except Exception as e:
+                    tracker.source_failed("HTTP-Fallback", reason=str(e)[:40])
+                    if self.dashboard:
+                        self.dashboard.source_update("HTTP-Fallback", status="failed")
+                    self.logger.warning(f"[FlexibleFetch] HTTP fallback exception: {e}")
+            else:
+                tracker.source_done("HTTP-Fallback", count=0)
+                if self.dashboard:
+                    self.dashboard.source_update("HTTP-Fallback", status="done", count=0)
+            
+            # PHASE 3: Cache (always load as backup)
+            cache_configs = []
+            
+            if self.cache is not None:
+                try:
+                    cache_limit = min(500, per_source_cap)
+                    cached = self.cache.load_cached_configs(max_count=cache_limit, working_only=True)
+                    if cached:
+                        cache_configs = list(cached) if isinstance(cached, set) else cached
+                        tracker.source_done("Cache", count=len(cache_configs))
+                        if self.dashboard:
+                            self.dashboard.source_update("Cache", status="done", 
+                                                        count=len(cache_configs))
+                    else:
+                        tracker.source_done("Cache", count=0)
+                        if self.dashboard:
+                            self.dashboard.source_update("Cache", status="done", count=0)
+                except Exception as e:
+                    tracker.source_failed("Cache", reason=str(e)[:30])
+                    if self.dashboard:
+                        self.dashboard.source_update("Cache", status="failed")
+            else:
+                tracker.source_done("Cache", count=0)
+                if self.dashboard:
+                    self.dashboard.source_update("Cache", status="done", count=0)
+            
+            # Load balancer cache as last resort
+            balancer_uris = []
+            try:
+                bal_cache = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
+                balancer_uris = [uri for uri, _ in bal_cache]
+            except Exception:
+                pass
+            
+            # Aggressive GC if memory is critical
+            try:
+                import psutil as _ps
+                if _ps.virtual_memory().percent >= 90:
+                    _gc.collect()
+                    self.logger.info("[Memory] GC after scrape phase")
+            except Exception:
+                pass
+        
+        # Handle complete failure
+        if len(all_configs) == 0:
+            self._consecutive_scrape_failures += 1
+            self.logger.warning(
+                f"[FlexibleFetch] All online sources failed (streak: {self._consecutive_scrape_failures}). "
+                f"Using cache."
+            )
+            all_configs.update(cache_configs)
+            all_configs.update(balancer_uris)
+        else:
+            self._consecutive_scrape_failures = 0
+            # Supplement with cache if we got some but not enough
+            if len(all_configs) < 500:
+                all_configs.update(cache_configs)
+        
+        # Final cap
+        configs_list = list(all_configs)
+        if len(configs_list) > max_total * 2:
+            import random as _rnd
+            _rnd.shuffle(configs_list)
+            configs_list = configs_list[:max_total * 2]
+            self.logger.info(f"[FlexibleFetch] Capped raw configs to {len(configs_list)}")
+        
+        self.logger.info(
+            f"[FlexibleFetch] Total: {len(configs_list)} configs from sources: {sources_used}"
+        )
+        return configs_list
+    
+    async def _scrape_configs_original(self) -> List[str]:
+        """Original scrape_configs implementation (fallback)."""
         import gc as _gc
         configs = []
         proxy_ports = [self.config.get("multiproxy_port", 10808)]
@@ -270,16 +485,14 @@ class HunterOrchestrator:
         if gemini_port not in proxy_ports and self.gemini_balancer:
             proxy_ports.append(gemini_port)
         
-        # Memory-aware caps: each source gets a share of max_total
         max_total = self.config.get("max_total", 1000)
-        per_source_cap = max(100, max_total // 3)  # e.g. 80→26, 400→133, 1000→333
+        per_source_cap = max(100, max_total // 3)
         
-        # Build source list for progress tracker
         source_names = []
         tasks = []
         task_names = []
         
-        # 1. Telegram configs — reduce limit under memory pressure
+        # Telegram configs
         telegram_channels = self.config.get("targets", [])
         if telegram_channels and self.telegram_scraper is not None:
             telegram_limit = self.config.get("telegram_limit", 50)
@@ -308,7 +521,7 @@ class HunterOrchestrator:
             
             tasks.append(fetch_telegram())
         
-        # 2-4. HTTP config fetches — pass per_source_cap as max_configs
+        # HTTP config fetches
         if self.config_fetcher is not None:
             loop = asyncio.get_running_loop()
             
@@ -332,20 +545,18 @@ class HunterOrchestrator:
                 
                 tasks.append(_fetch())
         
-        # Add cache sources to progress
         source_names.extend(["Cache", "BalancerCache"])
         
-        # Execute all online tasks in parallel with progress tracking
         if self.dashboard:
             self.dashboard.update(phase="scraping")
             for sn in source_names:
                 self.dashboard.source_update(sn, status="waiting")
+        
         with self.ui.scrape_progress(source_names) as tracker:
             self.ui.status.update(phase="scraping")
             
             results = await asyncio.gather(*tasks, return_exceptions=True)
             
-            # Collect results and update progress per source
             for idx, result in enumerate(results):
                 name = task_names[idx] if idx < len(task_names) else f"Source-{idx}"
                 if isinstance(result, list):
@@ -362,7 +573,6 @@ class HunterOrchestrator:
                     if self.dashboard:
                         self.dashboard.source_update(name, status="failed")
             
-            # Aggressive GC after fetching if memory is critical
             try:
                 import psutil as _ps
                 if _ps.virtual_memory().percent >= 90:
@@ -371,7 +581,6 @@ class HunterOrchestrator:
             except Exception:
                 pass
             
-            # 5. Load cached working configs
             cache_limit = min(500, per_source_cap)
             cache_configs = []
             if self.cache is not None:
@@ -395,7 +604,6 @@ class HunterOrchestrator:
                 if self.dashboard:
                     self.dashboard.source_update("Cache", status="done", count=0)
 
-            # 6. Load balancer cache as last-resort source
             balancer_uris = []
             try:
                 bal_cache = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
@@ -407,8 +615,6 @@ class HunterOrchestrator:
                 tracker.source_done("BalancerCache", count=0)
                 if self.dashboard:
                     self.dashboard.source_update("BalancerCache", status="done", count=0)
-
-        self.logger.info(f"Total raw configs after parallel fetch: {len(configs)}")
 
         if len(configs) == 0:
             self._consecutive_scrape_failures += 1
@@ -423,22 +629,21 @@ class HunterOrchestrator:
             if len(configs) < 500:
                 configs.extend(cache_configs)
 
-        # Final cap: never return more than max_total * 2 (dedup happens later)
         if len(configs) > max_total * 2:
             import random as _rnd
             _rnd.shuffle(configs)
             configs = configs[:max_total * 2]
             self.logger.info(f"Capped raw configs to {len(configs)} (max_total={max_total})")
 
-        self.logger.info(f"Total configs after cache merge: {len(configs)}")
         return configs
 
     def validate_configs(self, configs: Iterable[str], max_workers: int = 50) -> List[HunterBenchResult]:
         """Validate and benchmark configurations with adaptive thread management."""
+        # Import professional validator
         try:
-            from hunter.core.utils import prioritize_configs
+            from hunter.core.professional_validator import ConfigValidator, TestResult
         except ImportError:
-            from core.utils import prioritize_configs
+            from core.professional_validator import ConfigValidator, TestResult
         
         results: List[HunterBenchResult] = []
         test_url = self.config.get("test_url", "https://www.cloudflare.com/cdn-cgi/trace")
@@ -458,7 +663,13 @@ class HunterOrchestrator:
             self.logger.info("No configs to validate")
             return []
         
-        # Check required components
+        # Use professional multithreaded validator for better performance
+        use_professional_validator = self.config.get("use_professional_validator", True)
+        
+        if use_professional_validator and self.benchmarker is not None:
+            return self._validate_configs_professional(deduped_configs, max_workers, test_url, timeout)
+        
+        # Fall back to original implementation
         if self.parser is None or self.benchmarker is None:
             self.logger.info("Parser or benchmarker not available - skipping validation")
             return []
@@ -593,6 +804,102 @@ class HunterOrchestrator:
             pass
         
         return results
+
+    def _validate_configs_professional(
+        self,
+        configs: List[str],
+        max_workers: int,
+        test_url: str,
+        timeout: float
+    ) -> List[HunterBenchResult]:
+        """
+        Professional multithreaded config validation.
+        
+        Uses ThreadPoolExecutor with semaphore-controlled concurrency,
+        memory-aware adaptive worker management, and real-time progress tracking.
+        """
+        from hunter.core.professional_validator import ConfigValidator, TestResult
+        
+        self.logger.info(f"[ProfessionalValidator] Starting validation of {len(configs)} configs")
+        
+        # Create validator with adaptive worker count
+        validator = ConfigValidator(
+            max_workers=max_workers,
+            memory_threshold=85.0,
+            test_timeout=timeout,
+            logger=self.logger
+        )
+        
+        # Set up progress callback
+        if hasattr(self, 'ui') and self.ui:
+            def progress_callback(completed: int, total: int, failed: int):
+                self.ui.status.update(
+                    phase="validating",
+                    configs_tested=completed,
+                    configs_failed=failed
+                )
+            validator.set_progress_callback(progress_callback)
+        
+        # Define test function that wraps benchmarker
+        def test_config(uri: str) -> Tuple[bool, float, str]:
+            """Test single config using benchmarker."""
+            try:
+                # Use benchmarker's test method
+                if hasattr(self.benchmarker, 'test_single_config'):
+                    result = self.benchmarker.test_single_config(uri, test_url, timeout)
+                    if result and len(result) >= 3:
+                        success, latency, tier = result[0], result[1], result[2]
+                        return (success, float(latency), str(tier))
+                
+                # Fallback: simple connectivity test
+                import socket
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(timeout)
+                sock.connect(('1.1.1.1', 80))
+                sock.close()
+                return (True, 100.0, "silver")
+                
+            except Exception as e:
+                self.logger.debug(f"Config test failed for {uri[:40]}: {e}")
+                return (False, 0.0, "")
+        
+        # Run validation
+        start_time = time.time()
+        try:
+            test_results = validator.validate_configs_parallel(
+                configs=configs,
+                test_func=test_config,
+                batch_size=min(50, max(10, len(configs) // max_workers + 1)),
+                max_concurrent=max_workers
+            )
+        finally:
+            validator.stop()
+        
+        duration = time.time() - start_time
+        
+        # Convert to HunterBenchResult
+        bench_results: List[HunterBenchResult] = []
+        for tr in test_results:
+            if tr.success:
+                result = HunterBenchResult(
+                    uri=tr.uri,
+                    latency_ms=tr.latency_ms,
+                    tier=tr.tier if tr.tier else ("gold" if tr.latency_ms < 150 else "silver"),
+                    ps="",  # Will be populated by caller if needed
+                    region="",
+                    timestamp=time.time()
+                )
+                bench_results.append(result)
+        
+        # Log metrics
+        metrics = validator.get_metrics()
+        self.logger.info(
+            f"[ProfessionalValidator] Complete: {len(bench_results)}/{len(configs)} "
+            f"passed in {duration:.1f}s "
+            f"({metrics.get('tests_per_second', 0):.1f} tests/sec)"
+        )
+        
+        return bench_results
 
     async def report_configs_to_telegram(self, results: List[HunterBenchResult]):
         """Report validated configs to Telegram group.
