@@ -27,7 +27,13 @@ from dataclasses import dataclass
 from queue import Queue, Empty
 import socket
 import ssl
-from concurrent.futures import ThreadPoolExecutor
+try:
+    from hunter.core.task_manager import HunterTaskManager
+except ImportError:
+    try:
+        from core.task_manager import HunterTaskManager
+    except ImportError:
+        HunterTaskManager = None
 import hashlib
 import json
 from pathlib import Path
@@ -393,7 +399,8 @@ class AdversarialDPIExhaustionEngine:
     async def _send_stress_pattern_async(self, pattern: bytes):
         """Send stress pattern asynchronously."""
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._send_stress_pattern, pattern)
+        _pool = HunterTaskManager.get_instance()._io_pool if HunterTaskManager else None
+        await loop.run_in_executor(_pool, self._send_stress_pattern, pattern)
     
     def _generate_noise_packets(self):
         """Generate adversarial noise packets."""
@@ -412,7 +419,8 @@ class AdversarialDPIExhaustionEngine:
     async def _generate_noise_packets_async(self):
         """Generate adversarial noise packets asynchronously."""
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._generate_noise_packets)
+        _pool = HunterTaskManager.get_instance()._io_pool if HunterTaskManager else None
+        await loop.run_in_executor(_pool, self._generate_noise_packets)
     
     def _send_noise_packet(self, data: bytes):
         """Send noise packet to random target."""
@@ -439,7 +447,8 @@ class AdversarialDPIExhaustionEngine:
     async def _rotate_sni_async(self):
         """Rotate SNI asynchronously."""
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._rotate_sni)
+        _pool = HunterTaskManager.get_instance()._io_pool if HunterTaskManager else None
+        await loop.run_in_executor(_pool, self._rotate_sni)
     
     def _get_random_iranian_ip(self) -> str:
         """Get random Iranian IP address."""
@@ -479,7 +488,8 @@ class AdversarialDPIExhaustionEngine:
     async def _update_metrics_async(self):
         """Update metrics asynchronously."""
         loop = asyncio.get_event_loop()
-        await loop.run_in_executor(None, self._update_metrics)
+        _pool = HunterTaskManager.get_instance()._io_pool if HunterTaskManager else None
+        await loop.run_in_executor(_pool, self._update_metrics)
     
     def get_metrics(self) -> ExhaustionMetrics:
         """Get current exhaustion metrics."""

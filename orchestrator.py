@@ -12,7 +12,12 @@ import os
 import sys
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
+
+try:
+    from hunter.core.task_manager import HunterTaskManager
+except ImportError:
+    from core.task_manager import HunterTaskManager
 from queue import SimpleQueue
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
@@ -208,24 +213,14 @@ class HunterOrchestrator:
         
         # DPI Evasion Orchestrator (with strict timeout)
         self.dpi_evasion: Optional[DPIEvasionOrchestrator] = None
+        _task_mgr = HunterTaskManager.get_instance()
         if config.get("dpi_evasion_enabled", True) and DPIEvasionOrchestrator is not None:
             try:
                 self.dpi_evasion = DPIEvasionOrchestrator()
                 
-                # Run start() in a thread with strict 5s timeout
-                dpi_done = threading.Event()
-                def _start_dpi():
-                    try:
-                        self.dpi_evasion.start()
-                    except Exception:
-                        pass
-                    finally:
-                        dpi_done.set()
-                
-                dpi_thread = threading.Thread(target=_start_dpi, daemon=True)
-                dpi_thread.start()
-                
-                if dpi_done.wait(timeout=5.0):
+                # Run start() via shared IO pool with 5s timeout
+                ok = _task_mgr.run_with_timeout(self.dpi_evasion.start, 5.0)
+                if ok is not None:
                     self.logger.info(
                         f"DPI Evasion: strategy={self.dpi_evasion.get_optimal_strategy().value}, "
                         f"network={self.dpi_evasion.state.network_type.value}"
@@ -239,19 +234,8 @@ class HunterOrchestrator:
         # Start stealth engine (if available, with strict timeout)
         if self.stealth_engine is not None:
             try:
-                stealth_done = threading.Event()
-                def _start_stealth():
-                    try:
-                        self.stealth_engine.start()
-                    except Exception:
-                        pass
-                    finally:
-                        stealth_done.set()
-                
-                stealth_thread = threading.Thread(target=_start_stealth, daemon=True)
-                stealth_thread.start()
-                
-                if stealth_done.wait(timeout=5.0):
+                ok = _task_mgr.run_with_timeout(self.stealth_engine.start, 5.0)
+                if ok is not None:
                     self.logger.info("Stealth engine started")
                 else:
                     self.logger.info("Stealth engine: init timed out, continuing without it")
@@ -547,8 +531,9 @@ class HunterOrchestrator:
                 
                 async def _fetch(m=method, n=name, cap=per_source_cap):
                     try:
+                        _mgr = HunterTaskManager.get_instance()
                         result = await loop.run_in_executor(
-                            None, lambda: m(proxy_ports, max_configs=cap)
+                            _mgr._io_pool, lambda: m(proxy_ports, max_configs=cap)
                         )
                         return list(result)[:cap]
                     except Exception as e:

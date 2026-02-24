@@ -1341,50 +1341,28 @@ class BotReporter:
         max_lines: int = 200,
         chat_id: Optional[str] = None,
     ) -> bool:
-        """Send configs as copyable code-block posts + npvt file.
+        """Send configs as files only (no text messages).
 
-        Each post contains up to CONFIGS_PER_POST URIs in a <pre> block.
-        User taps the block → all URIs in that post are copied at once.
+        Sends npvt.txt with all configs and optionally npvt_gemini.txt.
         """
         if not gold_uris:
             return False
 
         uris = gold_uris[:max_lines]
-        batch = self.CONFIGS_PER_POST
-        total_posts = (len(uris) + batch - 1) // batch
 
-        # Try fallback sender first if available
+        # Try fallback sender first if available (just for connectivity, skip summary msg)
         if self.fallback_sender:
             try:
-                # Get configs from fallback sender (set by orchestrator)
                 configs = getattr(self.fallback_sender, 'current_configs', [])
-                
-                # Create summary message
-                import datetime
-                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
-                summary = f"🏆 Hunter — {now}\n\n📊 {len(uris)} validated configs"
-                
-                result = await self.fallback_sender.send_with_fallbacks(summary, configs)
+                result = await self.fallback_sender.send_with_fallbacks(
+                    f"📊 {len(uris)} configs ready", configs
+                )
                 if result.get("ok"):
-                    self.logger.info(f"Configs sent via {result.get('method')}")
-                    # Continue with file sending
-                else:
-                    self.logger.warning(f"Fallback failed: {result.get('error')}")
+                    self.logger.info(f"Fallback connectivity via {result.get('method')}")
             except Exception as e:
                 self.logger.warning(f"Fallback sender error: {e}")
 
         ok = True
-        for idx in range(0, len(uris), batch):
-            chunk = uris[idx : idx + batch]
-            post_num = idx // batch + 1
-            block = "\n".join(chunk)
-            msg = (
-                f"📌 <b>{post_num}/{total_posts}</b>\n"
-                f"<pre>{block}</pre>"
-            )
-            sent = await self.send_message(msg, parse_mode="HTML", chat_id=chat_id)
-            ok = ok and bool(sent)
-            await asyncio.sleep(0.3)
 
         # --- npvt file with ALL configs ---
         content = ("\n".join(uris) + "\n").encode("utf-8", errors="ignore")
@@ -1461,7 +1439,8 @@ class TelegramReporter:
         gemini_uris: Optional[List[str]] = None,
         max_lines: int = 200,
         chat_id: Optional[Any] = None,
-    ) -> None:
+    ) -> bool:
+        """Send configs as files only (no text messages)."""
         if not gold_uris and not gemini_uris:
             return False
 
@@ -1469,17 +1448,6 @@ class TelegramReporter:
 
         uris = (gold_uris or [])[:max_lines]
         if uris:
-            batch = self.CONFIGS_PER_POST
-            total_posts = (len(uris) + batch - 1) // batch
-            for idx in range(0, len(uris), batch):
-                chunk = uris[idx : idx + batch]
-                post_num = idx // batch + 1
-                block = "\n".join(chunk)
-                msg = f"📌 <b>{post_num}/{total_posts}</b>\n<pre>{block}</pre>"
-                sent = await self.scraper.send_report(msg, parse_mode="html", chat_id=chat_id)
-                ok = ok and bool(sent)
-                await asyncio.sleep(0.3)
-
             content = ("\n".join(uris) + "\n").encode("utf-8", errors="ignore")
             sent_file = await self.scraper.send_file(
                 filename="npvt.txt",

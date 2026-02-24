@@ -20,7 +20,10 @@ import time
 import random
 from typing import Dict, List, Optional, Any, Callable
 from dataclasses import dataclass
-from concurrent.futures import ThreadPoolExecutor
+try:
+    from hunter.core.task_manager import HunterTaskManager
+except ImportError:
+    from core.task_manager import HunterTaskManager
 import socket
 import ssl
 import struct
@@ -80,8 +83,9 @@ class StealthObfuscationEngine:
         # Integration layer
         self.integrator = ADEEIntegrator()
         
-        # Background executor
-        self.executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="StealthEngine")
+        # Background executor - use shared CPU pool from HunterTaskManager
+        self._task_mgr = HunterTaskManager.get_instance()
+        self.executor = self._task_mgr._cpu_pool
         
         # State tracking
         self.active_connections = {}
@@ -148,7 +152,7 @@ class StealthObfuscationEngine:
         try:
             self.integrator.shutdown()
             self.adee.stop()
-            self.executor.shutdown(wait=True)
+            # NOTE: executor is a shared pool from HunterTaskManager, do NOT shut it down here
             self.logger.info("StealthObfuscationEngine stopped")
         except Exception as e:
             self.logger.error(f"Error stopping StealthObfuscationEngine: {e}")

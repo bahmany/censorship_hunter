@@ -2,13 +2,14 @@
 Thread Manager - Hardware-aware thread orchestration for Hunter.
 
 Each major operation runs in its own dedicated thread:
-  1. ConfigScannerWorker  – discovers & validates configs every 30 min
-  2. TelegramPublisher    – publishes configs to Telegram every 30 min
-  3. BalancerWorker        – keeps load-balancer alive on 10808 / 10809
-  4. HealthMonitor         – watches RAM / CPU and throttles workers
-  5. Web dashboard         – (managed externally by Flask, listed for status)
+  1. ConfigScannerWorker  - discovers & validates configs every 30 min
+  2. TelegramPublisher    - publishes configs to Telegram every 30 min
+  3. BalancerWorker       - keeps load-balancer alive on 10808 / 10809
+  4. HealthMonitor        - watches RAM / CPU and throttles workers
+  5. Web dashboard        - (managed externally by Flask, listed for status)
 
 All workers respect a global stop event and adapt to hardware limits.
+Hardware detection is delegated to the unified HunterTaskManager.
 """
 
 import asyncio
@@ -23,9 +24,9 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 try:
-    import psutil
+    from hunter.core.task_manager import HunterTaskManager, HardwareSnapshot
 except ImportError:
-    psutil = None
+    from core.task_manager import HunterTaskManager, HardwareSnapshot
 
 
 # ---------------------------------------------------------------------------
@@ -38,75 +39,6 @@ class WorkerState(Enum):
     SLEEPING = "sleeping"
     ERROR = "error"
     STOPPED = "stopped"
-
-
-@dataclass
-class HardwareProfile:
-    """Snapshot of current hardware resources."""
-    cpu_count: int = 4
-    cpu_percent: float = 0.0
-    ram_total_gb: float = 8.0
-    ram_used_gb: float = 4.0
-    ram_percent: float = 50.0
-    # Derived limits
-    max_scan_workers: int = 8
-    max_scan_configs: int = 600
-    scan_chunk_size: int = 50
-    mode: str = "NORMAL"
-
-    @staticmethod
-    def detect() -> "HardwareProfile":
-        """Detect current hardware and compute adaptive limits."""
-        p = HardwareProfile()
-        p.cpu_count = os.cpu_count() or 4
-
-        if psutil:
-            try:
-                mem = psutil.virtual_memory()
-                p.ram_total_gb = mem.total / (1024 ** 3)
-                p.ram_used_gb = mem.used / (1024 ** 3)
-                p.ram_percent = mem.percent
-            except Exception:
-                pass
-            try:
-                p.cpu_percent = psutil.cpu_percent(interval=0.3)
-            except Exception:
-                pass
-
-        # Adaptive limits based on RAM
-        base_workers = max(4, p.cpu_count)
-        if p.ram_percent >= 95:
-            p.max_scan_workers = max(2, base_workers // 4)
-            p.max_scan_configs = 80
-            p.scan_chunk_size = 20
-            p.mode = "ULTRA-MINIMAL"
-        elif p.ram_percent >= 90:
-            p.max_scan_workers = max(4, base_workers // 2)
-            p.max_scan_configs = 150
-            p.scan_chunk_size = 30
-            p.mode = "MINIMAL"
-        elif p.ram_percent >= 85:
-            p.max_scan_workers = max(6, base_workers)
-            p.max_scan_configs = 250
-            p.scan_chunk_size = 40
-            p.mode = "REDUCED"
-        elif p.ram_percent >= 75:
-            p.max_scan_workers = max(8, base_workers + 2)
-            p.max_scan_configs = 400
-            p.scan_chunk_size = 50
-            p.mode = "CONSERVATIVE"
-        elif p.ram_percent >= 60:
-            p.max_scan_workers = max(10, base_workers * 2)
-            p.max_scan_configs = 700
-            p.scan_chunk_size = 50
-            p.mode = "MODERATE"
-        else:
-            p.max_scan_workers = max(12, base_workers * 2)
-            p.max_scan_configs = 1000
-            p.scan_chunk_size = 50
-            p.mode = "NORMAL"
-
-        return p
 
 
 @dataclass
@@ -132,7 +64,7 @@ class BaseWorker:
     name: str = "base"
     interval_seconds: int = 1800  # 30 minutes
 
-    def __init__(self, stop_event: threading.Event, hw_profile_fn: Callable[[], HardwareProfile]):
+    def __init__(self, stop_event: threading.Event, hw_profile_fn: Callable[[], HardwareSnapshot]):
         self.logger = logging.getLogger(f"hunter.worker.{self.name}")
         self._stop = stop_event
         self._hw = hw_profile_fn
@@ -222,15 +154,15 @@ class ConfigScannerWorker(BaseWorker):
     async def execute(self):
         hw = self._hw()
         self.logger.info(
-            f"[Scanner] Starting cycle (mode={hw.mode}, "
-            f"RAM={hw.ram_percent:.0f}%, workers={hw.max_scan_workers})"
+            f"[Scanner] Starting cycle (mode={hw.mode.value}, "
+            f"RAM={hw.ram_percent:.0f}%, workers={hw.io_pool_size})"
         )
-        self.status.extra["mode"] = hw.mode
+        self.status.extra["mode"] = hw.mode.value
         self.status.extra["ram_percent"] = hw.ram_percent
 
-        # Adapt orchestrator config to hardware
-        self.orch.config.set("max_total", hw.max_scan_configs)
-        self.orch.config.set("max_workers", hw.max_scan_workers)
+        # Adapt orchestrator config to hardware via unified snapshot
+        self.orch.config.set("max_total", hw.max_configs)
+        self.orch.config.set("max_workers", hw.io_pool_size)
 
         try:
             ran = await self.orch.run_cycle()
@@ -254,8 +186,8 @@ class ConfigScannerWorker(BaseWorker):
                 f"next in 30 min"
             )
 
-        # Force GC after scan
-        gc.collect()
+        # Trigger pool resize + GC via unified task manager
+        HunterTaskManager.get_instance().maybe_resize()
 
 
 class TelegramPublisherWorker(BaseWorker):
@@ -390,7 +322,7 @@ class BalancerWorker(BaseWorker):
 
 
 class HealthMonitorWorker(BaseWorker):
-    """Monitors system health and triggers GC / throttling."""
+    """Monitors system health via HunterTaskManager."""
     name = "health_monitor"
     interval_seconds = 30  # Check every 30 seconds
 
@@ -401,29 +333,32 @@ class HealthMonitorWorker(BaseWorker):
 
     async def execute(self):
         hw = self._hw()
+        mgr = HunterTaskManager.get_instance()
+
         self.status.extra.update({
             "cpu_count": hw.cpu_count,
             "cpu_percent": hw.cpu_percent,
             "ram_percent": hw.ram_percent,
             "ram_total_gb": round(hw.ram_total_gb, 1),
             "ram_used_gb": round(hw.ram_used_gb, 1),
-            "mode": hw.mode,
+            "mode": hw.mode.value,
             "thread_count": threading.active_count(),
         })
 
-        # Aggressive GC if memory is high
+        # Delegate GC + pool resize to task manager
+        mgr.maybe_resize()
+
         if hw.ram_percent >= 85:
-            gc.collect()
             self._gc_triggered += 1
             self.status.extra["gc_triggered"] = self._gc_triggered
             if hw.ram_percent >= 90:
-                gc.collect(0)
-                gc.collect(1)
-                gc.collect(2)
                 self.logger.warning(
                     f"[Health] RAM critical: {hw.ram_percent:.0f}% "
-                    f"({hw.ram_used_gb:.1f}/{hw.ram_total_gb:.1f} GB) — forced GC"
+                    f"({hw.ram_used_gb:.1f}/{hw.ram_total_gb:.1f} GB)"
                 )
+
+        # Include task manager metrics
+        self.status.extra["task_manager"] = mgr.get_metrics()
 
         # Collect worker statuses
         worker_states = {}
@@ -456,10 +391,9 @@ class ThreadManager:
         self.logger = logging.getLogger("hunter.thread_manager")
         self.orch = orchestrator
         self._stop_event = threading.Event()
-        self._hw_cache: Optional[HardwareProfile] = None
-        self._hw_cache_ts: float = 0.0
+        self._task_mgr = HunterTaskManager.get_instance()
 
-        # Create workers
+        # Create workers - all share hardware snapshot via task manager
         self.scanner = ConfigScannerWorker(orchestrator, self._stop_event, self._get_hw)
         self.telegram = TelegramPublisherWorker(orchestrator, self._stop_event, self._get_hw)
         self.balancer = BalancerWorker(orchestrator, self._stop_event, self._get_hw)
@@ -474,21 +408,17 @@ class ThreadManager:
             self.telegram,
         ]
 
-    def _get_hw(self) -> HardwareProfile:
-        """Cached hardware profile (refreshed every 10s)."""
-        now = time.time()
-        if self._hw_cache is None or (now - self._hw_cache_ts) > 10:
-            self._hw_cache = HardwareProfile.detect()
-            self._hw_cache_ts = now
-        return self._hw_cache
+    def _get_hw(self) -> HardwareSnapshot:
+        """Delegate to HunterTaskManager's cached hardware snapshot."""
+        return self._task_mgr.get_hardware()
 
     def start_all(self):
         """Start all worker threads."""
         hw = self._get_hw()
         self.logger.info(
-            f"ThreadManager starting — {hw.cpu_count} CPUs, "
+            f"ThreadManager starting - {hw.cpu_count} CPUs, "
             f"{hw.ram_total_gb:.1f} GB RAM ({hw.ram_percent:.0f}% used), "
-            f"mode={hw.mode}"
+            f"mode={hw.mode.value}"
         )
         for w in self._workers:
             try:
@@ -499,21 +429,26 @@ class ThreadManager:
         self.logger.info(f"All {len(self._workers)} workers started")
 
     def stop_all(self, timeout: float = 15.0):
-        """Graceful shutdown of all workers."""
+        """Graceful shutdown of all workers and shared pools."""
         self.logger.info("ThreadManager: stopping all workers...")
         self._stop_event.set()
 
-        # Join all threads
         for w in self._workers:
             try:
                 w.join(timeout=timeout / len(self._workers))
             except Exception:
                 pass
 
+        # Shutdown the shared task manager pools
+        try:
+            self._task_mgr.shutdown(wait=True, timeout=5.0)
+        except Exception:
+            pass
+
         self.logger.info("ThreadManager: all workers stopped")
 
     def get_status(self) -> Dict[str, Any]:
-        """Get status of all workers."""
+        """Get status of all workers + task manager metrics."""
         hw = self._get_hw()
         result = {
             "hardware": {
@@ -522,9 +457,10 @@ class ThreadManager:
                 "ram_total_gb": round(hw.ram_total_gb, 1),
                 "ram_used_gb": round(hw.ram_used_gb, 1),
                 "ram_percent": round(hw.ram_percent, 1),
-                "mode": hw.mode,
+                "mode": hw.mode.value,
                 "thread_count": threading.active_count(),
             },
+            "task_manager": self._task_mgr.get_metrics(),
             "workers": {},
         }
         for w in self._workers:

@@ -17,14 +17,13 @@ sys.path.insert(0, str(project_root))
 
 # Import required modules (with fallbacks)
 try:
-    from performance.adaptive_thread_manager import AdaptiveThreadPool, create_optimized_validator
+    from core.task_manager import HunterTaskManager
     from testing.benchmark import ProxyBenchmark
     from orchestrator import HunterOrchestrator
     from enhanced_hunter import EnhancedHunter
 except ImportError:
     # Fallback for testing
-    AdaptiveThreadPool = None
-    create_optimized_validator = None
+    HunterTaskManager = None
     ProxyBenchmark = None
     HunterOrchestrator = None
     EnhancedHunter = None

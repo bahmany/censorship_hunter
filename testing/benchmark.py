@@ -24,25 +24,12 @@ import yaml
 try:
     from hunter.core.models import HunterParsedConfig, HunterBenchResult
     from hunter.core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
-    from hunter.performance.adaptive_thread_manager import AdaptiveThreadPool, create_optimized_validator
+    from hunter.core.task_manager import HunterTaskManager
 except ImportError:
     # Fallback for direct execution
-    try:
-        from core.models import HunterParsedConfig, HunterBenchResult
-        from core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
-        from performance.adaptive_thread_manager import AdaptiveThreadPool, create_optimized_validator
-    except ImportError:
-        # Final fallback - define basic classes if imports fail
-        HunterParsedConfig = None
-        HunterBenchResult = None
-        resolve_executable_path = None
-        kill_process_on_port = None
-        tier_for_latency = None
-        resolve_ip = None
-        get_country_code = None
-        get_region = None
-        AdaptiveThreadPool = None
-        create_optimized_validator = None
+    from core.models import HunterParsedConfig, HunterBenchResult
+    from core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
+    from core.task_manager import HunterTaskManager
 
 # Test URLs for connectivity testing
 MULTI_TEST_URLS = [

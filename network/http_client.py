@@ -11,8 +11,13 @@ import random
 import subprocess
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from typing import List, Optional, Set
+
+try:
+    from hunter.core.task_manager import HunterTaskManager
+except ImportError:
+    from core.task_manager import HunterTaskManager
 
 import requests
 import urllib3
@@ -332,140 +337,65 @@ class ConfigFetcher:
         self._record_failure(url)
         return set()
     
-    def _adaptive_workers(self, default: int) -> int:
-        """Return thread count based on memory pressure."""
-        try:
-            import psutil
-            mem = psutil.virtual_memory().percent
-            if mem >= 95:
-                return max(2, default // 5)
-            elif mem >= 90:
-                return max(3, default // 4)
-            elif mem >= 85:
-                return max(4, default // 3)
-            elif mem >= 80:
-                return max(5, default // 2)
-        except Exception:
-            pass
-        return default
+    def _get_task_manager(self) -> HunterTaskManager:
+        """Get the shared HunterTaskManager instance."""
+        return HunterTaskManager.get_instance()
 
-    def fetch_github_configs(self, proxy_ports: List[int], max_workers: int = 10, max_configs: int = 0) -> Set[str]:
-        """Fetch configs from GitHub repos in parallel with proxy fallback."""
+    def _fetch_urls_parallel(self, urls: list, proxy_ports: List[int], timeout_per: int, overall_timeout: float, cap: int, label: str) -> Set[str]:
+        """Shared parallel fetch logic using HunterTaskManager IO pool."""
         configs: Set[str] = set()
-        workers = self._adaptive_workers(max_workers)
-        cap = max_configs if max_configs > 0 else 0
-        
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 7): url for url in GITHUB_REPOS}
-            try:
-                for future in as_completed(futures, timeout=25):
-                    try:
-                        found = future.result(timeout=1)
-                        if found:
-                            if cap > 0 and len(configs) + len(found) > cap:
-                                remaining = cap - len(configs)
-                                configs.update(list(found)[:remaining])
-                            else:
-                                configs.update(found)
-                            if cap > 0 and len(configs) >= cap:
-                                self.logger.info(f"GitHub: hit cap {cap}, stopping early")
-                                for f in futures:
-                                    f.cancel()
-                                break
-                    except Exception:
-                        pass
-            except TimeoutError:
-                self.logger.warning(f"GitHub fetch timeout, got {len(configs)} configs so far")
-                for f in futures:
-                    f.cancel()
+        mgr = self._get_task_manager()
+
+        futures = {mgr.submit_io(self._fetch_single_url, url, proxy_ports, timeout_per): url for url in urls}
+        try:
+            for future in as_completed(futures, timeout=overall_timeout):
+                try:
+                    found = future.result(timeout=1)
+                    if found:
+                        if cap > 0 and len(configs) + len(found) > cap:
+                            remaining = cap - len(configs)
+                            configs.update(list(found)[:remaining])
+                        else:
+                            configs.update(found)
+                        if cap > 0 and len(configs) >= cap:
+                            self.logger.info(f"{label}: hit cap {cap}, stopping early")
+                            for f in futures:
+                                f.cancel()
+                            break
+                except Exception:
+                    pass
+        except TimeoutError:
+            self.logger.warning(f"{label} fetch timeout, got {len(configs)} configs so far")
+            for f in futures:
+                f.cancel()
+
         if cap > 0 and len(configs) > cap:
             configs = set(list(configs)[:cap])
         return configs
+
+    def fetch_github_configs(self, proxy_ports: List[int], max_workers: int = 10, max_configs: int = 0) -> Set[str]:
+        """Fetch configs from GitHub repos in parallel with proxy fallback."""
+        cap = max_configs if max_configs > 0 else 0
+        return self._fetch_urls_parallel(GITHUB_REPOS, proxy_ports, 7, 25.0, cap, "GitHub")
     
     def fetch_anti_censorship_configs(self, proxy_ports: List[int], max_workers: int = 10, max_configs: int = 0) -> Set[str]:
         """Fetch configs from anti-censorship sources."""
-        configs: Set[str] = set()
-        workers = self._adaptive_workers(max_workers)
         cap = max_configs if max_configs > 0 else 0
-        self.logger.info(f"Fetching from {len(ANTI_CENSORSHIP_SOURCES)} anti-censorship sources ({workers} workers, cap={cap})...")
-        
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 9): url for url in ANTI_CENSORSHIP_SOURCES}
-            try:
-                for future in as_completed(futures, timeout=25):
-                    try:
-                        found = future.result(timeout=1)
-                        if found:
-                            if cap > 0 and len(configs) + len(found) > cap:
-                                remaining = cap - len(configs)
-                                configs.update(list(found)[:remaining])
-                            else:
-                                configs.update(found)
-                            if cap > 0 and len(configs) >= cap:
-                                self.logger.info(f"Anti-censorship: hit cap {cap}, stopping early")
-                                for f in futures:
-                                    f.cancel()
-                                break
-                    except Exception:
-                        pass
-            except TimeoutError:
-                self.logger.warning(f"Anti-censorship fetch timeout, got {len(configs)} configs so far")
-                for f in futures:
-                    f.cancel()
-        
-        if cap > 0 and len(configs) > cap:
-            configs = set(list(configs)[:cap])
+        self.logger.info(f"Fetching from {len(ANTI_CENSORSHIP_SOURCES)} anti-censorship sources (cap={cap})...")
+        configs = self._fetch_urls_parallel(ANTI_CENSORSHIP_SOURCES, proxy_ports, 9, 25.0, cap, "Anti-censorship")
         if configs:
             self.logger.info(f"Anti-censorship sources provided {len(configs)} configs")
         return configs
     
     def fetch_iran_priority_configs(self, proxy_ports: List[int], max_workers: int = 8, max_configs: int = 0) -> Set[str]:
         """Fetch configs from Iran priority sources (Reality-focused)."""
-        configs: Set[str] = set()
-        workers = self._adaptive_workers(max_workers)
         cap = max_configs if max_configs > 0 else 0
-        self.logger.info(f"Fetching from {len(IRAN_PRIORITY_SOURCES)} Iran priority sources ({workers} workers, cap={cap})...")
-        
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 10): url for url in IRAN_PRIORITY_SOURCES}
-            try:
-                for future in as_completed(futures, timeout=25):
-                    try:
-                        found = future.result(timeout=1)
-                        if found:
-                            if cap > 0 and len(configs) + len(found) > cap:
-                                remaining = cap - len(configs)
-                                configs.update(list(found)[:remaining])
-                            else:
-                                configs.update(found)
-                            if cap > 0 and len(configs) >= cap:
-                                self.logger.info(f"Iran priority: hit cap {cap}, stopping early")
-                                for f in futures:
-                                    f.cancel()
-                                break
-                    except Exception:
-                        pass
-            except TimeoutError:
-                self.logger.warning(f"Iran priority fetch timeout, got {len(configs)} configs so far")
-                for f in futures:
-                    f.cancel()
-        
-        if cap > 0 and len(configs) > cap:
-            configs = set(list(configs)[:cap])
+        self.logger.info(f"Fetching from {len(IRAN_PRIORITY_SOURCES)} Iran priority sources (cap={cap})...")
+        configs = self._fetch_urls_parallel(IRAN_PRIORITY_SOURCES, proxy_ports, 10, 25.0, cap, "Iran priority")
         if configs:
             self.logger.info(f"Iran priority sources provided {len(configs)} configs (Reality-focused)")
         return configs
     
     def fetch_napsterv_configs(self, proxy_ports: List[int]) -> Set[str]:
         """Fetch configs from NapsternetV subscription URLs."""
-        configs = set()
-        with ThreadPoolExecutor(max_workers=8) as executor:
-            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 12): url for url in NAPSTERV_SUBSCRIPTION_URLS}
-            for future in as_completed(futures, timeout=45):
-                try:
-                    found = future.result()
-                    if found:
-                        configs.update(found)
-                except Exception:
-                    pass
-        return configs
+        return self._fetch_urls_parallel(NAPSTERV_SUBSCRIPTION_URLS, proxy_ports, 12, 45.0, 0, "NapsterV")

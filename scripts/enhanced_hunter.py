@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 import threading
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import as_completed
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 from urllib.parse import parse_qs, unquote, urlparse
@@ -34,8 +34,8 @@ from urllib3.util.retry import Retry
 from urllib3.contrib.socks import SOCKSProxyManager
 from colorama import Fore, Style, init
 
-# Import adaptive thread management
-from hunter.performance.adaptive_thread_manager import AdaptiveThreadPool, create_optimized_validator
+# Import unified task manager (replaces deleted adaptive_thread_manager)
+from hunter.core.task_manager import HunterTaskManager
 from hunter.testing.benchmark import ProxyBenchmark
 from hunter.core.config import HunterConfig
 from hunter.orchestrator import HunterOrchestrator
@@ -295,8 +295,8 @@ def _is_tor_running() -> bool:
 class EnhancedConfigFetcher:
     """Enhanced config fetcher with adaptive thread management"""
     
-    def __init__(self, thread_pool: AdaptiveThreadPool):
-        self.thread_pool = thread_pool
+    def __init__(self, task_mgr: HunterTaskManager):
+        self._task_mgr = task_mgr
         self.logger = logging.getLogger(__name__ + ".EnhancedConfigFetcher")
     
     def fetch_single_url(self, url: str, proxy_ports: List[int], timeout: int = 8) -> Set[str]:
@@ -348,7 +348,7 @@ class EnhancedConfigFetcher:
         # Submit fetch tasks to thread pool
         futures = []
         for url in GITHUB_REPOS:
-            future = self.thread_pool.submit(self.fetch_single_url, url, proxy_ports, 10)
+            future = self._task_mgr.submit_io(self.fetch_single_url, url, proxy_ports, 10)
             futures.append(future)
         
         # Collect results
@@ -370,7 +370,7 @@ class EnhancedConfigFetcher:
         # Submit fetch tasks to thread pool
         futures = []
         for url in ANTI_CENSORSHIP_SOURCES:
-            future = self.thread_pool.submit(self.fetch_single_url, url, proxy_ports, 15)
+            future = self._task_mgr.submit_io(self.fetch_single_url, url, proxy_ports, 15)
             futures.append(future)
         
         # Collect results
@@ -392,18 +392,11 @@ class EnhancedHunter:
     def __init__(self):
         self.logger = logging.getLogger(__name__ + ".EnhancedHunter")
         
-        # Initialize adaptive thread pool
-        self.thread_pool = AdaptiveThreadPool(
-            min_threads=8,
-            max_threads=32,
-            target_cpu_utilization=0.85,
-            target_queue_size=200,
-            enable_work_stealing=True,
-            enable_cpu_affinity=False
-        )
+        # Initialize unified task manager (replaces AdaptiveThreadPool)
+        self._task_mgr = HunterTaskManager.get_instance()
         
         # Initialize components
-        self.config_fetcher = EnhancedConfigFetcher(self.thread_pool)
+        self.config_fetcher = EnhancedConfigFetcher(self._task_mgr)
         self.benchmarker = ProxyBenchmark()
         self.orchestrator = HunterOrchestrator()
         
@@ -424,7 +417,6 @@ class EnhancedHunter:
     
     def start(self):
         """Start the enhanced hunter"""
-        self.thread_pool.start()
         self.benchmarker.start_thread_pool()
         
         if self.stealth_engine:
@@ -434,7 +426,7 @@ class EnhancedHunter:
     
     def stop(self):
         """Stop the enhanced hunter"""
-        self.thread_pool.stop()
+        self._task_mgr.shutdown()
         self.benchmarker.stop_thread_pool()
         
         if self.stealth_engine:
@@ -443,12 +435,8 @@ class EnhancedHunter:
         self.logger.info("Enhanced Hunter stopped")
     
     def fetch_all_configs(self, proxy_ports: List[int]) -> Set[str]:
-        """Fetch configs from all sources using adaptive thread management"""
+        """Fetch configs from all sources using unified task manager"""
         all_configs = set()
-        
-        # Start thread pool if not running
-        if not self.thread_pool.running:
-            self.thread_pool.start()
         
         # Fetch from GitHub repos
         self.logger.info("Fetching configs from GitHub repos...")
@@ -490,22 +478,13 @@ class EnhancedHunter:
     
     def get_performance_metrics(self) -> Dict[str, Any]:
         """Get comprehensive performance metrics"""
-        thread_metrics = self.thread_pool.get_metrics()
+        task_metrics = self._task_mgr.get_metrics()
         benchmark_metrics = self.benchmarker.get_performance_metrics()
         
         elapsed_time = time.time() - self.start_time
         
         return {
-            "thread_pool": {
-                "total_tasks": thread_metrics.total_tasks,
-                "completed_tasks": thread_metrics.completed_tasks,
-                "failed_tasks": thread_metrics.failed_tasks,
-                "tasks_per_second": thread_metrics.tasks_per_second,
-                "cpu_utilization": thread_metrics.cpu_utilization,
-                "memory_utilization": thread_metrics.memory_utilization,
-                "thread_utilization": thread_metrics.thread_utilization,
-                "queue_size": thread_metrics.queue_size
-            },
+            "task_manager": task_metrics,
             "benchmark": benchmark_metrics.get("thread_pool_metrics", {}),
             "hunter": {
                 "total_configs_processed": self.total_configs_processed,
@@ -699,11 +678,10 @@ async def run_enhanced_hunter():
             
             # Log performance metrics
             metrics = results['performance_metrics']
+            tm = metrics.get('task_manager', {})
             logger.info(f"Performance Metrics:")
-            logger.info(f"  Tasks/sec: {metrics['thread_pool']['tasks_per_second']:.1f}")
-            logger.info(f"  CPU utilization: {metrics['thread_pool']['cpu_utilization']:.1f}%")
-            logger.info(f"  Memory utilization: {metrics['thread_pool']['memory_utilization']:.1f}%")
-            logger.info(f"  Thread utilization: {metrics['thread_pool']['thread_utilization']:.1f}%")
+            logger.info(f"  IO submitted: {tm.get('io_submitted', 0)}, completed: {tm.get('io_completed', 0)}, failed: {tm.get('io_failed', 0)}")
+            logger.info(f"  Mode: {tm.get('mode', '?')}, RAM: {tm.get('ram_percent', 0):.0f}%")
             logger.info(f"  Configs/sec: {metrics['hunter']['configs_per_second']:.1f}")
             logger.info(f"  Validations/sec: {metrics['hunter']['validations_per_second']:.1f}")
             

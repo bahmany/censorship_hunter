@@ -15,8 +15,12 @@ import random
 from typing import List, Set, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
+
+try:
+    from hunter.core.task_manager import HunterTaskManager
+except ImportError:
+    from core.task_manager import HunterTaskManager
 
 # Import existing components
 try:
@@ -410,11 +414,12 @@ class FlexibleConfigFetcher:
                 )
             
             try:
-                # Run in thread pool
+                # Run in shared IO pool from HunterTaskManager
                 loop = asyncio.get_running_loop()
+                mgr = HunterTaskManager.get_instance()
                 configs = await asyncio.wait_for(
                     loop.run_in_executor(
-                        None,
+                        mgr._io_pool,
                         lambda: method(proxy_ports, max_workers=max_workers, max_configs=max_configs)
                     ),
                     timeout=timeout_per_source

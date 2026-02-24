@@ -1,10 +1,10 @@
 """
 Professional Multithreaded Config Validator
 
-High-performance config testing with:
-- ThreadPoolExecutor with optimized worker count
+High-performance config testing using the unified HunterTaskManager:
+- Shared IO thread pool (no disposable ThreadPoolExecutor per call)
 - Batch processing with semaphore-controlled concurrency
-- Memory-aware adaptive thread management
+- Hardware-aware adaptive thread management via HunterTaskManager
 - Real-time progress tracking
 - Circuit breaker pattern for failing tests
 """
@@ -19,6 +19,11 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Any
 import queue
 
+try:
+    from hunter.core.task_manager import HunterTaskManager, CircuitBreaker
+except ImportError:
+    from core.task_manager import HunterTaskManager, CircuitBreaker
+
 
 @dataclass
 class TestResult:
@@ -29,44 +34,6 @@ class TestResult:
     tier: str = ""
     error: str = ""
     test_duration_ms: float = 0
-
-
-class CircuitBreaker:
-    """Circuit breaker for test failures."""
-    
-    def __init__(self, threshold: int = 5, reset_timeout: float = 60.0):
-        self.threshold = threshold
-        self.reset_timeout = reset_timeout
-        self.failures = 0
-        self.last_failure_time: Optional[float] = None
-        self.is_open = False
-        self._lock = threading.Lock()
-    
-    def record_success(self):
-        with self._lock:
-            self.failures = 0
-            self.is_open = False
-    
-    def record_failure(self) -> bool:
-        """Record failure. Returns True if circuit is now open."""
-        with self._lock:
-            self.failures += 1
-            self.last_failure_time = time.time()
-            if self.failures >= self.threshold:
-                self.is_open = True
-                return True
-            return False
-    
-    def can_execute(self) -> bool:
-        with self._lock:
-            if not self.is_open:
-                return True
-            # Check if reset timeout has passed
-            if self.last_failure_time and (time.time() - self.last_failure_time) > self.reset_timeout:
-                self.failures = 0
-                self.is_open = False
-                return True
-            return False
 
 
 class ConfigValidator:
@@ -92,17 +59,11 @@ class ConfigValidator:
         self.memory_threshold = memory_threshold
         self.test_timeout = test_timeout
         
-        # Adaptive worker count
-        cpu_cores = self._get_cpu_cores()
-        self.max_workers = max_workers or min(32, max(4, cpu_cores * 2))
+        # Use shared task manager instead of private ThreadPoolExecutor
+        self._task_mgr = HunterTaskManager.get_instance()
+        hw = self._task_mgr.get_hardware()
+        self.max_workers = max_workers or hw.io_pool_size
         self._adaptive_workers = self.max_workers
-        
-        # Thread pool
-        self._executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
-        self._executor_lock = threading.Lock()
-        
-        # Circuit breakers for different test types
-        self._circuit_breakers: Dict[str, CircuitBreaker] = {}
         
         # Metrics
         self._metrics = {
@@ -120,68 +81,38 @@ class ConfigValidator:
         # Semaphore for concurrency control
         self._semaphore: Optional[threading.Semaphore] = None
         
-    def _get_cpu_cores(self) -> int:
-        """Get number of CPU cores."""
-        try:
-            return len(os.sched_getaffinity(0))
-        except Exception:
-            return os.cpu_count() or 4
-    
     def set_progress_callback(self, callback: Callable[[int, int, int], None]):
         """Set callback for progress updates (completed, total, failed)."""
         self._progress_callback = callback
     
     def start(self):
-        """Initialize the thread pool."""
-        with self._executor_lock:
-            if self._executor is None:
-                self._executor = concurrent.futures.ThreadPoolExecutor(
-                    max_workers=self._adaptive_workers,
-                    thread_name_prefix="config-validator-"
-                )
-                self._semaphore = threading.Semaphore(self._adaptive_workers)
-                self.logger.info(
-                    f"ConfigValidator started with {self._adaptive_workers} workers"
-                )
+        """Initialize validator (pool is managed by HunterTaskManager)."""
+        hw = self._task_mgr.get_hardware()
+        self._adaptive_workers = hw.io_pool_size
+        self._semaphore = threading.Semaphore(self._adaptive_workers)
+        self.logger.info(
+            f"ConfigValidator started (shared pool, {self._adaptive_workers} workers)"
+        )
     
     def stop(self):
-        """Shutdown the thread pool."""
-        with self._executor_lock:
-            if self._executor:
-                self._executor.shutdown(wait=True)
-                self._executor = None
-                self._semaphore = None
-                self.logger.info("ConfigValidator stopped")
+        """Cleanup validator state (shared pool is NOT shut down here)."""
+        self._semaphore = None
+        self.logger.info("ConfigValidator stopped")
     
     def _check_memory(self) -> Tuple[bool, float]:
-        """Check memory usage. Returns (ok, percent)."""
-        try:
-            import psutil
-            mem = psutil.virtual_memory()
-            return mem.percent < self.memory_threshold, mem.percent
-        except Exception:
-            return True, 0.0
+        """Check memory usage via HunterTaskManager."""
+        hw = self._task_mgr.get_hardware()
+        return hw.ram_percent < self.memory_threshold, hw.ram_percent
     
     def _update_adaptive_workers(self, memory_percent: float):
-        """Adjust worker count based on memory pressure."""
-        if memory_percent >= 95:
-            target = max(2, self.max_workers // 4)
-        elif memory_percent >= 90:
-            target = max(3, self.max_workers // 3)
-        elif memory_percent >= 80:
-            target = max(4, self.max_workers // 2)
-        else:
-            target = self.max_workers
-        
-        if target != self._adaptive_workers:
-            self._adaptive_workers = target
-            self.logger.info(f"Adaptive workers adjusted to {target} (memory: {memory_percent:.1f}%)")
+        """Trigger task manager pool resize on memory pressure."""
+        self._task_mgr.maybe_resize()
+        hw = self._task_mgr.get_hardware()
+        self._adaptive_workers = hw.io_pool_size
     
     def _get_circuit_breaker(self, test_type: str) -> CircuitBreaker:
-        """Get or create circuit breaker for test type."""
-        if test_type not in self._circuit_breakers:
-            self._circuit_breakers[test_type] = CircuitBreaker(threshold=5)
-        return self._circuit_breakers[test_type]
+        """Get or create circuit breaker for test type via HunterTaskManager."""
+        return self._task_mgr.get_breaker(test_type, threshold=5, reset_s=60.0)
     
     def _update_metrics(self, success: bool, latency_ms: float):
         """Update internal metrics."""
@@ -225,7 +156,7 @@ class ConfigValidator:
         Returns:
             List of TestResult objects
         """
-        if not self._executor:
+        if not self._semaphore:
             self.start()
         
         if not configs:
@@ -307,9 +238,9 @@ class ConfigValidator:
                         test_duration_ms=(time.time() - test_start) * 1000
                     )
         
-        # Submit all tasks
+        # Submit all tasks to shared IO pool
         for uri in batch:
-            future = self._executor.submit(test_with_semaphore, uri)
+            future = self._task_mgr.submit_io(test_with_semaphore, uri)
             futures[future] = uri
         
         # Collect results as they complete
@@ -349,8 +280,9 @@ class ConfigValidator:
         thread pool for CPU-bound testing.
         """
         loop = asyncio.get_running_loop()
+        mgr = HunterTaskManager.get_instance()
         return await loop.run_in_executor(
-            None,
+            mgr._io_pool,
             self.validate_configs_parallel,
             configs,
             test_func,
