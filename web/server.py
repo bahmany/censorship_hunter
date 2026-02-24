@@ -497,6 +497,104 @@ def create_app():
             return jsonify({'ok': True, 'count': count, 'message': f'{count} backends set'})
         return jsonify({'ok': False, 'error': 'No valid backends accepted'}), 400
 
+    @app.route('/api/telegram/report-status')
+    def telegram_report_status():
+        """Get Telegram reporting status."""
+        status = {
+            'bot_configured': False,
+            'user_configured': False,
+            'last_publish': None,
+            'publish_count': 0
+        }
+        
+        # Check Bot API configuration
+        token = os.environ.get('TOKEN') or os.environ.get('TELEGRAM_BOT_TOKEN')
+        chat_id = os.environ.get('CHAT_ID') or os.environ.get('TELEGRAM_GROUP_ID')
+        if token and chat_id:
+            status['bot_configured'] = True
+            status['bot_token_preview'] = token[:10] + '...' if len(token) > 10 else '***'
+            status['chat_id'] = chat_id
+        
+        # Check user account configuration
+        api_id = os.environ.get('HUNTER_API_ID') or os.environ.get('TELEGRAM_API_ID')
+        api_hash = os.environ.get('HUNTER_API_HASH') or os.environ.get('TELEGRAM_API_HASH')
+        phone = os.environ.get('HUNTER_PHONE') or os.environ.get('TELEGRAM_PHONE')
+        if api_id and api_hash and phone:
+            status['user_configured'] = True
+            status['phone_preview'] = phone[:3] + '***' + phone[-2:] if len(phone) > 5 else '***'
+        
+        # Get orchestrator status
+        if _orchestrator:
+            try:
+                status['last_publish'] = getattr(_orchestrator, '_last_tg_publish_ts', None)
+                status['publish_count'] = getattr(_orchestrator, '_tg_publish_count', 0)
+                status['targets'] = len(getattr(_orchestrator, '_tg_publish_targets', []))
+                
+                # Check if reporters are enabled
+                if getattr(_orchestrator, 'bot_reporter', None):
+                    status['bot_reporter_enabled'] = _orchestrator.bot_reporter.enabled
+                if getattr(_orchestrator, 'telegram_reporter', None):
+                    status['user_reporter_enabled'] = True
+            except Exception as e:
+                status['error'] = str(e)
+        
+        return jsonify(status)
+
+    @app.route('/api/telegram/test-send', methods=['POST'])
+    def telegram_test_send():
+        """Send a test message to Telegram."""
+        data = request.get_json() or {}
+        message = data.get('message', '🧪 Test message from Hunter Dashboard')
+        use_bot = data.get('use_bot', True)  # Default to Bot API
+        
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        
+        result_holder = [None]
+        done = threading.Event()
+        
+        async def _test_send():
+            try:
+                if use_bot:
+                    reporter = getattr(_orchestrator, 'bot_reporter', None)
+                    if not reporter or not reporter.enabled:
+                        result_holder[0] = {'ok': False, 'error': 'Bot reporter not configured'}
+                        return
+                    
+                    success = await reporter.send_message(message)
+                    result_holder[0] = {'ok': success, 'method': 'Bot API'}
+                else:
+                    reporter = getattr(_orchestrator, 'telegram_reporter', None)
+                    if not reporter:
+                        result_holder[0] = {'ok': False, 'error': 'Telegram reporter not available'}
+                        return
+                    
+                    success = await reporter.scraper.send_report(message)
+                    result_holder[0] = {'ok': success, 'method': 'User Account'}
+            except Exception as e:
+                result_holder[0] = {'ok': False, 'error': str(e)}
+            finally:
+                done.set()
+        
+        # Run in background thread
+        threading.Thread(target=_run_async, args=(_test_send,), daemon=True).start()
+        
+        # Wait for result
+        done.wait(timeout=30)
+        if result_holder[0] is None:
+            return jsonify({'ok': False, 'error': 'Test send timed out'}), 504
+        
+        return jsonify(result_holder[0])
+
+    def _run_async(coro):
+        """Run async coroutine in thread."""
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
     # --- Config Categories ---
     @app.route('/api/configs/categories')
     def api_config_categories():
@@ -569,10 +667,7 @@ def create_app():
                 loop.close()
                 done.set()
         threading.Thread(target=_run, daemon=True, name='manual-tg-fetch').start()
-        done.wait(timeout=130)
-        if result_holder[0] is None:
-            return jsonify({'ok': False, 'error': 'Telegram fetch timed out'}), 504
-        return jsonify(result_holder[0])
+        return jsonify({'ok': True, 'message': 'Telegram fetch started in background'})
 
     @app.route('/api/telegram/publish', methods=['POST'])
     def api_telegram_publish():
@@ -592,10 +687,7 @@ def create_app():
                 loop.close()
                 done.set()
         threading.Thread(target=_run, daemon=True, name='manual-tg-publish').start()
-        done.wait(timeout=30)
-        if result_holder[0] is None:
-            return jsonify({'ok': False, 'error': 'Publish timed out'}), 504
-        return jsonify(result_holder[0])
+        return jsonify({'ok': True, 'message': 'Publish started in background'})
 
     # --- Traffic stats ---
     @app.route('/api/traffic')

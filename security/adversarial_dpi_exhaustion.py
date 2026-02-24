@@ -642,7 +642,12 @@ class AdversarialDPIExhaustionEngine:
                     # For CIDR ranges, pick a random IP
                     import ipaddress
                     network = ipaddress.ip_network(range_str)
-                    ip = str(random.choice(list(network.hosts())))
+                    # Convert hosts generator to list to avoid coroutine issues
+                    hosts_list = list(network.hosts())
+                    if hosts_list:
+                        ip = str(random.choice(hosts_list))
+                    else:
+                        continue
                 else:
                     ip = range_str
                 

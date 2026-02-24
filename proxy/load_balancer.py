@@ -427,7 +427,7 @@ class MultiProxyServer:
             if process.poll() is not None:
                 return None
             # Try primary URL, then fallback
-            latency = self._test_port(port, "https://cp.cloudflare.com/", timeout)
+            latency = self._test_port(port, "https://1.1.1.1/cdn-cgi/trace", timeout)
             if not latency:
                 latency = self._test_port(port, "https://www.google.com/generate_204", timeout)
             return latency
@@ -554,7 +554,7 @@ class MultiProxyServer:
             self._stats["health_checks"] += 1
 
             # Test the main balancer port directly (the real health indicator)
-            latency = self._test_port(self.port, "https://cp.cloudflare.com/", 10)
+            latency = self._test_port(self.port, "https://1.1.1.1/cdn-cgi/trace", 10)
             if not latency:
                 latency = self._test_port(self.port, "https://www.google.com/generate_204", 10)
 

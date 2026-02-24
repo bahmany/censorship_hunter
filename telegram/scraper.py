@@ -8,6 +8,7 @@ from channels, and reporting validated results back to Telegram.
 import asyncio
 import logging
 import threading
+import time
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
@@ -754,7 +755,11 @@ class TelegramScraper:
         acquired = self._telegram_lock.acquire(blocking=False)
         if not acquired:
             self.logger.info("Another Telegram operation in progress, waiting...")
+            wait_start = time.time()
             while not self._telegram_lock.acquire(blocking=False):
+                if time.time() - wait_start > 60:
+                    self.logger.warning("Telegram lock wait timeout (60s), skipping scrape")
+                    return set()
                 await asyncio.sleep(0.5)
         
         try:
@@ -769,45 +774,126 @@ class TelegramScraper:
                 return set()
 
         configs: Set[str] = set()
-        consecutive_errors = 0
-        max_consecutive_errors = 3
-        last_flood_wait_seconds = None
-        consecutive_flood_waits = 0
 
-        for channel in channels:
-            # Check connection before each channel (standard pattern from old_hunter)
-            if consecutive_errors >= max_consecutive_errors:
-                self.logger.warning(f"Too many consecutive errors ({consecutive_errors}), stopping scrape")
-                break
-            
-            try:
-                if not self.client.is_connected():
-                    self.logger.warning(f"Connection lost before scraping {channel}")
-                    reconnected = await self.heartbeat.try_reconnect(self.client)
-                    if not reconnected:
-                        break
-            except Exception:
-                pass
-            
-            try:
-                entity = await self.client.get_entity(channel)
+        dialog_entities: Dict[str, Any] = {}
+        try:
+            dialogs = await asyncio.wait_for(self.client.get_dialogs(limit=300), timeout=18)
+            for d in dialogs or []:
+                try:
+                    ent = getattr(d, "entity", None)
+                    uname = getattr(ent, "username", None)
+                    if uname:
+                        dialog_entities[str(uname).lower()] = ent
+                except Exception:
+                    continue
+        except Exception:
+            pass
 
-                fetch_limit = max(1, min(200, int(limit) * 4))
+        try:
+            deadline_s = float(os.getenv("HUNTER_TG_DEADLINE", "90"))
+        except Exception:
+            deadline_s = 90.0
+        deadline_s = max(15.0, min(240.0, deadline_s))
+        started = time.time()
 
-                messages = await self.client(GetHistoryRequest(
-                    peer=entity,
-                    limit=fetch_limit,
-                    offset_date=None,
-                    offset_id=0,
-                    max_id=0,
-                    min_id=0,
-                    add_offset=0,
-                    hash=0
-                ))
+        try:
+            max_concurrent = int(os.getenv("HUNTER_TG_CONCURRENCY", "3"))
+        except Exception:
+            max_concurrent = 3
+        max_concurrent = max(1, min(5, max_concurrent))
+
+        try:
+            target_total = int(os.getenv("HUNTER_TG_MAX_TOTAL", str(int(limit) * min(6, max(1, len(channels))))))
+        except Exception:
+            target_total = int(limit) * 3
+        target_total = max(10, min(800, target_total))
+
+        sem = asyncio.Semaphore(max_concurrent)
+
+        async def _scrape_channel(channel: str) -> Tuple[str, List[str], str, int, str]:
+            async with sem:
+                if not self.client:
+                    return (channel, [], "no_client", 0, "")
+                try:
+                    if not self.client.is_connected():
+                        await self.client.connect()
+                except Exception:
+                    pass
+
+                raw = (channel or "").strip()
+                uname = raw.lstrip("@").strip()
+
+                if uname:
+                    ent = dialog_entities.get(uname.lower())
+                    if ent is not None:
+                        entity = ent
+                    else:
+                        entity = None
+                else:
+                    entity = None
+
+                refs: List[str] = []
+                for r in (raw, uname, f"@{uname}" if uname else "", f"https://t.me/{uname}" if uname else ""):
+                    if r and r not in refs:
+                        refs.append(r)
+
+                entity_err = ""
+
+                if entity is None:
+                    for channel_ref in refs:
+                        try:
+                            entity = await asyncio.wait_for(self.client.get_entity(channel_ref), timeout=12)
+                            entity_err = ""
+                            break
+                        except Exception as e:
+                            entity_err = type(e).__name__
+                            try:
+                                self.logger.debug(f"Telegram get_entity failed for {channel_ref}: {entity_err}: {e}")
+                            except Exception:
+                                pass
+
+                if entity is None:
+                    return (channel, [], "entity_fail", 0, entity_err)
+
+                try:
+                    fetch_limit = int(os.getenv("HUNTER_TG_HISTORY_LIMIT", "50"))
+                except Exception:
+                    fetch_limit = 50
+                fetch_limit = max(10, min(400, fetch_limit))
+
+                try:
+                    messages = await asyncio.wait_for(
+                        self.client(GetHistoryRequest(
+                            peer=entity,
+                            limit=fetch_limit,
+                            offset_date=None,
+                            offset_id=0,
+                            max_id=0,
+                            min_id=0,
+                            add_offset=0,
+                            hash=0
+                        )),
+                        timeout=15
+                    )
+                except FloodWaitError as e:
+                    try:
+                        await asyncio.sleep(min(max(int(e.seconds), 1), 10))
+                    except Exception:
+                        pass
+                    return (channel, [], "flood_wait", 0, "FloodWaitError")
+                except Exception as e:
+                    try:
+                        self.logger.debug(f"Telegram GetHistory failed for {raw}: {type(e).__name__}: {e}")
+                    except Exception:
+                        pass
+                    return (channel, [], "history_fail", 0, type(e).__name__)
 
                 channel_configs: Set[str] = set()
                 channel_configs_ordered: List[str] = []
-                for message in messages.messages:
+                message_list = getattr(messages, "messages", []) or []
+                msg_count = len(message_list)
+
+                for message in message_list:
                     if len(channel_configs) >= limit:
                         break
 
@@ -836,9 +922,13 @@ class TelegramScraper:
                                 or name.endswith(".yml")
                                 or name.endswith(".npvt")
                                 or name.endswith(".npv")
+                                or name.endswith(".nptv")
                             )
                             if is_text:
-                                data = await self.client.download_media(message, file=bytes)
+                                data = await asyncio.wait_for(
+                                    self.client.download_media(message, file=bytes),
+                                    timeout=12,
+                                )
                                 if data:
                                     try:
                                         text = data.decode("utf-8", errors="ignore")
@@ -855,68 +945,109 @@ class TelegramScraper:
                     except Exception:
                         pass
 
-                    if len(channel_configs) >= limit:
-                        break
-
-                configs.update(channel_configs_ordered)
-
-                self.logger.info(f"Scraped {len(channel_configs)} configs from {channel}")
-                consecutive_errors = 0  # Reset on success
-
-            except FloodWaitError as e:
-                self.logger.warning(f"Flood wait on {channel}: {e.seconds}s - skipping channel")
-                # Detect global account-level throttle: same wait time on multiple channels
-                if last_flood_wait_seconds == e.seconds:
-                    consecutive_flood_waits += 1
+                if msg_count <= 0:
+                    status = "empty"
+                elif not channel_configs_ordered:
+                    status = "no_uri"
                 else:
-                    consecutive_flood_waits = 1
-                    last_flood_wait_seconds = e.seconds
-                if consecutive_flood_waits >= 3:
-                    self.logger.warning(
-                        f"Global account flood wait detected ({e.seconds}s on {consecutive_flood_waits} channels) - aborting scrape"
+                    status = "ok"
+
+                return (channel, channel_configs_ordered, status, msg_count, "")
+
+        tasks = []
+        task_to_channel: Dict[asyncio.Task, str] = {}
+        for ch in channels:
+            try:
+                t = asyncio.create_task(_scrape_channel(ch))
+                tasks.append(t)
+                task_to_channel[t] = ch
+            except Exception:
+                continue
+
+        try:
+            stats = {
+                "ok": 0,
+                "no_uri": 0,
+                "empty": 0,
+                "entity_fail": 0,
+                "history_fail": 0,
+                "flood_wait": 0,
+                "no_client": 0,
+                "other": 0,
+            }
+            err_stats: Dict[str, int] = {}
+            remaining = max(5.0, deadline_s - (time.time() - started))
+            try:
+                for t in asyncio.as_completed(tasks, timeout=remaining):
+                    try:
+                        channel, found_list, status, msg_count, err_name = await t
+                        if status in stats:
+                            stats[status] += 1
+                        else:
+                            stats["other"] += 1
+                        if err_name:
+                            err_stats[err_name] = err_stats.get(err_name, 0) + 1
+                        if found_list:
+                            for uri in found_list:
+                                if uri not in configs:
+                                    configs.add(uri)
+                        if status == "entity_fail" and err_name:
+                            self.logger.info(f"Scraped {len(found_list)} configs from {channel} ({err_name})")
+                        else:
+                            self.logger.info(f"Scraped {len(found_list)} configs from {channel}")
+                        if len(configs) >= target_total:
+                            break
+                        if time.time() - started >= deadline_s:
+                            break
+                    except Exception:
+                        continue
+            except asyncio.TimeoutError:
+                pass
+
+            if not configs:
+                try:
+                    top_err = ""
+                    if err_stats:
+                        items = sorted(err_stats.items(), key=lambda kv: kv[1], reverse=True)[:3]
+                        top_err = " ".join([f"{k}:{v}" for k, v in items])
+                    self.logger.info(
+                        "Telegram scrape summary: "
+                        f"ok={stats['ok']} no_uri={stats['no_uri']} empty={stats['empty']} "
+                        f"entity_fail={stats['entity_fail']} history_fail={stats['history_fail']} "
+                        f"flood_wait={stats['flood_wait']}" + (f" errors={top_err}" if top_err else "")
                     )
-                    break
-                if e.seconds > 300:  # > 5 minutes: skip entirely, not worth waiting
-                    continue
-                await asyncio.sleep(min(e.seconds, 60))  # Cap wait at 60s
-            except (ChannelPrivateError, UsernameNotOccupiedError, UsernameInvalidError) as e:
-                self.logger.warning(f"Skipping {channel}: {e}")
-            except Exception as e:
-                error_str = str(e).lower()
-                is_connection_error = (
-                    "disconnected" in error_str or
-                    "connection" in error_str or
-                    "security error" in error_str or
-                    "cancelled" in error_str
-                )
-                
-                if is_connection_error:
-                    consecutive_errors += 1
-                    self.logger.warning(f"Connection error for {channel}: {e}")
-                    # Don't attempt reconnect if SSH tunnel is down - just stop scraping
-                    if consecutive_errors >= 2:
-                        self.logger.warning("Too many connection errors - stopping scrape session")
-                        break
-                    reconnected = await self.heartbeat.try_reconnect(self.client)
-                    if reconnected:
-                        consecutive_errors = 0
-                else:
-                    self.logger.warning(f"Failed to scrape {channel}: {e}")
+                except Exception:
+                    pass
+        finally:
+            for t in tasks:
+                if not t.done():
+                    try:
+                        t.cancel()
+                    except Exception:
+                        pass
+            try:
+                await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception:
+                pass
 
         return configs
 
-    async def send_report(self, report_text: str, parse_mode: Optional[str] = None) -> bool:
+    async def send_report(self, report_text: str, parse_mode: Optional[str] = None, chat_id: Optional[Any] = None) -> bool:
         """Send report to Telegram channel."""
         acquired = self._telegram_lock.acquire(blocking=False)
         if not acquired:
+            wait_start = time.time()
             while not self._telegram_lock.acquire(blocking=False):
+                if time.time() - wait_start > 30:
+                    self.logger.warning("send_report: Telegram lock timeout (30s), skipping")
+                    return False
                 await asyncio.sleep(0.5)
         try:
             if not self.client or not await self.heartbeat.check_connection(self.client):
                 if not await self._connect_inner():
                     return False
 
-            channel = self.config.get("report_channel")
+            channel = chat_id if chat_id is not None else self.config.get("report_channel")
             if not channel:
                 return False
 
@@ -948,18 +1079,22 @@ class TelegramScraper:
         finally:
             self._telegram_lock.release()
 
-    async def send_file(self, filename: str, content: bytes, caption: str = "") -> bool:
+    async def send_file(self, filename: str, content: bytes, caption: str = "", chat_id: Optional[Any] = None) -> bool:
         """Send a file to the Telegram report channel."""
         acquired = self._telegram_lock.acquire(blocking=False)
         if not acquired:
+            wait_start = time.time()
             while not self._telegram_lock.acquire(blocking=False):
+                if time.time() - wait_start > 30:
+                    self.logger.warning("send_file: Telegram lock timeout (30s), skipping")
+                    return False
                 await asyncio.sleep(0.5)
         try:
             if not self.client or not await self.heartbeat.check_connection(self.client):
                 if not await self._connect_inner():
                     return False
 
-            channel = self.config.get("report_channel")
+            channel = chat_id if chat_id is not None else self.config.get("report_channel")
             if not channel:
                 return False
 
@@ -1096,11 +1231,14 @@ class BotReporter:
 
     # ---- public interface (same as TelegramReporter) ----------------------
 
-    async def send_message(self, text: str, parse_mode: str = "Markdown") -> bool:
+    async def send_message(self, text: str, parse_mode: str = "Markdown", chat_id: Optional[str] = None) -> bool:
         if not self.enabled:
             return False
+        target = chat_id or self.chat_id
+        if not target:
+            return False
         result = await self._post_json("sendMessage", {
-            "chat_id": self.chat_id,
+            "chat_id": target,
             "text": text,
             "parse_mode": parse_mode,
         })
@@ -1110,10 +1248,13 @@ class BotReporter:
         return ok
 
     async def send_file(self, filename: str, content: bytes,
-                        caption: str = "") -> bool:
+                        caption: str = "", chat_id: Optional[str] = None) -> bool:
         if not self.enabled:
             return False
-        fields = {"chat_id": self.chat_id}
+        target = chat_id or self.chat_id
+        if not target:
+            return False
+        fields = {"chat_id": target}
         if caption:
             fields["caption"] = caption
         result = await self._post_multipart(
@@ -1128,7 +1269,7 @@ class BotReporter:
 
     CONFIGS_PER_POST = 5  # each Telegram post = 5 URIs (tap to copy)
 
-    async def report_gold_configs(self, configs: List[Dict[str, Any]]):
+    async def report_gold_configs(self, configs: List[Dict[str, Any]], chat_id: Optional[str] = None):
         """Send summary + copyable config batches to Telegram.
 
         Format:
@@ -1157,13 +1298,14 @@ class BotReporter:
         if silver:
             parts.append(f"🥈 {len(silver)} silver")
         summary += f"\n{'  •  '.join(parts)}"
-        await self.send_message(summary)
+        await self.send_message(summary, chat_id=chat_id)
 
     async def report_config_files(
         self,
         gold_uris: List[str],
         gemini_uris: Optional[List[str]] = None,
         max_lines: int = 200,
+        chat_id: Optional[str] = None,
     ) -> bool:
         """Send configs as copyable code-block posts + npvt file.
 
@@ -1186,7 +1328,7 @@ class BotReporter:
                 f"📌 <b>{post_num}/{total_posts}</b>\n"
                 f"<pre>{block}</pre>"
             )
-            sent = await self.send_message(msg, parse_mode="HTML")
+            sent = await self.send_message(msg, parse_mode="HTML", chat_id=chat_id)
             ok = ok and bool(sent)
             await asyncio.sleep(0.3)
 
@@ -1196,6 +1338,7 @@ class BotReporter:
             filename="npvt.txt",
             content=content,
             caption=f"📂 HUNTER npvt — {len(uris)} validated configs",
+            chat_id=chat_id,
         )
         ok = ok and bool(sent_main)
 
@@ -1206,17 +1349,18 @@ class BotReporter:
                 filename="npvt_gemini.txt",
                 content=g_content,
                 caption=f"♊ Gemini — {len(gemini_uris)} configs",
+                chat_id=chat_id,
             )
             ok = ok and bool(sent_g)
 
         return ok
 
-    async def report_status(self, status: Dict[str, Any]):
+    async def report_status(self, status: Dict[str, Any], chat_id: Optional[str] = None):
         report = "📊 *Hunter Status*\n\n"
         report += f"Balancer: {'Running' if status.get('running') else 'Stopped'}\n"
         report += f"Backends: {status.get('backends', 0)}\n"
         report += f"Restarts: {status.get('stats', {}).get('restarts', 0)}\n"
-        await self.send_message(report)
+        await self.send_message(report, chat_id=chat_id)
 
 
 class TelegramReporter:
@@ -1228,7 +1372,7 @@ class TelegramReporter:
 
     CONFIGS_PER_POST = 5
 
-    async def report_gold_configs(self, configs: List[Dict[str, Any]]):
+    async def report_gold_configs(self, configs: List[Dict[str, Any]], chat_id: Optional[Any] = None):
         """Report gold-tier configs to Telegram."""
         if not configs:
             return False
@@ -1251,7 +1395,7 @@ class TelegramReporter:
                 parts.append(f"🥈 {len(silver)} silver")
             if parts:
                 summary += f"\n{'  •  '.join(parts)}"
-            ok = await self.scraper.send_report(summary, parse_mode="html")
+            ok = await self.scraper.send_report(summary, parse_mode="html", chat_id=chat_id)
             return bool(ok)
         except Exception as e:
             self.logger.info(f"Failed to report gold configs to Telegram: {e}")
@@ -1262,6 +1406,7 @@ class TelegramReporter:
         gold_uris: List[str],
         gemini_uris: Optional[List[str]] = None,
         max_lines: int = 200,
+        chat_id: Optional[Any] = None,
     ) -> None:
         if not gold_uris and not gemini_uris:
             return False
@@ -1277,7 +1422,7 @@ class TelegramReporter:
                 post_num = idx // batch + 1
                 block = "\n".join(chunk)
                 msg = f"📌 <b>{post_num}/{total_posts}</b>\n<pre>{block}</pre>"
-                sent = await self.scraper.send_report(msg, parse_mode="html")
+                sent = await self.scraper.send_report(msg, parse_mode="html", chat_id=chat_id)
                 ok = ok and bool(sent)
                 await asyncio.sleep(0.3)
 
@@ -1286,6 +1431,7 @@ class TelegramReporter:
                 filename="npvt.txt",
                 content=content,
                 caption=f"HUNTER npvt — {len(uris)} validated configs",
+                chat_id=chat_id,
             )
             ok = ok and bool(sent_file)
 
@@ -1296,12 +1442,13 @@ class TelegramReporter:
                 filename="npvt_gemini.txt",
                 content=g_content,
                 caption=f"Gemini — {len(g_uris)} configs",
+                chat_id=chat_id,
             )
             ok = ok and bool(sent_g)
 
         return ok
 
-    async def report_status(self, status: Dict[str, Any]):
+    async def report_status(self, status: Dict[str, Any], chat_id: Optional[Any] = None):
         """Report system status to Telegram."""
         report = "📊 **Hunter Status Report**\n\n"
         report += f"Balancer: {'Running' if status.get('running') else 'Stopped'}\n"
@@ -1309,6 +1456,6 @@ class TelegramReporter:
         report += f"Restarts: {status.get('stats', {}).get('restarts', 0)}\n"
 
         try:
-            await self.scraper.send_report(report)
+            await self.scraper.send_report(report, chat_id=chat_id)
         except Exception as e:
             self.logger.debug(f"Failed to report status to Telegram: {e}")

@@ -135,10 +135,10 @@ class FlexibleConfigFetcher:
         
         # Default configuration
         self._default_timeouts = {
-            'telegram_connect': 30,
-            'telegram_fetch': 120,
-            'http_fetch': 15,
-            'circuit_breaker_reset': 300,  # 5 minutes
+            'telegram_connect': 20,
+            'telegram_fetch': 60,
+            'http_fetch': 12,
+            'circuit_breaker_reset': 120,  # 2 minutes
             'circuit_breaker_threshold': 3,
         }
         
@@ -150,6 +150,8 @@ class FlexibleConfigFetcher:
             "proxymtprotoir",
             "Porteqal3",
             "v2ray_configs_pool",
+            "VpnProSec",
+            "proxy_mtm",
             # Secondary channels
             "vmessorg",
             "V2rayNGn",
@@ -284,29 +286,38 @@ class FlexibleConfigFetcher:
         # Sort channels by priority (if known)
         sorted_channels = sorted(
             channels,
-            key=lambda c: self._priority_channels.index(c) 
+            key=lambda c: self._priority_channels.index(c)
             if c in self._priority_channels else 999
         )
-        
+
         for attempt in range(max_retries):
             try:
                 self.logger.info(
                     f"[Telegram] Fetch attempt {attempt + 1}/{max_retries} "
                     f"from {len(sorted_channels)} channels (limit={limit})"
                 )
-                
-                # Try to fetch with timeout
+
+                try:
+                    deadline_s = float(os.getenv("HUNTER_TG_DEADLINE", "90"))
+                except Exception:
+                    deadline_s = 90.0
+                deadline_s = max(15.0, min(240.0, deadline_s))
+                outer_timeout = max(
+                    float(self._default_timeouts.get('telegram_fetch', 60)) + 20.0,
+                    deadline_s + 15.0,
+                )
                 configs = await asyncio.wait_for(
                     self.telegram_scraper.scrape_configs(sorted_channels, limit=limit),
-                    timeout=self._default_timeouts['telegram_fetch']
+                    timeout=outer_timeout,
                 )
-                
+
                 if configs:
                     if isinstance(configs, set):
                         all_configs.update(configs)
                     elif isinstance(configs, list):
                         all_configs.update(configs)
-                    
+                
+                if all_configs:
                     duration_ms = (time.time() - start_time) * 1000
                     
                     self.logger.info(
@@ -404,7 +415,7 @@ class FlexibleConfigFetcher:
                 configs = await asyncio.wait_for(
                     loop.run_in_executor(
                         None,
-                        lambda: method(proxy_ports, max_workers=max_workers//2, max_configs=max_configs)
+                        lambda: method(proxy_ports, max_workers=max_workers, max_configs=max_configs)
                     ),
                     timeout=timeout_per_source
                 )
@@ -511,7 +522,7 @@ class FlexibleConfigFetcher:
             telegram_result = await self.fetch_telegram_with_retry(
                 channels=channels,
                 limit=telegram_limit,
-                max_retries=3
+                max_retries=2
             )
             
             if telegram_result.success:

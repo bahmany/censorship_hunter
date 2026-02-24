@@ -156,7 +156,7 @@ class HTTPClientManager:
             if mem >= 90:
                 pool_conn, pool_max = 3, 5
             elif mem >= 80:
-                pool_conn, pool_max = 5, 10
+                pool_conn, pool_max = 6, 15
             elif mem >= 70:
                 pool_conn, pool_max = 8, 15
             else:
@@ -226,12 +226,35 @@ class ConfigFetcher:
             pass
         return extract_raw_uris_from_text(text)
 
+    def _expand_mirrors(self, url: str) -> List[str]:
+        if not isinstance(url, str) or not url:
+            return []
+        if url.startswith("https://raw.githubusercontent.com/"):
+            return [
+                url,
+                f"https://ghproxy.com/{url}",
+                f"https://ghproxy.net/{url}",
+            ]
+        return [url]
+
     def _is_port_alive(self, port: int) -> bool:
         """Quick check if a local port is accepting TCP connections."""
         import socket
         try:
             with socket.create_connection(("127.0.0.1", port), timeout=1):
                 return True
+        except Exception:
+            return False
+
+    def _is_proxy_fast_enough(self, port: int, max_latency_ms: float = 800) -> bool:
+        """Check if local proxy port responds fast enough to be worth using."""
+        import socket
+        try:
+            t0 = time.time()
+            with socket.create_connection(("127.0.0.1", port), timeout=1):
+                pass
+            latency_ms = (time.time() - t0) * 1000
+            return latency_ms < max_latency_ms
         except Exception:
             return False
 
@@ -243,46 +266,31 @@ class ConfigFetcher:
         session = self.http_manager.get_session()
         headers = {"User-Agent": self.http_manager.random_user_agent()}
         
-        # Try direct first
-        try:
-            resp = session.get(url, headers=headers, timeout=timeout, verify=False)
-            if resp.status_code == 200 and resp.text:
-                found = self._try_decode_and_extract(resp.text)
-                if found:
-                    self._record_success(url)
-                    return found
-        except:
-            pass
-        
-        # Filter to only alive proxy ports to avoid flooding pool with failed connections
-        live_ports = [p for p in proxy_ports[:2] if self._is_port_alive(p)]
-        
-        # Try with SOCKS proxies (use session to stay within pool limits)
-        for proxy_port in live_ports[:1]:
+        for candidate in self._expand_mirrors(url):
             try:
-                proxies = {"http": f"socks5h://127.0.0.1:{proxy_port}", "https": f"socks5h://127.0.0.1:{proxy_port}"}
-                resp = session.get(url, headers=headers, timeout=timeout, verify=False, proxies=proxies)
+                resp = session.get(candidate, headers=headers, timeout=timeout, verify=False)
                 if resp.status_code == 200 and resp.text:
                     found = self._try_decode_and_extract(resp.text)
                     if found:
                         self._record_success(url)
                         return found
-            except:
+            except Exception:
                 continue
         
-        # Try HTTP proxy on port+1 (use session to stay within pool limits)
-        for proxy_port in live_ports[:1]:
-            try:
-                http_port = proxy_port + 100
-                proxies = {"http": f"http://127.0.0.1:{http_port}", "https": f"http://127.0.0.1:{http_port}"}
-                resp = session.get(url, headers=headers, timeout=timeout, verify=False, proxies=proxies)
-                if resp.status_code == 200 and resp.text:
-                    found = self._try_decode_and_extract(resp.text)
-                    if found:
-                        self._record_success(url)
-                        return found
-            except:
-                continue
+        live_ports = [p for p in proxy_ports[:1] if self._is_port_alive(p)]
+        if live_ports and self._is_proxy_fast_enough(live_ports[0]):
+            proxy_port = live_ports[0]
+            proxies = {"http": f"socks5h://127.0.0.1:{proxy_port}", "https": f"socks5h://127.0.0.1:{proxy_port}"}
+            for candidate in self._expand_mirrors(url):
+                try:
+                    resp = session.get(candidate, headers=headers, timeout=min(timeout, 6), verify=False, proxies=proxies)
+                    if resp.status_code == 200 and resp.text:
+                        found = self._try_decode_and_extract(resp.text)
+                        if found:
+                            self._record_success(url)
+                            return found
+                except Exception:
+                    continue
         
         self._record_failure(url)
         return set()
@@ -300,15 +308,7 @@ class ConfigFetcher:
         # Fallback to curl for stubborn URLs
         curl_cmd = "curl.exe" if sys.platform == "win32" else "curl"
         
-        # Build attempt list: direct, then only alive proxy ports
-        attempts = [(None, None)]
-        live_ports = [p for p in proxy_ports[:2] if self._is_port_alive(p)]
-        for p in live_ports[:1]:
-            attempts.append(("socks5", p))
-        for p in live_ports[:1]:
-            attempts.append(("http", p + 100))
-        
-        for proxy_type, proxy_port in attempts:
+        for candidate in self._expand_mirrors(url):
             try:
                 cmd = [
                     curl_cmd,
@@ -317,13 +317,8 @@ class ConfigFetcher:
                     "-k",
                     "--connect-timeout", "4",
                     "-A", self.http_manager.random_user_agent(),
+                    candidate,
                 ]
-                if proxy_type == "socks5":
-                    cmd.extend(["-x", f"socks5://127.0.0.1:{proxy_port}"])
-                elif proxy_type == "http":
-                    cmd.extend(["-x", f"http://127.0.0.1:{proxy_port}"])
-                cmd.append(url)
-                
                 proc_result = subprocess.run(cmd, capture_output=True, timeout=timeout + 2)
                 if proc_result.returncode == 0 and proc_result.stdout:
                     text = proc_result.stdout.decode('utf-8', errors='ignore')
@@ -361,9 +356,9 @@ class ConfigFetcher:
         cap = max_configs if max_configs > 0 else 0
         
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 10): url for url in GITHUB_REPOS}
+            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 7): url for url in GITHUB_REPOS}
             try:
-                for future in as_completed(futures, timeout=90):
+                for future in as_completed(futures, timeout=25):
                     try:
                         found = future.result(timeout=1)
                         if found:
@@ -395,9 +390,9 @@ class ConfigFetcher:
         self.logger.info(f"Fetching from {len(ANTI_CENSORSHIP_SOURCES)} anti-censorship sources ({workers} workers, cap={cap})...")
         
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 15): url for url in ANTI_CENSORSHIP_SOURCES}
+            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 9): url for url in ANTI_CENSORSHIP_SOURCES}
             try:
-                for future in as_completed(futures, timeout=120):
+                for future in as_completed(futures, timeout=25):
                     try:
                         found = future.result(timeout=1)
                         if found:
@@ -432,9 +427,9 @@ class ConfigFetcher:
         self.logger.info(f"Fetching from {len(IRAN_PRIORITY_SOURCES)} Iran priority sources ({workers} workers, cap={cap})...")
         
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 20): url for url in IRAN_PRIORITY_SOURCES}
+            futures = {executor.submit(self._fetch_single_url, url, proxy_ports, 10): url for url in IRAN_PRIORITY_SOURCES}
             try:
-                for future in as_completed(futures, timeout=90):
+                for future in as_completed(futures, timeout=25):
                     try:
                         found = future.result(timeout=1)
                         if found:

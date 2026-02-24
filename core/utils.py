@@ -117,7 +117,10 @@ def random_user_agent() -> str:
 
 def safe_b64decode(data: str) -> bytes:
     """Safely decode base64 data with proper padding."""
-    padded = data + "=" * (-len(data) % 4)
+    if not isinstance(data, str):
+        data = str(data)
+    normalized = data.strip().replace("-", "+").replace("_", "/")
+    padded = normalized + "=" * (-len(normalized) % 4)
     return base64.b64decode(padded)
 
 
@@ -505,13 +508,44 @@ def extract_raw_uris_from_text(text: str) -> Set[str]:
     """Extract proxy URIs from text."""
     if not text:
         return set()
-    
-    import re
-    uris = set()
-    for m in re.finditer(r"(?i)(vmess|vless|trojan|ss|shadowsocks|hysteria2|hy2|tuic)://[^\s\"'<>\[\]]+", text):
-        uri = m.group(0).strip().rstrip(")],.;:!?")
-        if len(uri) > 10:
-            uris.add(uri)
+
+    uris: Set[str] = set()
+
+    def _extract_direct(s: str) -> Set[str]:
+        out: Set[str] = set()
+        for m in re.finditer(r"(?i)(vmess|vless|trojan|ss|shadowsocks|hysteria2|hy2|tuic)://[^\s\"'<>\[\]]+", s):
+            uri = m.group(0).strip().rstrip(")],.;:!?")
+            if len(uri) > 10:
+                out.add(uri)
+        return out
+
+    uris.update(_extract_direct(text))
+    if uris:
+        return uris
+
+    compact = re.sub(r"\s+", "", text)
+
+    if len(compact) >= 120:
+        try:
+            decoded_all = safe_b64decode(compact).decode("utf-8", errors="ignore")
+            if decoded_all and "://" in decoded_all:
+                uris.update(_extract_direct(decoded_all))
+                if uris:
+                    return uris
+        except Exception:
+            pass
+
+    for candidate in re.findall(r"[A-Za-z0-9+/=_-]{80,}", compact)[:25]:
+        try:
+            decoded = safe_b64decode(candidate).decode("utf-8", errors="ignore")
+        except Exception:
+            continue
+        if not decoded or "://" not in decoded:
+            continue
+        uris.update(_extract_direct(decoded))
+        if len(uris) >= 50:
+            break
+
     return uris
 
 

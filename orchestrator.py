@@ -10,6 +10,7 @@ import hashlib
 import logging
 import os
 import sys
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from queue import SimpleQueue
@@ -191,12 +192,24 @@ class HunterOrchestrator:
         self._last_validated_count = 0
         self._consecutive_scrape_failures = 0
         self._last_good_configs: List[Tuple[str, float]] = []
+        self._cycle_lock = threading.Lock()
+        self._tg_publish_lock = threading.Lock()
+        self._tg_publish_task: Optional[asyncio.Task] = None
+        self._last_tg_publish_ts = 0.0
+        try:
+            self._tg_publish_interval_s = int(os.getenv("HUNTER_TELEGRAM_PUBLISH_INTERVAL", "1200"))
+        except Exception:
+            self._tg_publish_interval_s = 1200
+        self._tg_publish_interval_s = max(60, min(24 * 3600, self._tg_publish_interval_s))
+        try:
+            self._last_tg_publish_ts = time.time() - float(self._tg_publish_interval_s)
+        except Exception:
+            self._last_tg_publish_ts = 0.0
         
         # DPI Evasion Orchestrator (with strict timeout)
         self.dpi_evasion: Optional[DPIEvasionOrchestrator] = None
         if config.get("dpi_evasion_enabled", True) and DPIEvasionOrchestrator is not None:
             try:
-                import threading
                 self.dpi_evasion = DPIEvasionOrchestrator()
                 
                 # Run start() in a thread with strict 5s timeout
@@ -226,8 +239,7 @@ class HunterOrchestrator:
         # Start stealth engine (if available, with strict timeout)
         if self.stealth_engine is not None:
             try:
-                import threading as _threading
-                stealth_done = _threading.Event()
+                stealth_done = threading.Event()
                 def _start_stealth():
                     try:
                         self.stealth_engine.start()
@@ -236,7 +248,7 @@ class HunterOrchestrator:
                     finally:
                         stealth_done.set()
                 
-                stealth_thread = _threading.Thread(target=_start_stealth, daemon=True)
+                stealth_thread = threading.Thread(target=_start_stealth, daemon=True)
                 stealth_thread.start()
                 
                 if stealth_done.wait(timeout=5.0):
@@ -318,7 +330,7 @@ class HunterOrchestrator:
                     result = await self.flexible_fetcher.fetch_telegram_with_retry(
                         channels=telegram_channels,
                         limit=telegram_limit,
-                        max_retries=3,
+                        max_retries=2,
                         retry_delay=2.0
                     )
                     
@@ -373,8 +385,8 @@ class HunterOrchestrator:
                     http_results = await self.flexible_fetcher.fetch_http_sources_parallel(
                         proxy_ports=proxy_ports,
                         max_configs=per_source_cap,
-                        timeout_per_source=15.0,
-                        max_workers=10
+                        timeout_per_source=25.0,
+                        max_workers=6
                     )
                     
                     http_success_count = 0
@@ -639,11 +651,10 @@ class HunterOrchestrator:
 
     def validate_configs(self, configs: Iterable[str], max_workers: int = 50) -> List[HunterBenchResult]:
         """Validate and benchmark configurations with adaptive thread management."""
-        # Import professional validator
         try:
-            from hunter.core.professional_validator import ConfigValidator, TestResult
+            from hunter.core.utils import prioritize_configs
         except ImportError:
-            from core.professional_validator import ConfigValidator, TestResult
+            from core.utils import prioritize_configs
         
         results: List[HunterBenchResult] = []
         test_url = self.config.get("test_url", "https://www.cloudflare.com/cdn-cgi/trace")
@@ -663,13 +674,7 @@ class HunterOrchestrator:
             self.logger.info("No configs to validate")
             return []
         
-        # Use professional multithreaded validator for better performance
-        use_professional_validator = self.config.get("use_professional_validator", True)
-        
-        if use_professional_validator and self.benchmarker is not None:
-            return self._validate_configs_professional(deduped_configs, max_workers, test_url, timeout)
-        
-        # Fall back to original implementation
+        # Check required components
         if self.parser is None or self.benchmarker is None:
             self.logger.info("Parser or benchmarker not available - skipping validation")
             return []
@@ -804,102 +809,6 @@ class HunterOrchestrator:
             pass
         
         return results
-
-    def _validate_configs_professional(
-        self,
-        configs: List[str],
-        max_workers: int,
-        test_url: str,
-        timeout: float
-    ) -> List[HunterBenchResult]:
-        """
-        Professional multithreaded config validation.
-        
-        Uses ThreadPoolExecutor with semaphore-controlled concurrency,
-        memory-aware adaptive worker management, and real-time progress tracking.
-        """
-        from hunter.core.professional_validator import ConfigValidator, TestResult
-        
-        self.logger.info(f"[ProfessionalValidator] Starting validation of {len(configs)} configs")
-        
-        # Create validator with adaptive worker count
-        validator = ConfigValidator(
-            max_workers=max_workers,
-            memory_threshold=85.0,
-            test_timeout=timeout,
-            logger=self.logger
-        )
-        
-        # Set up progress callback
-        if hasattr(self, 'ui') and self.ui:
-            def progress_callback(completed: int, total: int, failed: int):
-                self.ui.status.update(
-                    phase="validating",
-                    configs_tested=completed,
-                    configs_failed=failed
-                )
-            validator.set_progress_callback(progress_callback)
-        
-        # Define test function that wraps benchmarker
-        def test_config(uri: str) -> Tuple[bool, float, str]:
-            """Test single config using benchmarker."""
-            try:
-                # Use benchmarker's test method
-                if hasattr(self.benchmarker, 'test_single_config'):
-                    result = self.benchmarker.test_single_config(uri, test_url, timeout)
-                    if result and len(result) >= 3:
-                        success, latency, tier = result[0], result[1], result[2]
-                        return (success, float(latency), str(tier))
-                
-                # Fallback: simple connectivity test
-                import socket
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(timeout)
-                sock.connect(('1.1.1.1', 80))
-                sock.close()
-                return (True, 100.0, "silver")
-                
-            except Exception as e:
-                self.logger.debug(f"Config test failed for {uri[:40]}: {e}")
-                return (False, 0.0, "")
-        
-        # Run validation
-        start_time = time.time()
-        try:
-            test_results = validator.validate_configs_parallel(
-                configs=configs,
-                test_func=test_config,
-                batch_size=min(50, max(10, len(configs) // max_workers + 1)),
-                max_concurrent=max_workers
-            )
-        finally:
-            validator.stop()
-        
-        duration = time.time() - start_time
-        
-        # Convert to HunterBenchResult
-        bench_results: List[HunterBenchResult] = []
-        for tr in test_results:
-            if tr.success:
-                result = HunterBenchResult(
-                    uri=tr.uri,
-                    latency_ms=tr.latency_ms,
-                    tier=tr.tier if tr.tier else ("gold" if tr.latency_ms < 150 else "silver"),
-                    ps="",  # Will be populated by caller if needed
-                    region="",
-                    timestamp=time.time()
-                )
-                bench_results.append(result)
-        
-        # Log metrics
-        metrics = validator.get_metrics()
-        self.logger.info(
-            f"[ProfessionalValidator] Complete: {len(bench_results)}/{len(configs)} "
-            f"passed in {duration:.1f}s "
-            f"({metrics.get('tests_per_second', 0):.1f} tests/sec)"
-        )
-        
-        return bench_results
 
     async def report_configs_to_telegram(self, results: List[HunterBenchResult]):
         """Report validated configs to Telegram group.
@@ -1036,14 +945,22 @@ class HunterOrchestrator:
 
     async def report_status(self):
         """Report current status to Telegram."""
-        reporter = self.telegram_reporter or self.bot_reporter
-        if reporter is None or self.balancer is None:
+        if self.balancer is None:
+            return
+        reporters = [r for r in (self.bot_reporter, self.telegram_reporter) if r is not None]
+        if not reporters:
             return
         try:
             status = self.balancer.get_status()
-            await reporter.report_status(status)
-        except Exception as e:
-            self.logger.info(f"Status report skipped: {e}")
+        except Exception:
+            return
+        for reporter in reporters:
+            try:
+                ok = await reporter.report_status(status)
+                if ok is not False:
+                    return
+            except Exception as e:
+                self.logger.info(f"Status report skipped: {e}")
 
     def _telegram_outbox_path(self) -> str:
         try:
@@ -1055,6 +972,193 @@ class HunterOrchestrator:
         except Exception:
             pass
         return os.path.join(os.path.dirname(__file__), "runtime", "HUNTER_telegram_outbox.json")
+
+    def _get_tg_publish_targets(self) -> List[Any]:
+        raw = (
+            os.getenv("HUNTER_TELEGRAM_PUBLISH_CHATS")
+            or os.getenv("HUNTER_TELEGRAM_PUBLISH_TARGETS")
+            or os.getenv("TELEGRAM_PUBLISH_CHATS")
+            or ""
+        )
+        parts: List[Any] = []
+        if raw:
+            for p in raw.split(","):
+                s = (p or "").strip()
+                if s:
+                    parts.append(s)
+        else:
+            rc = self.config.get("report_channel")
+            if rc:
+                parts.append(rc)
+            else:
+                cid = os.getenv("CHAT_ID") or os.getenv("TELEGRAM_GROUP_ID")
+                if cid:
+                    parts.append(str(cid).strip())
+
+        out: List[Any] = []
+        seen: Set[str] = set()
+        for it in parts:
+            x: Any = it
+            if isinstance(x, str):
+                s = x.strip()
+                if s.lstrip("-").isdigit():
+                    try:
+                        x = int(s)
+                    except Exception:
+                        x = s
+                else:
+                    x = s
+            key = str(x)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(x)
+        return out
+
+    def _collect_publish_uris(self, max_lines: int) -> List[str]:
+        gold_file = str(self.config.get("gold_file", "") or "")
+        silver_file = str(self.config.get("silver_file", "") or "")
+        all_uris: List[str] = []
+        for fpath in (gold_file, silver_file):
+            if not fpath:
+                continue
+            try:
+                all_uris.extend(read_lines(fpath))
+            except Exception:
+                pass
+
+        seen: Set[str] = set()
+        deduped: List[str] = []
+        for u in all_uris:
+            if not isinstance(u, str):
+                continue
+            s = u.strip()
+            if not s:
+                continue
+            if s in seen:
+                continue
+            seen.add(s)
+            deduped.append(s)
+
+        if max_lines > 0 and len(deduped) > max_lines:
+            deduped = deduped[-max_lines:]
+        return deduped
+
+    async def _publish_uris_to_targets(self, uris: List[str], gemini_uris: Optional[List[str]] = None, force: bool = False) -> bool:
+        reporters = [r for r in (self.bot_reporter, self.telegram_reporter) if r is not None]
+        if not reporters:
+            return False
+
+        now = time.time()
+        due = (now - float(self._last_tg_publish_ts or 0.0)) >= float(self._tg_publish_interval_s)
+        if not force and not due:
+            return False
+
+        acquired = self._tg_publish_lock.acquire(blocking=False)
+        if not acquired:
+            return False
+
+        try:
+            targets = self._get_tg_publish_targets()
+            if not targets:
+                return False
+
+            try:
+                max_lines = int(os.getenv("HUNTER_TELEGRAM_PUBLISH_MAX_LINES", "50"))
+            except Exception:
+                max_lines = 50
+            max_lines = max(5, min(400, max_lines))
+
+            send_uris = (uris or [])[:max_lines]
+            if not send_uris:
+                return False
+
+            if self.dashboard:
+                try:
+                    self.dashboard.update(tg_status=f"publishing:{len(send_uris)}")
+                except Exception:
+                    pass
+            try:
+                self.ui.status.update(tg_status=f"publishing:{len(send_uris)}")
+            except Exception:
+                pass
+            try:
+                self.logger.info(f"[Telegram] Publishing {len(send_uris)} configs to {len(targets)} chat(s)")
+            except Exception:
+                pass
+
+            ok_any = False
+            for chat_id in targets:
+                ok_target = False
+                for reporter in reporters:
+                    try:
+                        try:
+                            await self._flush_telegram_outbox(reporter, chat_id=chat_id)
+                        except Exception:
+                            pass
+                        ok_target = bool(await reporter.report_config_files(
+                            gold_uris=send_uris,
+                            gemini_uris=(gemini_uris or None),
+                            max_lines=max_lines,
+                            chat_id=chat_id,
+                        ))
+                    except Exception:
+                        ok_target = False
+                    if ok_target:
+                        break
+
+                if not ok_target:
+                    try:
+                        self._enqueue_telegram_outbox(
+                            gold_uris=send_uris,
+                            gemini_uris=(gemini_uris or None),
+                            chat_id=chat_id,
+                        )
+                    except Exception:
+                        pass
+                ok_any = ok_any or ok_target
+
+            if ok_any:
+                self._last_tg_publish_ts = time.time()
+                if self.dashboard:
+                    try:
+                        self.dashboard.update(tg_status="published")
+                    except Exception:
+                        pass
+                try:
+                    self.ui.status.update(tg_status="published")
+                except Exception:
+                    pass
+            return ok_any
+        finally:
+            try:
+                self._tg_publish_lock.release()
+            except Exception:
+                pass
+
+    async def _maybe_periodic_publish(self) -> None:
+        try:
+            max_lines = int(os.getenv("HUNTER_TELEGRAM_PUBLISH_MAX_LINES", "50"))
+        except Exception:
+            max_lines = 50
+        max_lines = max(5, min(400, max_lines))
+        uris = self._collect_publish_uris(max_lines=max_lines)
+        if not uris:
+            return
+        try:
+            await self._publish_uris_to_targets(uris, force=False)
+        except Exception:
+            return
+
+    async def _telegram_periodic_publish_loop(self) -> None:
+        while True:
+            try:
+                await self._maybe_periodic_publish()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                pass
+            await asyncio.sleep(60)
 
     def _load_telegram_outbox(self) -> List[Dict[str, Any]]:
         path = self._telegram_outbox_path()
@@ -1083,32 +1187,37 @@ class HunterOrchestrator:
             items = items[-max_items:]
         save_json(path, {"saved_at": now_ts(), "items": items})
 
-    def _enqueue_telegram_outbox(self, gold_uris: List[str], gemini_uris: Optional[List[str]] = None) -> str:
+    def _enqueue_telegram_outbox(self, gold_uris: List[str], gemini_uris: Optional[List[str]] = None, chat_id: Optional[Any] = None) -> str:
         max_lines = int(os.getenv("HUNTER_TELEGRAM_MAX_LINES", "200"))
         gold = [u for u in (gold_uris or []) if isinstance(u, str) and u][:max_lines]
         gem = [u for u in (gemini_uris or []) if isinstance(u, str) and u][:max_lines] if gemini_uris else []
         raw = ("\n".join(gold) + "\n---\n" + "\n".join(gem)).encode("utf-8", errors="ignore")
         item_id = hashlib.sha1(raw).hexdigest()[:16]
         items = self._load_telegram_outbox()
-        if any(it.get("id") == item_id for it in items):
+        if any(it.get("id") == item_id and it.get("chat_id") == chat_id for it in items):
             return item_id
         items.append({
             "id": item_id,
             "created_at": now_ts(),
             "attempts": 0,
+            "chat_id": chat_id,
             "gold_uris": gold,
             "gemini_uris": gem,
         })
         self._save_telegram_outbox(items)
         return item_id
 
-    async def _flush_telegram_outbox(self, reporter: Any) -> Tuple[int, int]:
+    async def _flush_telegram_outbox(self, reporter: Any, chat_id: Optional[Any] = None) -> Tuple[int, int]:
         items = self._load_telegram_outbox()
         if not items:
             return (0, 0)
         sent = 0
         kept: List[Dict[str, Any]] = []
-        for it in items:
+        for idx, it in enumerate(items):
+            it_chat = it.get("chat_id", None)
+            if chat_id is not None and it_chat not in (None, chat_id):
+                kept.append(it)
+                continue
             try:
                 it["attempts"] = int(it.get("attempts", 0)) + 1
             except Exception:
@@ -1118,6 +1227,7 @@ class HunterOrchestrator:
                 ok = bool(await reporter.report_config_files(
                     gold_uris=it.get("gold_uris", []),
                     gemini_uris=it.get("gemini_uris", None) or None,
+                    chat_id=chat_id,
                 ))
             except Exception:
                 ok = False
@@ -1125,378 +1235,319 @@ class HunterOrchestrator:
                 sent += 1
                 continue
             kept.append(it)
+            for rest in items[idx + 1:]:
+                kept.append(rest)
             break
-        for it in items[sent + len(kept):]:
-            kept.append(it)
         self._save_telegram_outbox(kept)
         return (sent, len(kept))
 
-    async def run_cycle(self):
+    async def run_cycle(self) -> bool:
         """Run one complete hunter cycle."""
         import gc
         try:
             import psutil
         except ImportError:
             psutil = None
-        
-        self.cycle_count += 1
-        cycle_start = time.time()
-        self.ui.status.update(cycle=self.cycle_count, phase="starting")
-        if self.dashboard:
-            self.dashboard.update(cycle=self.cycle_count, phase="starting")
-            self.dashboard.reset_sources()
-            self.dashboard.reset_bench(0)
 
-        self.logger.info(f"Starting hunter cycle #{self.cycle_count}")
+        acquired = self._cycle_lock.acquire(blocking=False)
+        if not acquired:
+            self.logger.info("[CycleLock] Another cycle is already running, skipping")
+            return False
         
-        # ============================================================
-        # CRITICAL: Memory check and adaptive configuration at cycle start
-        # ============================================================
-        if psutil:
-            mem = psutil.virtual_memory()
-            mem_percent = mem.percent
-            mem_gb_used = mem.used / (1024**3)
-            mem_gb_total = mem.total / (1024**3)
-            
-            self.ui.status.update(memory_pct=mem_percent)
+        try:
+            self.cycle_count += 1
+            cycle_start = time.time()
+            self.ui.status.update(cycle=self.cycle_count, phase="starting")
             if self.dashboard:
-                self.dashboard.update(
-                    memory_pct=mem_percent,
-                    memory_used_gb=mem_gb_used,
-                    memory_total_gb=mem_gb_total,
+                self.dashboard.update(cycle=self.cycle_count, phase="starting")
+                self.dashboard.reset_sources()
+                self.dashboard.reset_bench(0)
+
+            self.logger.info(f"Starting hunter cycle #{self.cycle_count}")
+        
+            # ============================================================
+            # CRITICAL: Memory check and adaptive configuration at cycle start
+            # ============================================================
+            if psutil:
+                mem = psutil.virtual_memory()
+                mem_percent = mem.percent
+                mem_gb_used = mem.used / (1024**3)
+                mem_gb_total = mem.total / (1024**3)
+                
+                self.ui.status.update(memory_pct=mem_percent)
+                if self.dashboard:
+                    self.dashboard.update(
+                        memory_pct=mem_percent,
+                        memory_used_gb=mem_gb_used,
+                        memory_total_gb=mem_gb_total,
+                    )
+                self.logger.info(
+                    f"Memory status: {mem_percent:.1f}% used "
+                    f"({mem_gb_used:.1f}GB / {mem_gb_total:.1f}GB)"
                 )
-            self.logger.info(
-                f"Memory status: {mem_percent:.1f}% used "
-                f"({mem_gb_used:.1f}GB / {mem_gb_total:.1f}GB)"
-            )
-            
-            # Quick cleanup if memory is high (non-blocking)
-            if mem_percent >= 85:
-                gc.collect(0)
-                gc.collect(1)
-                mem_percent = psutil.virtual_memory().percent
-            
-            # Auto-tune based on CPU cores - XRay test processes are I/O bound, not RAM bound
-            cpu_cores = os.cpu_count() or 4
-            base_workers = max(4, cpu_cores)  # At least 4, scale with cores
-            
-            # Adaptive configuration based on memory pressure
-            # Workers are I/O bound (network tests), so we can run more than cores
-            if mem_percent >= 95:
-                adaptive_max_total = 80
-                adaptive_max_workers = max(4, base_workers // 2)
-                adaptive_scan_limit = 15
-                mode = "ULTRA-MINIMAL"
-            elif mem_percent >= 90:
-                adaptive_max_total = 150
-                adaptive_max_workers = max(6, base_workers)
-                adaptive_scan_limit = 25
-                mode = "MINIMAL"
-            elif mem_percent >= 85:
-                adaptive_max_total = 250
-                adaptive_max_workers = max(8, base_workers)
-                adaptive_scan_limit = 30
-                mode = "REDUCED"
-            elif mem_percent >= 80:
-                adaptive_max_total = 400
-                adaptive_max_workers = max(8, base_workers + 2)
-                adaptive_scan_limit = 35
-                mode = "CONSERVATIVE"
-            elif mem_percent >= 70:
-                adaptive_max_total = 600
-                adaptive_max_workers = max(10, base_workers + 4)
-                adaptive_scan_limit = 40
-                mode = "SCALED"
-            elif mem_percent >= 60:
-                adaptive_max_total = 800
-                adaptive_max_workers = max(12, base_workers * 2)
-                adaptive_scan_limit = 50
-                mode = "MODERATE"
-            else:
-                adaptive_max_total = self.config.get("max_total", 1000)
-                adaptive_max_workers = max(12, base_workers * 2)
-                adaptive_scan_limit = self.config.get("scan_limit", 50)
-                mode = "NORMAL"
-            
-            if self.dashboard:
-                self.dashboard.update(mode=mode)
-            self.logger.info(
-                f"Cycle mode: {mode} (memory: {mem_percent:.1f}%, "
-                f"configs: {adaptive_max_total}, workers: {adaptive_max_workers})"
-            )
-            
-            # Temporarily override config for this cycle
-            original_max_total = self.config.get("max_total")
-            original_max_workers = self.config.get("max_workers")
-            original_scan_limit = self.config.get("scan_limit")
-            
-            self.config.set("max_total", adaptive_max_total)
-            self.config.set("max_workers", adaptive_max_workers)
-            self.config.set("scan_limit", adaptive_scan_limit)
-        else:
-            self.logger.warning("psutil not available - running without memory monitoring")
-            original_max_total = None
-            original_max_workers = None
-            original_scan_limit = None
-
-        # Reset HTTP session to free stale connections from previous cycle
-        if self.http_manager is not None:
-            try:
-                self.http_manager.reset_session()
-            except Exception:
-                pass
-
-        # Scrape configs
-        raw_configs = await self.scrape_configs()
-        self.logger.info(f"Total raw configs: {len(raw_configs)}")
-
-        # GC after scrape phase - critical for high memory situations
-        gc.collect()
-
-        # Cache new configs
-        if self.cache is not None:
-            try:
-                self.cache.save_configs(raw_configs, working=False)
-            except Exception as e:
-                self.logger.info(f"Cache save skipped: {e}")
-
-        # Validate configs
-        validated = self.validate_configs(raw_configs)
-        self.logger.info(f"Validated configs: {len(validated)}")
-
-        # Free raw configs to release memory immediately
-        del raw_configs
-        gc.collect()
-
-        # Save working configs to cache for future cycles
-        if validated and self.cache is not None:
-            try:
-                working_uris = [r.uri for r in validated]
-                self.cache.save_configs(working_uris, working=True)
-            except Exception as e:
-                self.logger.info(f"Cache save skipped: {e}")
-
-        # Incremental balancer feeding: feed balancer NOW with gold/silver only
-        # Dead-tier configs are unreliable and cause XRay startup failures (code 23)
-        if validated and self.balancer is not None:
-            try:
-                usable = [(r.uri, r.latency_ms) for r in validated if r.tier in ("gold", "silver")]
-                if usable:
-                    early_configs = usable[:20]
-                    self.balancer.update_available_configs(early_configs, trusted=True)
-                    self.logger.info(f"[Incremental] Fed balancer with {len(early_configs)} gold/silver configs early")
-            except Exception:
-                pass
-
-        # Re-test cached configs every 3 cycles — skip when memory is critical
-        mem_now = psutil.virtual_memory().percent if psutil else 50
-        if self.cycle_count % 3 == 0 and mem_now < 90:
-            gold_file = str(self.config.get("gold_file", "") or "")
-            silver_file = str(self.config.get("silver_file", "") or "")
-            cached_uris = set()
-            for fpath in [gold_file, silver_file]:
-                if fpath:
-                    try:
-                        cached_uris.update(read_lines(fpath))
-                    except Exception:
-                        pass
-            # Also add balancer cache URIs
-            try:
-                bal_cache = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
-                cached_uris.update(uri for uri, _ in bal_cache)
-            except Exception:
-                pass
-            cached_uris.discard("")
-            # Remove already-validated URIs
-            validated_uris = {r.uri for r in validated}
-            retest_uris = [u for u in cached_uris if u not in validated_uris][:100]
-            if retest_uris:
-                self.logger.info(f"[Retest] Re-testing {len(retest_uris)} cached configs from previous cycles...")
-                retest_results = self.validate_configs(retest_uris)
-                if retest_results:
-                    self.logger.info(f"[Retest] {len(retest_results)} cached configs still working")
-                    validated.extend(retest_results)
-                    validated.sort(key=lambda r: r.latency_ms)
+                
+                # Quick cleanup if memory is high (non-blocking)
+                if mem_percent >= 85:
+                    gc.collect(0)
+                    gc.collect(1)
+                    mem_percent = psutil.virtual_memory().percent
+                
+                # Auto-tune based on CPU cores - XRay test processes are I/O bound, not RAM bound
+                cpu_cores = os.cpu_count() or 4
+                base_workers = max(4, cpu_cores)  # At least 4, scale with cores
+                
+                # Adaptive configuration based on memory pressure
+                # Workers are I/O bound (network tests), so we can run more than cores
+                if mem_percent >= 95:
+                    adaptive_max_total = 80
+                    adaptive_max_workers = max(4, base_workers // 2)
+                    adaptive_scan_limit = 15
+                    mode = "ULTRA-MINIMAL"
+                elif mem_percent >= 90:
+                    adaptive_max_total = 150
+                    adaptive_max_workers = max(6, base_workers)
+                    adaptive_scan_limit = 25
+                    mode = "MINIMAL"
+                elif mem_percent >= 85:
+                    adaptive_max_total = 250
+                    adaptive_max_workers = max(8, base_workers)
+                    adaptive_scan_limit = 30
+                    mode = "REDUCED"
+                elif mem_percent >= 80:
+                    adaptive_max_total = 400
+                    adaptive_max_workers = max(8, base_workers + 2)
+                    adaptive_scan_limit = 35
+                    mode = "CONSERVATIVE"
+                elif mem_percent >= 70:
+                    adaptive_max_total = 600
+                    adaptive_max_workers = max(10, base_workers + 4)
+                    adaptive_scan_limit = 40
+                    mode = "SCALED"
+                elif mem_percent >= 60:
+                    adaptive_max_total = 800
+                    adaptive_max_workers = max(12, base_workers * 2)
+                    adaptive_scan_limit = 50
+                    mode = "MODERATE"
                 else:
-                    self.logger.warning("[Retest] No cached configs passed retest")
+                    adaptive_max_total = self.config.get("max_total", 1000)
+                    adaptive_max_workers = max(12, base_workers * 2)
+                    adaptive_scan_limit = self.config.get("scan_limit", 50)
+                    mode = "NORMAL"
+                
+                if self.dashboard:
+                    self.dashboard.update(mode=mode)
+                self.logger.info(
+                    f"Cycle mode: {mode} (memory: {mem_percent:.1f}%, "
+                    f"configs: {adaptive_max_total}, workers: {adaptive_max_workers})"
+                )
+                
+                # Temporarily override config for this cycle
+                original_max_total = self.config.get("max_total")
+                original_max_workers = self.config.get("max_workers")
+                original_scan_limit = self.config.get("scan_limit")
+                
+                self.config.set("max_total", adaptive_max_total)
+                self.config.set("max_workers", adaptive_max_workers)
+                self.config.set("scan_limit", adaptive_scan_limit)
+            else:
+                self.logger.warning("psutil not available - running without memory monitoring")
+                original_max_total = None
+                original_max_workers = None
+                original_scan_limit = None
 
-        # Tier configs
-        tiered = self.tier_configs(validated)
-        gold_configs = tiered["gold"]
-        silver_configs = tiered["silver"]
+            # Reset HTTP session to free stale connections from previous cycle
+            if self.http_manager is not None:
+                try:
+                    self.http_manager.reset_session()
+                except Exception:
+                    pass
 
-        self.logger.info(f"Gold tier: {len(gold_configs)}, Silver tier: {len(silver_configs)}")
-        self.ui.status.update(
-            gold=len(gold_configs), silver=len(silver_configs),
-            phase="balancing"
-        )
-        if self.dashboard:
-            self.dashboard.update(
+            # Scrape configs
+            raw_configs = await self.scrape_configs()
+            self.logger.info(f"Total raw configs: {len(raw_configs)}")
+
+            # GC after scrape phase - critical for high memory situations
+            gc.collect()
+
+            # Cache new configs
+            if self.cache is not None:
+                try:
+                    self.cache.save_configs(raw_configs, working=False)
+                except Exception as e:
+                    self.logger.info(f"Cache save skipped: {e}")
+
+            # Validate configs
+            validated = self.validate_configs(raw_configs)
+            self.logger.info(f"Validated configs: {len(validated)}")
+
+            # Free raw configs to release memory immediately
+            del raw_configs
+            gc.collect()
+
+            # Save working configs to cache for future cycles
+            if validated and self.cache is not None:
+                try:
+                    working_uris = [r.uri for r in validated]
+                    self.cache.save_configs(working_uris, working=True)
+                except Exception as e:
+                    self.logger.info(f"Cache save skipped: {e}")
+
+            # Incremental balancer feeding: feed balancer NOW with gold/silver only
+            # Dead-tier configs are unreliable and cause XRay startup failures (code 23)
+            if validated and self.balancer is not None:
+                try:
+                    usable = [(r.uri, r.latency_ms) for r in validated if r.tier in ("gold", "silver")]
+                    if usable:
+                        early_configs = usable[:20]
+                        self.balancer.update_available_configs(early_configs, trusted=True)
+                        self.logger.info(f"[Incremental] Fed balancer with {len(early_configs)} gold/silver configs early")
+                except Exception:
+                    pass
+
+            # Re-test cached configs every 3 cycles — skip when memory is critical
+            mem_now = psutil.virtual_memory().percent if psutil else 50
+            if self.cycle_count % 3 == 0 and mem_now < 90:
+                gold_file = str(self.config.get("gold_file", "") or "")
+                silver_file = str(self.config.get("silver_file", "") or "")
+                cached_uris = set()
+                for fpath in [gold_file, silver_file]:
+                    if fpath:
+                        try:
+                            cached_uris.update(read_lines(fpath))
+                        except Exception:
+                            pass
+                # Also add balancer cache URIs
+                try:
+                    bal_cache = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
+                    cached_uris.update(uri for uri, _ in bal_cache)
+                except Exception:
+                    pass
+                cached_uris.discard("")
+                # Remove already-validated URIs
+                validated_uris = {r.uri for r in validated}
+                retest_uris = [u for u in cached_uris if u not in validated_uris][:100]
+                if retest_uris:
+                    self.logger.info(f"[Retest] Re-testing {len(retest_uris)} cached configs from previous cycles...")
+                    retest_results = self.validate_configs(retest_uris)
+                    if retest_results:
+                        self.logger.info(f"[Retest] {len(retest_results)} cached configs still working")
+                        validated.extend(retest_results)
+                        validated.sort(key=lambda r: r.latency_ms)
+                    else:
+                        self.logger.warning("[Retest] No cached configs passed retest")
+
+            # Tier configs
+            tiered = self.tier_configs(validated)
+            gold_configs = tiered["gold"]
+            silver_configs = tiered["silver"]
+
+            self.logger.info(f"Gold tier: {len(gold_configs)}, Silver tier: {len(silver_configs)}")
+            self.ui.status.update(
                 gold=len(gold_configs), silver=len(silver_configs),
                 phase="balancing"
             )
-
-        # Update balancer
-        all_configs = [(r.uri, r.latency_ms) for r in gold_configs + silver_configs]
-        self._last_validated_count = len(all_configs)
-        if all_configs:
-            self._last_good_configs = all_configs[:200]  # Keep best 200 for resilience
-        
-        if self.balancer is not None:
-            if all_configs:
-                try:
-                    await self.update_balancer(all_configs)
-                except Exception as e:
-                    self.logger.info(f"Balancer update skipped: {e}")
-            elif self._last_good_configs:
-                # No new configs validated - re-feed last known good configs
-                self.logger.warning("[Resilience] No new configs, re-feeding last known good configs to balancer")
-                try:
-                    await self.update_balancer(self._last_good_configs)
-                except Exception as e:
-                    self.logger.info(f"Balancer resilience update skipped: {e}")
-        self._sync_dashboard_balancer()
-        try:
-            if all_configs:
-                self._save_balancer_cache(all_configs, name="HUNTER_balancer_cache.json")
-        except Exception:
-            pass
-
-        # Feed gemini balancer: prefer name-matched, but fall back to ALL configs
-        gemini_configs: List[Tuple[str, float]] = []
-        if self.gemini_balancer:
-            # First try name-matched configs
-            for r in gold_configs + silver_configs:
-                ps = (r.ps or "").lower()
-                if "gemini" in ps or "gmn" in ps:
-                    gemini_configs.append((r.uri, r.latency_ms))
-            # If no name-matched, use ALL validated configs (different subset)
-            if not gemini_configs and all_configs:
-                # Use second half of configs for diversity (balancer uses first half via leastPing)
-                half = max(1, len(all_configs) // 2)
-                gemini_configs = all_configs[half:] if len(all_configs) > 3 else list(all_configs)
-                self.logger.info(f"[Gemini] No name-matched configs, using {len(gemini_configs)} from validated pool")
-            try:
-                if gemini_configs:
-                    await self.update_gemini_balancer(gemini_configs)
-                    self._save_balancer_cache(gemini_configs, name="HUNTER_gemini_balancer_cache.json")
-            except Exception:
-                pass
-
-        # Report to Telegram (Bot API primary, Telethon fallback)
-        reporter = self.telegram_reporter or self.bot_reporter
-        all_validated = gold_configs + silver_configs
-        try:
-            outbox_pending = len(self._load_telegram_outbox())
-        except Exception:
-            outbox_pending = 0
-
-        if reporter is not None and (all_validated or outbox_pending):
-            self.ui.status.update(phase="reporting")
-            self.ui.status.update(tg_status=f"sending(outbox:{outbox_pending})" if outbox_pending else "sending")
             if self.dashboard:
-                self.dashboard.update(phase="reporting", tg_status=f"sending...(outbox:{outbox_pending})" if outbox_pending else "sending...")
-
-            try:
-                await reporter.report_gold_configs([
-                    {
-                        "ps": r.ps,
-                        "latency_ms": r.latency_ms,
-                        "region": r.region,
-                        "tier": r.tier
-                    } for r in all_validated
-                ])
-            except Exception as e:
-                self.logger.info(f"Config report skipped: {e}")
-
-            try:
-                out_sent, out_left = (0, 0)
-                try:
-                    out_sent, out_left = await self._flush_telegram_outbox(reporter)
-                except Exception:
-                    pass
-                if self.dashboard and (out_sent or out_left):
-                    self.dashboard.update(tg_status=f"outbox_sent:{out_sent} left:{out_left}")
-                if out_sent or out_left:
-                    self.ui.status.update(tg_status=f"outbox_sent:{out_sent} left:{out_left}")
-
-                ok = True
-                if all_validated:
-                    ok = bool(await reporter.report_config_files(
-                        gold_uris=[r.uri for r in all_validated],
-                        gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
-                    ))
-                    if not ok:
-                        self._enqueue_telegram_outbox(
-                            gold_uris=[r.uri for r in all_validated],
-                            gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
-                        )
-
-                if self.dashboard:
-                    left = len(self._load_telegram_outbox())
-                    if ok and left == 0:
-                        self.dashboard.update(tg_status="sent")
-                    elif ok and left:
-                        self.dashboard.update(tg_status=f"sent + outbox:{left}")
-                    else:
-                        self.dashboard.update(tg_status=f"queued(outbox:{left})")
-                try:
-                    left = len(self._load_telegram_outbox())
-                    if ok and left == 0:
-                        self.ui.status.update(tg_status="sent")
-                    elif ok and left:
-                        self.ui.status.update(tg_status=f"sent+outbox:{left}")
-                    else:
-                        self.ui.status.update(tg_status=f"queued(outbox:{left})")
-                except Exception:
-                    pass
-            except Exception as e:
-                self.logger.info(f"Config file report skipped: {e}")
-                try:
-                    if all_validated:
-                        self._enqueue_telegram_outbox(
-                            gold_uris=[r.uri for r in all_validated],
-                            gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
-                        )
-                    if self.dashboard:
-                        left = len(self._load_telegram_outbox())
-                        self.dashboard.update(tg_status=f"queued(outbox:{left})")
-                    try:
-                        left = len(self._load_telegram_outbox())
-                        self.ui.status.update(tg_status=f"queued(outbox:{left})")
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-        # Save to files
-        self._save_to_files(gold_configs, silver_configs)
-
-        cycle_time = time.time() - cycle_start
-        self.logger.info(f"Cycle completed in {cycle_time:.1f} seconds")
-        self.last_cycle = time.time()
-        
-        # Restore original config values (ALWAYS - even partial success)
-        if psutil and original_max_total is not None:
-            self.config.set("max_total", original_max_total)
-            self.config.set("max_workers", original_max_workers)
-            self.config.set("scan_limit", original_scan_limit)
-        
-        # Final memory status
-        if psutil:
-            try:
-                final_mem = psutil.virtual_memory()
-                self.logger.info(
-                    f"Cycle end memory: {final_mem.percent:.1f}% "
-                    f"({final_mem.used / (1024**3):.1f}GB / {final_mem.total / (1024**3):.1f}GB)"
+                self.dashboard.update(
+                    gold=len(gold_configs), silver=len(silver_configs),
+                    phase="balancing"
                 )
+
+            # Update balancer
+            all_configs = [(r.uri, r.latency_ms) for r in gold_configs + silver_configs]
+            self._last_validated_count = len(all_configs)
+            if all_configs:
+                self._last_good_configs = all_configs[:200]  # Keep best 200 for resilience
+        
+            if self.balancer is not None:
+                if all_configs:
+                    try:
+                        await self.update_balancer(all_configs)
+                    except Exception as e:
+                        self.logger.info(f"Balancer update skipped: {e}")
+                elif self._last_good_configs:
+                    # No new configs validated - re-feed last known good configs
+                    self.logger.warning("[Resilience] No new configs, re-feeding last known good configs to balancer")
+                    try:
+                        await self.update_balancer(self._last_good_configs)
+                    except Exception as e:
+                        self.logger.info(f"Balancer resilience update skipped: {e}")
+            self._sync_dashboard_balancer()
+            try:
+                if all_configs:
+                    self._save_balancer_cache(all_configs, name="HUNTER_balancer_cache.json")
             except Exception:
                 pass
+
+            # Feed gemini balancer: prefer name-matched, but fall back to ALL configs
+            gemini_configs: List[Tuple[str, float]] = []
+            if self.gemini_balancer:
+                # First try name-matched configs
+                for r in gold_configs + silver_configs:
+                    ps = (r.ps or "").lower()
+                    if "gemini" in ps or "gmn" in ps:
+                        gemini_configs.append((r.uri, r.latency_ms))
+                # If no name-matched, use ALL validated configs (different subset)
+                if not gemini_configs and all_configs:
+                    # Use second half of configs for diversity (balancer uses first half via leastPing)
+                    half = max(1, len(all_configs) // 2)
+                    gemini_configs = all_configs[half:] if len(all_configs) > 3 else list(all_configs)
+                    self.logger.info(f"[Gemini] No name-matched configs, using {len(gemini_configs)} from validated pool")
+                try:
+                    if gemini_configs:
+                        await self.update_gemini_balancer(gemini_configs)
+                        self._save_balancer_cache(gemini_configs, name="HUNTER_gemini_balancer_cache.json")
+                except Exception:
+                    pass
+
+            all_validated = gold_configs + silver_configs
+            if all_validated:
+                self.ui.status.update(phase="reporting")
+                if self.dashboard:
+                    self.dashboard.update(phase="reporting")
+                try:
+                    await self._publish_uris_to_targets(
+                        [r.uri for r in all_validated],
+                        gemini_uris=[uri for uri, _ in gemini_configs] if gemini_configs else None,
+                        force=False,
+                    )
+                except Exception:
+                    pass
+
+            # Save to files
+            self._save_to_files(gold_configs, silver_configs)
+
+            cycle_time = time.time() - cycle_start
+            self.logger.info(f"Cycle completed in {cycle_time:.1f} seconds")
+            self.last_cycle = time.time()
         
-        # Log DPI evasion status
-        if self.dpi_evasion:
+            # Restore original config values (ALWAYS - even partial success)
+            if psutil and original_max_total is not None:
+                self.config.set("max_total", original_max_total)
+                self.config.set("max_workers", original_max_workers)
+                self.config.set("scan_limit", original_scan_limit)
+        
+            # Final memory status
+            if psutil:
+                try:
+                    final_mem = psutil.virtual_memory()
+                    self.logger.info(
+                        f"Cycle end memory: {final_mem.percent:.1f}% "
+                        f"({final_mem.used / (1024**3):.1f}GB / {final_mem.total / (1024**3):.1f}GB)"
+                    )
+                except Exception:
+                    pass
+        
+            # Log DPI evasion status
+            if self.dpi_evasion:
+                try:
+                    self.logger.info(f"DPI Evasion: {self.dpi_evasion.get_status_summary()}")
+                except Exception:
+                    pass
+
+            return True
+        finally:
             try:
-                self.logger.info(f"DPI Evasion: {self.dpi_evasion.get_status_summary()}")
+                self._cycle_lock.release()
             except Exception:
                 pass
 
@@ -1643,6 +1694,12 @@ class HunterOrchestrator:
             self.gemini_balancer.start(initial_configs=gemini_seed if gemini_seed else None)
             self._sync_dashboard_balancer()
 
+        if self._tg_publish_task is None:
+            try:
+                self._tg_publish_task = asyncio.create_task(self._telegram_periodic_publish_loop())
+            except Exception:
+                self._tg_publish_task = None
+
         # Start autonomous loop
         await self.run_autonomous_loop()
 
@@ -1664,6 +1721,12 @@ class HunterOrchestrator:
         # Stop stealth engine
         if self.stealth_engine:
             self.stealth_engine.stop()
+        if self._tg_publish_task is not None:
+            try:
+                self._tg_publish_task.cancel()
+            except Exception:
+                pass
+            self._tg_publish_task = None
         if self.balancer:
             self.balancer.stop()
         if self.gemini_balancer:
@@ -1697,10 +1760,19 @@ class HunterOrchestrator:
             channels = self.config.get("targets", [])
             limit = self.config.get("telegram_limit", 50)
             self.logger.info(f"[Manual] Fetching configs from Telegram ({len(channels)} channels, limit={limit})...")
-            configs = await asyncio.wait_for(
-                self.telegram_scraper.scrape_configs(channels, limit=limit),
-                timeout=120
-            )
+            if self.flexible_fetcher is not None:
+                result = await self.flexible_fetcher.fetch_telegram_with_retry(
+                    channels=channels,
+                    limit=limit,
+                    max_retries=1,
+                    retry_delay=0.0,
+                )
+                configs = list(result.configs)
+            else:
+                configs = await asyncio.wait_for(
+                    self.telegram_scraper.scrape_configs(channels, limit=limit),
+                    timeout=180
+                )
             if isinstance(configs, set):
                 configs = list(configs)
             self.logger.info(f"[Manual] Fetched {len(configs)} configs from Telegram")
@@ -1712,7 +1784,7 @@ class HunterOrchestrator:
                     pass
             return {"ok": True, "count": len(configs), "configs": configs[:20]}
         except asyncio.TimeoutError:
-            return {"ok": False, "error": "Telegram fetch timed out (120s)"}
+            return {"ok": False, "error": "Telegram fetch timed out"}
         except Exception as e:
             return {"ok": False, "error": str(e)}
 
@@ -1720,7 +1792,9 @@ class HunterOrchestrator:
         """Manually trigger a full config scan cycle."""
         try:
             self.logger.info("[Manual] Re-scan triggered by user")
-            await self.run_cycle()
+            ran = await self.run_cycle()
+            if not ran:
+                return {"ok": False, "error": "Cycle already running"}
             return {"ok": True, "message": f"Cycle #{self.cycle_count} completed", "validated": self._last_validated_count}
         except Exception as e:
             self.logger.error(f"[Manual] Re-scan failed: {e}")
@@ -1728,8 +1802,8 @@ class HunterOrchestrator:
 
     async def manual_publish_telegram(self) -> Dict[str, Any]:
         """Manually publish current configs to Telegram group."""
-        reporter = self.telegram_reporter or self.bot_reporter
-        if reporter is None:
+        reporters = [r for r in (self.bot_reporter, self.telegram_reporter) if r is not None]
+        if not reporters:
             return {"ok": False, "error": "No Telegram reporter configured"}
         try:
             # Get current gold+silver from files
@@ -1745,12 +1819,15 @@ class HunterOrchestrator:
             if not all_uris:
                 return {"ok": False, "error": "No configs to publish"}
             self.logger.info(f"[Manual] Publishing {len(all_uris)} configs to Telegram...")
-            # Send as file
-            ok = bool(await reporter.report_config_files(gold_uris=all_uris))
+            ok = bool(await self._publish_uris_to_targets(all_uris, force=True))
             if not ok:
-                self._enqueue_telegram_outbox(gold_uris=all_uris)
+                try:
+                    for t in self._get_tg_publish_targets():
+                        self._enqueue_telegram_outbox(gold_uris=all_uris, chat_id=t)
+                except Exception:
+                    pass
                 return {"ok": False, "error": "Publish failed - queued to outbox", "count": len(all_uris)}
-            return {"ok": True, "count": len(all_uris)}
+            return {"ok": True, "count": len(all_uris), "targets": len(self._get_tg_publish_targets())}
         except Exception as e:
             self.logger.error(f"[Manual] Publish failed: {e}")
             return {"ok": False, "error": str(e)}

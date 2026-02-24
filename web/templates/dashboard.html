@@ -410,6 +410,38 @@ canvas { width: 100% !important; height: 100% !important; }
     </div>
   </div>
 
+  <!-- Telegram Status -->
+  <div class="card full">
+    <div class="card-h">
+      <span>📊 Telegram Reporting Status</span>
+      <button class="btn" onclick="loadTelegramStatus()" style="font-size:9px;padding:3px 8px;">Refresh</button>
+    </div>
+    <div class="card-b" id="tg-status-body">
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;">
+        <div>
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Bot API</div>
+          <div id="tg-bot-status" style="font-size:12px;">-</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">User Account</div>
+          <div id="tg-user-status" style="font-size:12px;">-</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Last Publish</div>
+          <div id="tg-last-publish" style="font-size:12px;">-</div>
+        </div>
+        <div>
+          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Publish Count</div>
+          <div id="tg-publish-count" style="font-size:12px;">-</div>
+        </div>
+      </div>
+      <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
+        <button class="btn btn-s" onclick="testTelegramSend(true)" id="tg-test-bot-btn">🧪 Test Bot</button>
+        <button class="btn btn-s" onclick="testTelegramSend(false)" id="tg-test-user-btn">🧪 Test User</button>
+      </div>
+    </div>
+  </div>
+
   <!-- Telegram Auth -->
   <div class="card full">
     <div class="card-h">
@@ -949,6 +981,78 @@ function manualPublishTelegram() {
     st.innerHTML = `<span style="color:var(--error)">✗ ${esc(''+e)}</span>`;
   });
 }
+
+// --- Telegram Status ---
+function loadTelegramStatus() {
+  fetch('/api/telegram/report-status').then(r=>r.json()).then(d => {
+    // Bot API status
+    const botStatus = document.getElementById('tg-bot-status');
+    if (d.bot_configured) {
+      botStatus.innerHTML = `<span style="color:var(--success)">✓ Configured</span><br><small>${d.bot_token_preview}</small><br><small>Chat: ${d.chat_id}</small>`;
+    } else {
+      botStatus.innerHTML = `<span style="color:var(--error)">✗ Not configured</span><br><small>Set TOKEN & CHAT_ID</small>`;
+    }
+    
+    // User account status
+    const userStatus = document.getElementById('tg-user-status');
+    if (d.user_configured) {
+      userStatus.innerHTML = `<span style="color:var(--success)">✓ Configured</span><br><small>${d.phone_preview}</small>`;
+    } else {
+      userStatus.innerHTML = `<span style="color:var(--warning)">⚠ Not configured</span><br><small>Set API credentials</small>`;
+    }
+    
+    // Publish status
+    const lastPublish = document.getElementById('tg-last-publish');
+    if (d.last_publish) {
+      const date = new Date(d.last_publish * 1000);
+      lastPublish.innerHTML = date.toLocaleString();
+    } else {
+      lastPublish.innerHTML = '<span style="color:var(--text-dim)">Never</span>';
+    }
+    
+    const publishCount = document.getElementById('tg-publish-count');
+    publishCount.innerHTML = d.publish_count || 0;
+    
+    // Update button states
+    document.getElementById('tg-test-bot-btn').disabled = !d.bot_configured;
+    document.getElementById('tg-test-user-btn').disabled = !d.user_configured;
+  }).catch(e => {
+    console.error('Failed to load Telegram status:', e);
+  });
+}
+
+function testTelegramSend(useBot) {
+  const btn = document.getElementById(useBot ? 'tg-test-bot-btn' : 'tg-test-user-btn');
+  const originalText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '⏳ Sending...';
+  
+  fetch('/api/telegram/test-send', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      message: `🧪 Test message from Hunter Dashboard (${new Date().toLocaleTimeString()})`,
+      use_bot: useBot
+    })
+  }).then(r=>r.json()).then(d => {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    if (d.ok) {
+      appendLog({timestamp:ts(),level:'INFO',message:`[Telegram] Test sent via ${d.method}`});
+      btn.style.background = 'rgba(0,230,118,.12)';
+      setTimeout(() => btn.style.background = '', 2000);
+    } else {
+      appendLog({timestamp:ts(),level:'ERROR',message:`[Telegram] Test failed: ${d.error}`});
+      btn.style.background = 'rgba(255,82,82,.12)';
+      setTimeout(() => btn.style.background = '', 2000);
+    }
+  }).catch(e => {
+    btn.disabled = false;
+    btn.textContent = originalText;
+    appendLog({timestamp:ts(),level:'ERROR',message:`[Telegram] Test error: ${e}`});
+  });
+}
+
 function manualRescan() {
   const btn = document.getElementById('rescan-btn');
   const st = document.getElementById('manual-action-status');
@@ -978,6 +1082,7 @@ loadClients(); setInterval(loadClients, 5000);
 loadSystemInfo(); setInterval(loadSystemInfo, 30000);
 loadBalancerDetails(); setInterval(loadBalancerDetails, 10000);
 loadCategories(); setInterval(loadCategories, 30000);
+loadTelegramStatus(); setInterval(loadTelegramStatus, 10000); // Load Telegram status every 10 seconds
 document.getElementById('as-btn').style.borderColor='var(--accent)';
 document.getElementById('as-btn').style.color='var(--accent)';
 window.addEventListener('resize', drawTrafficChart);
