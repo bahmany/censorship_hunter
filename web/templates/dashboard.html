@@ -410,6 +410,23 @@ canvas { width: 100% !important; height: 100% !important; }
     </div>
   </div>
 
+  <!-- Thread Manager Status -->
+  <div class="card full">
+    <div class="card-h">
+      <span>🧵 Thread Manager</span>
+      <button class="btn" onclick="loadThreadStatus()" style="font-size:9px;padding:3px 8px;">Refresh</button>
+    </div>
+    <div class="card-b" id="thread-status-body">
+      <div style="display:flex;gap:12px;font-size:11px;flex-wrap:wrap;margin-bottom:10px;">
+        <span>Mode: <strong id="tm-mode" style="color:var(--accent)">-</strong></span>
+        <span>RAM: <strong id="tm-ram">-</strong></span>
+        <span>CPU: <strong id="tm-cpu">-</strong></span>
+        <span>Threads: <strong id="tm-threads">-</strong></span>
+      </div>
+      <div id="tm-workers" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;"></div>
+    </div>
+  </div>
+
   <!-- Telegram Status -->
   <div class="card full">
     <div class="card-h">
@@ -982,6 +999,43 @@ function manualPublishTelegram() {
   });
 }
 
+// --- Thread Manager Status ---
+function loadThreadStatus() {
+  fetch('/api/threads/status').then(r=>r.json()).then(d => {
+    if (!d.ok) return;
+    const hw = d.hardware || {};
+    document.getElementById('tm-mode').textContent = hw.mode || '-';
+    const ramPct = hw.ram_percent || 0;
+    const ramColor = ramPct >= 90 ? 'var(--error)' : ramPct >= 75 ? 'var(--warning)' : 'var(--success)';
+    document.getElementById('tm-ram').innerHTML = `<span style="color:${ramColor}">${ramPct.toFixed(0)}%</span> (${(hw.ram_used_gb||0).toFixed(1)}/${(hw.ram_total_gb||0).toFixed(1)} GB)`;
+    document.getElementById('tm-cpu').textContent = `${hw.cpu_count || '?'} cores`;
+    document.getElementById('tm-threads').textContent = hw.thread_count || '-';
+
+    const wc = document.getElementById('tm-workers');
+    const workers = d.workers || {};
+    let html = '';
+    const icons = {health_monitor:'\u2764\ufe0f',config_scanner:'\ud83d\udd0d',telegram_publisher:'\u2708\ufe0f',balancer:'\u2696\ufe0f'};
+    const stateColors = {running:'var(--accent)',sleeping:'var(--text-dim)',idle:'var(--text-dim)',error:'var(--error)',stopped:'var(--error)'};
+    for (const [name, w] of Object.entries(workers)) {
+      const icon = icons[name] || '\u2699\ufe0f';
+      const sc = stateColors[w.state] || 'var(--text)';
+      const nextIn = w.state === 'sleeping' && w.next_run_in > 0 ? `<br><small>next in ${Math.floor(w.next_run_in/60)}m ${w.next_run_in%60}s</small>` : '';
+      const errLine = w.last_error ? `<br><small style="color:var(--error)">${esc(w.last_error.substring(0,80))}</small>` : '';
+      html += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:8px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;">
+          <strong>${icon} ${name.replace(/_/g,' ')}</strong>
+          <span class="badge" style="font-size:9px;background:${sc}22;color:${sc};border:1px solid ${sc}44;padding:1px 6px;border-radius:8px;">${w.state}</span>
+        </div>
+        <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
+          runs: ${w.runs} &nbsp; errors: ${w.errors} &nbsp; interval: ${Math.floor((w.interval||0)/60)}m
+          ${nextIn}${errLine}
+        </div>
+      </div>`;
+    }
+    wc.innerHTML = html;
+  }).catch(()=>{});
+}
+
 // --- Telegram Status ---
 function loadTelegramStatus() {
   fetch('/api/telegram/report-status').then(r=>r.json()).then(d => {
@@ -1082,7 +1136,8 @@ loadClients(); setInterval(loadClients, 5000);
 loadSystemInfo(); setInterval(loadSystemInfo, 30000);
 loadBalancerDetails(); setInterval(loadBalancerDetails, 10000);
 loadCategories(); setInterval(loadCategories, 30000);
-loadTelegramStatus(); setInterval(loadTelegramStatus, 10000); // Load Telegram status every 10 seconds
+loadTelegramStatus(); setInterval(loadTelegramStatus, 10000);
+loadThreadStatus(); setInterval(loadThreadStatus, 5000);
 document.getElementById('as-btn').style.borderColor='var(--accent)';
 document.getElementById('as-btn').style.color='var(--accent)';
 window.addEventListener('resize', drawTrafficChart);

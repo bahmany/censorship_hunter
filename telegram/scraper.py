@@ -1148,6 +1148,8 @@ class BotReporter:
     
     Uses TOKEN and CHAT_ID from environment - no Telethon, no SSH tunnel,
     no user session needed. Works directly over the internet.
+    
+    Enhanced with fallback mechanisms for Iranian censorship.
     """
 
     BOT_API_URL = "https://api.telegram.org/bot{token}/{method}"
@@ -1159,6 +1161,16 @@ class BotReporter:
         self.enabled = bool(self.token and self.chat_id)
         if not self.enabled:
             self.logger.info("Bot reporter disabled: TOKEN or CHAT_ID not set")
+        
+        # Initialize fallback sender
+        self.fallback_sender = None
+        if self.enabled:
+            try:
+                from .fallback_sender import TelegramFallbackSender
+                self.fallback_sender = TelegramFallbackSender()
+                self.logger.info("Fallback sender initialized")
+            except Exception as e:
+                self.logger.warning(f"Failed to initialize fallback sender: {e}")
 
     # ---- low-level helpers ------------------------------------------------
 
@@ -1237,6 +1249,28 @@ class BotReporter:
         target = chat_id or self.chat_id
         if not target:
             return False
+        
+        # Try fallback sender first if available
+        if self.fallback_sender:
+            try:
+                # Get current configs from orchestrator if available
+                configs = []
+                import sys
+                if 'orchestrator' in sys.modules:
+                    from hunter.orchestrator import HunterOrchestrator
+                    # Try to get current working configs
+                    # This is a placeholder - you'll need to implement getting actual configs
+                
+                result = await self.fallback_sender.send_with_fallbacks(text, configs)
+                if result.get("ok"):
+                    self.logger.info(f"Message sent via {result.get('method')}")
+                    return True
+                else:
+                    self.logger.warning(f"All fallback methods failed: {result.get('error')}")
+            except Exception as e:
+                self.logger.warning(f"Fallback sender failed: {e}")
+        
+        # Fallback to direct HTTP API
         result = await self._post_json("sendMessage", {
             "chat_id": target,
             "text": text,
@@ -1318,6 +1352,26 @@ class BotReporter:
         uris = gold_uris[:max_lines]
         batch = self.CONFIGS_PER_POST
         total_posts = (len(uris) + batch - 1) // batch
+
+        # Try fallback sender first if available
+        if self.fallback_sender:
+            try:
+                # Get configs from fallback sender (set by orchestrator)
+                configs = getattr(self.fallback_sender, 'current_configs', [])
+                
+                # Create summary message
+                import datetime
+                now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+                summary = f"🏆 Hunter — {now}\n\n📊 {len(uris)} validated configs"
+                
+                result = await self.fallback_sender.send_with_fallbacks(summary, configs)
+                if result.get("ok"):
+                    self.logger.info(f"Configs sent via {result.get('method')}")
+                    # Continue with file sending
+                else:
+                    self.logger.warning(f"Fallback failed: {result.get('error')}")
+            except Exception as e:
+                self.logger.warning(f"Fallback sender error: {e}")
 
         ok = True
         for idx in range(0, len(uris), batch):

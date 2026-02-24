@@ -1096,6 +1096,19 @@ class HunterOrchestrator:
                             await self._flush_telegram_outbox(reporter, chat_id=chat_id)
                         except Exception:
                             pass
+                        
+                        # Get current working configs for BotReporter fallback
+                        if hasattr(reporter, 'fallback_sender') and reporter.fallback_sender:
+                            # Get current working configs from balancer
+                            working_configs = []
+                            if self.balancer:
+                                try:
+                                    working_configs = [b.uri for b in self.balancer.get_working_backends()[:10]]
+                                except Exception:
+                                    pass
+                            # Pass configs to the reporter
+                            reporter.fallback_sender.current_configs = working_configs
+                        
                         ok_target = bool(await reporter.report_config_files(
                             gold_uris=send_uris,
                             gemini_uris=(gemini_uris or None),
@@ -1665,7 +1678,14 @@ class HunterOrchestrator:
                 await asyncio.sleep(backoff)
 
     async def start(self):
-        """Start the orchestrator."""
+        """Start the orchestrator using ThreadManager.
+        
+        Each major operation runs in its own dedicated thread:
+          - config_scanner:      discovers & validates configs every 30 min
+          - telegram_publisher:  publishes configs to Telegram every 30 min
+          - balancer:            keeps load-balancer alive on 10808 / 10809
+          - health_monitor:      watches RAM / CPU and throttles workers
+        """
         # Start real-time dashboard (replaces old status bar + verbose console logs)
         if self.dashboard is not None:
             self.dashboard.start()
@@ -1681,30 +1701,49 @@ class HunterOrchestrator:
         else:
             # Fallback to old status bar if dashboard unavailable
             self.ui.status.start()
-        
-        # Start balancer
-        if self.balancer is not None:
-            seed = self._load_balancer_cache(name="HUNTER_balancer_cache.json")
-            self.balancer.start(initial_configs=seed if seed else None)
-            self.ui.status.update(balancer=len(seed) if seed else 0)
-            self._sync_dashboard_balancer()
 
-        if self.gemini_balancer:
-            gemini_seed = self._load_balancer_cache(name="HUNTER_gemini_balancer_cache.json")
-            self.gemini_balancer.start(initial_configs=gemini_seed if gemini_seed else None)
-            self._sync_dashboard_balancer()
+        # Create and start ThreadManager — all tasks run in dedicated threads
+        try:
+            from hunter.core.thread_manager import ThreadManager
+        except ImportError:
+            from core.thread_manager import ThreadManager
 
-        if self._tg_publish_task is None:
-            try:
-                self._tg_publish_task = asyncio.create_task(self._telegram_periodic_publish_loop())
-            except Exception:
-                self._tg_publish_task = None
+        self.thread_manager = ThreadManager(self)
+        self.thread_manager.start_all()
+        self.logger.info(
+            f"ThreadManager started — threads: "
+            f"{', '.join(w.name for w in self.thread_manager._workers)}"
+        )
 
-        # Start autonomous loop
-        await self.run_autonomous_loop()
+        # Keep main coroutine alive; sync dashboard periodically
+        try:
+            while self.thread_manager.is_running():
+                # Update dashboard with thread status
+                if self.dashboard:
+                    try:
+                        status = self.thread_manager.get_status()
+                        hw = status.get("hardware", {})
+                        self.dashboard.update(
+                            memory_pct=hw.get("ram_percent", 0),
+                            mode=hw.get("mode", "?"),
+                        )
+                        self._sync_dashboard_balancer()
+                    except Exception:
+                        pass
+                await asyncio.sleep(5)
+        except asyncio.CancelledError:
+            pass
 
     async def stop(self):
-        """Stop the orchestrator."""
+        """Stop the orchestrator and all managed threads."""
+        # Stop ThreadManager first (stops scanner, publisher, balancer, health threads)
+        if hasattr(self, 'thread_manager') and self.thread_manager:
+            try:
+                self.thread_manager.stop_all(timeout=15)
+                self.logger.info("ThreadManager stopped all workers")
+            except Exception as exc:
+                self.logger.warning(f"ThreadManager stop error: {exc}")
+
         # Stop dashboard / status bar
         if self.dashboard:
             self.dashboard.stop()

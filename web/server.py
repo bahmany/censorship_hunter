@@ -497,6 +497,16 @@ def create_app():
             return jsonify({'ok': True, 'count': count, 'message': f'{count} backends set'})
         return jsonify({'ok': False, 'error': 'No valid backends accepted'}), 400
 
+    @app.route('/api/threads/status')
+    def api_threads_status():
+        """Get status of all managed worker threads."""
+        if not _orchestrator:
+            return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
+        mgr = getattr(_orchestrator, 'thread_manager', None)
+        if not mgr:
+            return jsonify({'ok': False, 'error': 'ThreadManager not initialized'}), 503
+        return jsonify({'ok': True, **mgr.get_status()})
+
     @app.route('/api/telegram/report-status')
     def telegram_report_status():
         """Get Telegram reporting status."""
@@ -577,7 +587,7 @@ def create_app():
                 done.set()
         
         # Run in background thread
-        threading.Thread(target=_run_async, args=(_test_send,), daemon=True).start()
+        threading.Thread(target=_run_async, args=(_test_send,)).start()
         
         # Wait for result
         done.wait(timeout=30)
@@ -591,7 +601,12 @@ def create_app():
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
-            loop.run_until_complete(coro)
+            # Check if coro is already a coroutine
+            if asyncio.iscoroutine(coro):
+                loop.run_until_complete(coro)
+            else:
+                # If it's not a coroutine, assume it's a function that returns one
+                loop.run_until_complete(coro())
         finally:
             loop.close()
 
