@@ -621,163 +621,300 @@ class TelegramScraper:
             self._telegram_lock.release()
 
     async def _connect_inner(self, use_proxy_fallback: bool = True, _retry: bool = False, _lock_retry: int = 0) -> bool:
-        """Inner connection logic (must be called under _telegram_lock)."""
+        """Inner connection logic — tries multiple proxy methods until one works.
+
+        Order: env proxy → SSH tunnel → Tor → balancer → V2Ray cache → direct.
+        Each method gets its own TelegramClient attempt so a single failure
+        doesn't block the rest.
+        """
         if self.client and await self.heartbeat.check_connection(self.client):
             return True
 
-        try:
-            proxy = None
-            proxy_host = os.getenv("HUNTER_TELEGRAM_PROXY_HOST")
-            proxy_port_raw = os.getenv("HUNTER_TELEGRAM_PROXY_PORT")
-            proxy_user = os.getenv("HUNTER_TELEGRAM_PROXY_USER")
-            proxy_pass = os.getenv("HUNTER_TELEGRAM_PROXY_PASS")
+        # ── Build ordered list of (label, proxy_tuple | None) candidates ──
+        candidates: list = []  # [(label, proxy_or_none), ...]
 
-            if proxy_host and proxy_port_raw:
-                try:
-                    proxy_port = int(proxy_port_raw)
-                    if proxy_user or proxy_pass:
-                        proxy = (socks.SOCKS5, proxy_host, proxy_port, True, proxy_user or "", proxy_pass or "")
-                    else:
-                        proxy = (socks.SOCKS5, proxy_host, proxy_port)
-                except Exception:
-                    proxy = None
-
-            # Fall back to SSH tunnel for proxy (local SOCKS5)
-            if proxy is None:
-                proxy_port = self.establish_ssh_tunnel()
-                if proxy_port:
-                    proxy = (socks.SOCKS5, '127.0.0.1', proxy_port)
-                elif use_proxy_fallback:
-                    # SSH failed, try V2Ray proxy fallback
-                    self.logger.info("SSH tunnel failed, attempting V2Ray proxy fallback...")
-                    proxy_port = await self._try_v2ray_proxy_fallback()
-                    if proxy_port:
-                        proxy = (socks.SOCKS5, '127.0.0.1', proxy_port)
-
-            # Disable automatic reconnects - we manage reconnection manually
-            # This prevents noisy reconnect loops and gives us control
-            self.client = TelegramClient(
-                self._session_base_path(),
-                self.config.get("api_id"),
-                self.config.get("api_hash"),
-                proxy=proxy,
-                connection_retries=1,
-                auto_reconnect=False,
-            )
-
-            await self.client.connect()
-
-            if not await self.client.is_user_authorized():
-                phone = self.config.get("phone")
-                if not phone:
-                    self.logger.info("Phone number not set - Telegram scraping disabled")
-                    return False
-
-                # Only attempt interactive auth if stdin is a TTY or web dashboard is active
-                _web_active = False
-                try:
-                    from web.auth_bridge import AuthBridge
-                    _web_active = AuthBridge().active
-                except ImportError:
-                    pass
-                if not _web_active and (not sys.stdin or not sys.stdin.isatty()):
-                    self.logger.info("Non-interactive mode - Telegram user auth skipped (use Bot API for reporting)")
-                    return False
-
-                # Use interactive authentication
-                if self.telegram_auth:
-                    if not await self.telegram_auth.authenticate(self.client, phone):
-                        self.logger.info("Telegram authentication not completed")
-                        return False
+        # 1) Explicit env proxy
+        proxy_host = os.getenv("HUNTER_TELEGRAM_PROXY_HOST")
+        proxy_port_raw = os.getenv("HUNTER_TELEGRAM_PROXY_PORT")
+        if proxy_host and proxy_port_raw:
+            try:
+                _pp = int(proxy_port_raw)
+                _pu = os.getenv("HUNTER_TELEGRAM_PROXY_USER")
+                _ppw = os.getenv("HUNTER_TELEGRAM_PROXY_PASS")
+                if _pu or _ppw:
+                    candidates.append(("env-proxy", (socks.SOCKS5, proxy_host, _pp, True, _pu or "", _ppw or "")))
                 else:
-                    # Fallback to basic authentication
-                    self.logger.info("Using basic Telegram auth")
-                    await self.client.send_code_request(phone)
-                    code = input("Enter the Telegram login code: ").strip()
-                    if code:
-                        try:
-                            await self.client.sign_in(phone=phone, code=code)
-                        except SessionPasswordNeededError:
-                            pwd = input("Enter Telegram 2FA password: ").strip()
-                            if pwd:
-                                await self.client.sign_in(password=pwd)
-                    else:
-                        self.logger.info("Telegram authentication cancelled")
+                    candidates.append(("env-proxy", (socks.SOCKS5, proxy_host, _pp)))
+            except Exception:
+                pass
+
+        # 2) SSH tunnel
+        if PARAMIKO_AVAILABLE and self.ssh_servers:
+            ssh_port = self.establish_ssh_tunnel()
+            if ssh_port:
+                candidates.append(("ssh-tunnel", (socks.SOCKS5, '127.0.0.1', ssh_port)))
+
+        # 3) Tor SOCKS5 (start tor.exe if available)
+        if use_proxy_fallback:
+            tor_port = self._start_tor_socks()
+            if tor_port:
+                candidates.append(("tor", (socks.SOCKS5, '127.0.0.1', tor_port)))
+
+        # 4) Running balancer SOCKS port
+        if use_proxy_fallback:
+            bal_proxy = self._get_balancer_proxy()
+            if bal_proxy:
+                candidates.append(("balancer", bal_proxy))
+
+        # 5) Well-known local SOCKS ports (e.g. v2rayN, Clash, etc.)
+        if use_proxy_fallback:
+            import socket as _sock
+            for _lp in (10808, 1080, 2080, 7890):
+                try:
+                    with _sock.create_connection(("127.0.0.1", _lp), timeout=0.5):
+                        candidates.append((f"local:{_lp}", (socks.SOCKS5, '127.0.0.1', _lp)))
+                        break  # only use first working local port
+                except Exception:
+                    continue
+
+        # 6) V2Ray proxy fallback from cached configs
+        if use_proxy_fallback:
+            v2_port = await self._try_v2ray_proxy_fallback()
+            if v2_port:
+                candidates.append(("v2ray-cache", (socks.SOCKS5, '127.0.0.1', v2_port)))
+
+        # 7) Direct (no proxy) — last resort, may work outside Iran
+        candidates.append(("direct", None))
+
+        self.logger.info(f"Telegram connect: {len(candidates)} methods to try: {[c[0] for c in candidates]}")
+
+        # ── Try each candidate ──
+        for label, proxy in candidates:
+            try:
+                await self._reset_client()
+                self.logger.info(f"[TG-Connect] Trying {label}...")
+
+                self.client = TelegramClient(
+                    self._session_base_path(),
+                    self.config.get("api_id"),
+                    self.config.get("api_hash"),
+                    proxy=proxy,
+                    connection_retries=1,
+                    auto_reconnect=False,
+                    timeout=15,
+                )
+
+                await asyncio.wait_for(self.client.connect(), timeout=20)
+
+                if not await self.client.is_user_authorized():
+                    ok = await self._try_authorize()
+                    if not ok:
                         return False
 
-            if await self.client.is_user_authorized():
-                self.logger.info("Connected to Telegram successfully")
-                return True
+                if await self.client.is_user_authorized():
+                    self.logger.info(f"[TG-Connect] Connected via {label}")
+                    return True
 
-        except SecurityError as e:
-            msg = str(e)
-            self.logger.warning(f"Telegram SecurityError: {msg}")
-            await self._reset_client()
-            self.close_ssh_tunnel()
-
-            reset_ok = os.getenv("HUNTER_RESET_TELEGRAM_SESSION", "false").lower() == "true"
-            if reset_ok and ("wrong session" in msg.lower() or "session id" in msg.lower()):
-                self.logger.warning("Resetting Telegram session files due to SecurityError; you may need to re-login")
-                self._delete_session_files()
-            return False
-
-        except Exception as e:
-            msg = str(e)
-            # Special handling for database locked error
-            if "database is locked" in msg.lower():
-                self._db_locked_count += 1
-                try:
-                    sp = self._session_base_path() + ".session"
-                except Exception:
-                    sp = "(unknown)"
-                self.logger.warning(
-                    f"Telegram session database is locked (attempt #{self._db_locked_count}, lock_retry={_lock_retry}, session={sp})"
-                )
-                
-                # Properly disconnect the broken client first
+            except SecurityError as e:
+                msg = str(e)
+                self.logger.warning(f"Telegram SecurityError via {label}: {msg}")
                 await self._reset_client()
+                self.close_ssh_tunnel()
+                reset_ok = os.getenv("HUNTER_RESET_TELEGRAM_SESSION", "false").lower() == "true"
+                if reset_ok and ("wrong session" in msg.lower() or "session id" in msg.lower()):
+                    self.logger.warning("Resetting session files due to SecurityError")
+                    self._delete_session_files()
+                return False  # SecurityError = don't try other proxies
 
-                max_lock_retries = int(os.getenv("HUNTER_TELEGRAM_LOCK_RETRIES", "3"))
-                if _lock_retry < max_lock_retries:
-                    await asyncio.sleep(min(5.0, 0.8 * (_lock_retry + 1)))
-                    return await self._connect_inner(
+            except Exception as e:
+                msg = str(e)
+
+                # Database locked — special retry logic
+                if "database is locked" in msg.lower():
+                    return await self._handle_db_locked(
                         use_proxy_fallback=use_proxy_fallback,
                         _retry=_retry,
-                        _lock_retry=_lock_retry + 1,
+                        _lock_retry=_lock_retry,
                     )
-                
-                # Only attempt auto-reset once per session, and not on retry
-                if _retry:
-                    self.logger.info("Already retried after session reset - giving up this attempt")
-                    return False
-                
-                # Check if no other Hunter processes are running (smart auto-reset)
-                auto_reset = os.getenv("HUNTER_AUTO_RESET_LOCKED_SESSION", "false").lower() == "true"
-                smart_auto_reset = os.getenv("HUNTER_SMART_AUTO_RESET", "true").lower() == "true"
-                other_hunter_running = self._check_other_hunter_processes()
-                
-                if auto_reset or (smart_auto_reset and not other_hunter_running):
-                    if not other_hunter_running:
-                        self.logger.info("No other Hunter processes detected - safe to reset session")
-                    self.logger.info("Deleting locked session files and retrying connection...")
-                    self._delete_session_files()
-                    
-                    # Wait briefly for file system to release locks
-                    await asyncio.sleep(1)
-                    
-                    # Retry connection with fresh session (will require re-login)
-                    self.logger.info("Retrying Telegram connection with fresh session...")
-                    return await self._connect_inner(use_proxy_fallback=use_proxy_fallback, _retry=True, _lock_retry=0)
-                else:
-                    if other_hunter_running:
-                        self.logger.warning("Other Hunter processes detected - not auto-resetting")
-                    self.logger.info("Tip: Set HUNTER_AUTO_RESET_LOCKED_SESSION=true to force auto-reset")
-                    return False
-            else:
-                self.logger.info(f"Telegram connection skipped: {e}")
-                await self._reset_client()
 
+                self.logger.info(f"[TG-Connect] {label} failed: {type(e).__name__}: {e}")
+                await self._reset_client()
+                continue  # try next method
+
+        self.logger.warning("[TG-Connect] All methods exhausted — Telegram unavailable this cycle")
         return False
+
+    async def _try_authorize(self) -> bool:
+        """Handle Telegram user authorization (send code / 2FA)."""
+        phone = self.config.get("phone")
+        if not phone:
+            self.logger.info("Phone number not set - Telegram scraping disabled")
+            return False
+
+        _web_active = False
+        try:
+            from web.auth_bridge import AuthBridge
+            _web_active = AuthBridge().active
+        except ImportError:
+            pass
+        if not _web_active and (not sys.stdin or not sys.stdin.isatty()):
+            self.logger.info("Non-interactive mode - Telegram user auth skipped (use Bot API for reporting)")
+            return False
+
+        if self.telegram_auth:
+            if not await self.telegram_auth.authenticate(self.client, phone):
+                self.logger.info("Telegram authentication not completed")
+                return False
+        else:
+            self.logger.info("Using basic Telegram auth")
+            await self.client.send_code_request(phone)
+            code = input("Enter the Telegram login code: ").strip()
+            if code:
+                try:
+                    await self.client.sign_in(phone=phone, code=code)
+                except SessionPasswordNeededError:
+                    pwd = input("Enter Telegram 2FA password: ").strip()
+                    if pwd:
+                        await self.client.sign_in(password=pwd)
+            else:
+                self.logger.info("Telegram authentication cancelled")
+                return False
+        return True
+
+    async def _handle_db_locked(self, use_proxy_fallback: bool, _retry: bool, _lock_retry: int) -> bool:
+        """Handle 'database is locked' errors with retry and optional session reset."""
+        self._db_locked_count += 1
+        try:
+            sp = self._session_base_path() + ".session"
+        except Exception:
+            sp = "(unknown)"
+        self.logger.warning(
+            f"Telegram session database is locked (attempt #{self._db_locked_count}, "
+            f"lock_retry={_lock_retry}, session={sp})"
+        )
+        await self._reset_client()
+
+        max_lock_retries = int(os.getenv("HUNTER_TELEGRAM_LOCK_RETRIES", "3"))
+        if _lock_retry < max_lock_retries:
+            await asyncio.sleep(min(5.0, 0.8 * (_lock_retry + 1)))
+            return await self._connect_inner(
+                use_proxy_fallback=use_proxy_fallback,
+                _retry=_retry,
+                _lock_retry=_lock_retry + 1,
+            )
+
+        if _retry:
+            self.logger.info("Already retried after session reset - giving up")
+            return False
+
+        auto_reset = os.getenv("HUNTER_AUTO_RESET_LOCKED_SESSION", "false").lower() == "true"
+        smart_auto_reset = os.getenv("HUNTER_SMART_AUTO_RESET", "true").lower() == "true"
+        other_hunter_running = self._check_other_hunter_processes()
+
+        if auto_reset or (smart_auto_reset and not other_hunter_running):
+            if not other_hunter_running:
+                self.logger.info("No other Hunter processes detected - safe to reset session")
+            self.logger.info("Deleting locked session files and retrying...")
+            self._delete_session_files()
+            await asyncio.sleep(1)
+            return await self._connect_inner(use_proxy_fallback=use_proxy_fallback, _retry=True, _lock_retry=0)
+
+        if other_hunter_running:
+            self.logger.warning("Other Hunter processes detected - not auto-resetting")
+        self.logger.info("Tip: Set HUNTER_AUTO_RESET_LOCKED_SESSION=true to force auto-reset")
+        return False
+
+    def _start_tor_socks(self) -> Optional[int]:
+        """Start a local Tor SOCKS5 proxy if tor binary is available.
+
+        Returns the SOCKS port if successful, None otherwise.
+        """
+        if getattr(self, '_tor_process', None) and getattr(self, '_tor_port', None):
+            # Already running
+            try:
+                if self._tor_process.poll() is None:
+                    return self._tor_port
+            except Exception:
+                pass
+
+        import socket as _sock
+        import subprocess as _sp
+
+        tor_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "tor.exe")
+        if not os.path.isfile(tor_path):
+            # Try non-Windows name
+            tor_path2 = os.path.join(os.path.dirname(os.path.dirname(__file__)), "bin", "tor")
+            if os.path.isfile(tor_path2):
+                tor_path = tor_path2
+            else:
+                return None
+
+        # Find a free port
+        tor_port = 9150
+        for candidate_port in (9150, 9250, 9350):
+            try:
+                s = _sock.socket(_sock.AF_INET, _sock.SOCK_STREAM)
+                s.bind(("127.0.0.1", candidate_port))
+                s.close()
+                tor_port = candidate_port
+                break
+            except OSError:
+                continue
+
+        try:
+            runtime = os.path.join(os.path.dirname(os.path.dirname(__file__)), "runtime", "tor_data")
+            os.makedirs(runtime, exist_ok=True)
+
+            cmd = [
+                tor_path,
+                "--SocksPort", str(tor_port),
+                "--DataDirectory", runtime,
+                "--Log", "err stderr",
+            ]
+            creation_flags = 0
+            if sys.platform == "win32":
+                creation_flags = _sp.CREATE_NO_WINDOW
+
+            proc = _sp.Popen(cmd, stdout=_sp.PIPE, stderr=_sp.PIPE, creationflags=creation_flags)
+
+            # Wait for Tor to bootstrap (up to 25 seconds)
+            for _ in range(50):
+                time.sleep(0.5)
+                if proc.poll() is not None:
+                    self.logger.info(f"Tor exited early (rc={proc.returncode})")
+                    return None
+                try:
+                    with _sock.create_connection(("127.0.0.1", tor_port), timeout=1):
+                        self._tor_process = proc
+                        self._tor_port = tor_port
+                        self.logger.info(f"[Tor] SOCKS5 ready on port {tor_port}")
+                        return tor_port
+                except Exception:
+                    continue
+
+            # Timeout
+            proc.terminate()
+            self.logger.info("[Tor] Failed to bootstrap within 25s")
+            return None
+
+        except Exception as e:
+            self.logger.debug(f"[Tor] Start failed: {e}")
+            return None
+
+    def _get_balancer_proxy(self) -> Optional[tuple]:
+        """Get proxy tuple from a running Hunter balancer if available."""
+        try:
+            # The orchestrator stores itself at a well-known module attribute
+            import hunter.orchestrator as _omod
+            orch = getattr(_omod, '_global_orchestrator', None)
+            if orch is None:
+                return None
+            bal = getattr(orch, 'balancer', None)
+            if bal and getattr(bal, '_running', False) and getattr(bal, '_backends', None):
+                return (socks.SOCKS5, '127.0.0.1', bal.port)
+        except Exception:
+            pass
+        return None
 
     async def scrape_configs(self, channels: List[str], limit: int = 100) -> Set[str]:
         """Scrape proxy configurations from Telegram channels."""

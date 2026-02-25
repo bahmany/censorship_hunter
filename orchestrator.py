@@ -302,6 +302,11 @@ class HunterOrchestrator:
         
         self.logger.info("Hunter Orchestrator initialized successfully")
 
+        # Expose orchestrator globally so subsystems (e.g. TelegramScraper)
+        # can discover the running balancer for proxy fallback.
+        import hunter.orchestrator as _self_mod
+        _self_mod._global_orchestrator = self
+
     async def scrape_configs(self) -> List[str]:
         """Scrape proxy configurations with Telegram priority and flexible fallbacks."""
         import gc as _gc
@@ -391,19 +396,24 @@ class HunterOrchestrator:
                 if self.dashboard:
                     self.dashboard.source_update("Telegram", status="failed")
             
-            # PHASE 2: HTTP Fallback (if needed)
-            if len(all_configs) < per_source_cap and self.flexible_fetcher:
+            # PHASE 2: HTTP / GitHub Fallback
+            # Always fetch from GitHub when Telegram failed; also fetch if we need more configs
+            telegram_failed = "telegram" not in sources_used
+            need_more = len(all_configs) < per_source_cap
+            if (telegram_failed or need_more) and self.flexible_fetcher:
                 try:
+                    http_cap = max(per_source_cap, max_total // 2) if telegram_failed else per_source_cap
                     self.logger.info(
-                        f"[FlexibleFetch] HTTP fallback needed: have {len(all_configs)}, "
-                        f"need {per_source_cap}"
+                        f"[FlexibleFetch] GitHub/HTTP fetch "
+                        f"({'Telegram failed — GitHub is PRIMARY' if telegram_failed else 'supplementing'}): "
+                        f"have {len(all_configs)}, cap {http_cap}"
                     )
                     
                     http_results = await self.flexible_fetcher.fetch_http_sources_parallel(
                         proxy_ports=proxy_ports,
-                        max_configs=per_source_cap,
-                        timeout_per_source=25.0,
-                        max_workers=6
+                        max_configs=http_cap,
+                        timeout_per_source=35.0 if telegram_failed else 25.0,
+                        max_workers=8 if telegram_failed else 6
                     )
                     
                     http_success_count = 0

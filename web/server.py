@@ -80,6 +80,21 @@ _web_log_handler.setFormatter(logging.Formatter(
 ))
 
 
+_original_socket = socket.socket  # Save before any monkey-patching
+
+
+def _ensure_clean_socket():
+    """Restore original socket.socket if PySocks has monkey-patched it.
+
+    PySocks ``set_default_proxy`` + ``socket.socket = socks.socksocket``
+    replaces the global socket class.  This breaks ``asyncio.new_event_loop``
+    because ``socket.socketpair()`` tries to route loopback through SOCKS.
+    Call this at the top of any thread that creates an event loop.
+    """
+    if socket.socket is not _original_socket:
+        socket.socket = _original_socket
+
+
 def create_app():
     """Create and configure the Flask application."""
     app = Flask(
@@ -216,6 +231,7 @@ def create_app():
 
         def _do_login():
             import asyncio
+            _ensure_clean_socket()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -654,6 +670,7 @@ def create_app():
             return jsonify({'ok': False, 'error': 'Orchestrator not available'}), 503
         logger.info('[WebAdmin] Manual rescan triggered')
         def _run():
+            _ensure_clean_socket()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -672,6 +689,7 @@ def create_app():
         result_holder = [None]
         done = threading.Event()
         def _run():
+            _ensure_clean_socket()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:
@@ -692,6 +710,7 @@ def create_app():
         result_holder = [None]
         done = threading.Event()
         def _run():
+            _ensure_clean_socket()
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
             try:

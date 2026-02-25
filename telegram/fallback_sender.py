@@ -192,17 +192,25 @@ class TelegramFallbackSender:
             if result != 0:
                 return {"success": False, "error": f"Port {port} not open"}
             
-            # Send through SOCKS proxy
-            import socks
-            socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", port)
-            socket.socket = socks.socksocket
+            # Send through SOCKS proxy using urllib ProxyHandler (no global monkey-patch)
+            import urllib.request
+            proxy_handler = urllib.request.ProxyHandler({
+                'http': f'socks5h://127.0.0.1:{port}',
+                'https': f'socks5h://127.0.0.1:{port}',
+            })
+            opener = urllib.request.build_opener(proxy_handler)
             
-            try:
-                result = await self._send_http_request(message)
+            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+            data = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
+            body = json.dumps(data).encode('utf-8')
+            req = Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
+            
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(None, lambda: opener.open(req, timeout=30).read())
+            result_json = json.loads(resp)
+            if result_json.get('ok'):
                 return {"success": True, "port": port}
-            finally:
-                # Reset socket
-                socket.socket = socket._socketobject
+            return {"success": False, "error": result_json.get('description', 'unknown')}
                 
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -244,17 +252,23 @@ class TelegramFallbackSender:
             if process.poll() is not None:
                 return False
             
-            # Send through XRay proxy
-            import socks
-            socks.set_default_proxy(socks.SOCKS5, "127.0.0.1", port)
-            socket.socket = socks.socksocket
+            # Send through XRay SOCKS proxy using urllib ProxyHandler (no global monkey-patch)
+            import urllib.request
+            proxy_handler = urllib.request.ProxyHandler({
+                'http': f'socks5h://127.0.0.1:{port}',
+                'https': f'socks5h://127.0.0.1:{port}',
+            })
+            opener = urllib.request.build_opener(proxy_handler)
             
-            try:
-                result = await self._send_http_request(message)
-                return result
-            finally:
-                # Reset socket
-                socket.socket = socket._socketobject
+            url = f"https://api.telegram.org/bot{self.token}/sendMessage"
+            data = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
+            body = json.dumps(data).encode('utf-8')
+            req = Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
+            
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(None, lambda: opener.open(req, timeout=30).read())
+            result_json = json.loads(resp)
+            return result_json.get('ok', False)
                 
         except Exception as e:
             self.logger.debug(f"XRay proxy failed: {e}")
@@ -266,7 +280,10 @@ class TelegramFallbackSender:
                     process.wait(timeout=5)
                 except subprocess.TimeoutExpired:
                     process.kill()
-            os.unlink(config_file)
+            try:
+                os.unlink(config_file)
+            except Exception:
+                pass
     
     async def _send_http_request(self, message: str, proxy_port: Optional[int] = None) -> bool:
         """Send HTTP request to Telegram API."""

@@ -226,84 +226,33 @@ def print_config_info(config: HunterConfig):
 
 
 def kill_existing_hunter_processes(logger):
-    """Kill any existing Hunter and XRay processes before starting."""
-    import subprocess
+    """Kill only processes occupying Hunter's balancer ports (10808, 10809).
+
+    Other xray/v2ray instances (e.g. user-launched) are left untouched.
+    """
+    from core.utils import kill_process_on_port
     killed_count = 0
-    
+
+    for port in (10808, 10809):
+        try:
+            if kill_process_on_port(port):
+                killed_count += 1
+        except Exception:
+            pass
+
+    if killed_count > 0:
+        logger.info(f"Killed {killed_count} process(es) on Hunter ports (10808/10809)")
+        import time
+        time.sleep(2)  # Wait for processes to fully terminate
+
+    # Remove PID file if exists
     try:
-        if sys.platform == "win32":
-            # Kill Python processes related to Hunter
-            try:
-                result = subprocess.run(
-                    ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV", "/NH"],
-                    capture_output=True, text=True, timeout=5
-                )
-                for line in result.stdout.splitlines():
-                    if "python" in line.lower():
-                        parts = line.replace('"', '').split(',')
-                        if len(parts) >= 2:
-                            pid = parts[1].strip()
-                            try:
-                                # Check if it's a Hunter process by checking command line
-                                cmd_result = subprocess.run(
-                                    ["wmic", "process", "where", f"ProcessId={pid}", "get", "CommandLine", "/FORMAT:LIST"],
-                                    capture_output=True, text=True, timeout=3
-                                )
-                                if ("hunter" in cmd_result.stdout.lower() or "pythonProject1" in cmd_result.stdout) and pid != str(os.getpid()):
-                                    subprocess.run(["taskkill", "/F", "/PID", pid], 
-                                                 capture_output=True, timeout=3)
-                                    killed_count += 1
-                            except:
-                                pass
-            except:
-                pass
-            
-            # Kill XRay processes
-            try:
-                subprocess.run(["taskkill", "/F", "/IM", "xray.exe"], 
-                             capture_output=True, timeout=3)
-                killed_count += 1
-            except:
-                pass
-        else:
-            # Linux/Mac
-            try:
-                result = subprocess.run(
-                    ["pgrep", "-f", "hunter"],
-                    capture_output=True, text=True, timeout=3
-                )
-                for pid in result.stdout.strip().split('\n'):
-                    if pid and pid.strip() != str(os.getpid()):
-                        try:
-                            subprocess.run(["kill", "-9", pid], timeout=2)
-                            killed_count += 1
-                        except:
-                            pass
-            except:
-                pass
-            
-            try:
-                subprocess.run(["pkill", "-9", "xray"], timeout=3)
-                killed_count += 1
-            except:
-                pass
-        
-        if killed_count > 0:
-            logger.info(f"Killed {killed_count} existing Hunter/XRay process(es)")
-            import time
-            time.sleep(2)  # Wait for processes to fully terminate
-        
-        # Remove PID file if exists
         runtime_dir = Path(__file__).parent / "runtime"
         pid_file = runtime_dir / "hunter_service.pid"
         if pid_file.exists():
-            try:
-                pid_file.unlink()
-            except:
-                pass
-                
-    except Exception as e:
-        logger.warning(f"Error killing existing processes: {e}")
+            pid_file.unlink()
+    except Exception:
+        pass
 
 
 def load_env_files():
