@@ -304,11 +304,17 @@ class HunterOrchestrator:
 
         # Expose orchestrator globally so subsystems (e.g. TelegramScraper)
         # can discover the running balancer for proxy fallback.
-        import hunter.orchestrator as _self_mod
+        try:
+            import hunter.orchestrator as _self_mod
+        except ImportError:
+            import orchestrator as _self_mod
         _self_mod._global_orchestrator = self
 
-    async def scrape_configs(self) -> List[str]:
-        """Scrape proxy configurations with Telegram priority and flexible fallbacks."""
+    async def scrape_configs(self) -> dict:
+        """Scrape proxy configurations with Telegram priority and flexible fallbacks.
+
+        Returns dict with keys ``telegram`` and ``http``, each a list of URI strings.
+        """
         import gc as _gc
         
         # Use flexible fetcher if available
@@ -318,7 +324,7 @@ class HunterOrchestrator:
         # Fall back to original implementation
         return await self._scrape_configs_original()
     
-    async def _scrape_configs_flexible(self) -> List[str]:
+    async def _scrape_configs_flexible(self) -> dict:
         """Flexible config scraping with Telegram priority and circuit breakers."""
         import gc as _gc
         
@@ -331,7 +337,8 @@ class HunterOrchestrator:
         max_total = self.config.get("max_total", 1000)
         per_source_cap = max(100, max_total // 3)
         
-        all_configs: set = set()
+        telegram_configs: set = set()
+        http_configs: set = set()
         sources_used = []
         
         if self.dashboard:
@@ -357,7 +364,7 @@ class HunterOrchestrator:
                     )
                     
                     if result.success:
-                        all_configs.update(result.configs)
+                        telegram_configs.update(result.configs)
                         sources_used.append("telegram")
                         tracker.source_done("Telegram", count=len(result.configs))
                         if self.dashboard:
@@ -370,9 +377,9 @@ class HunterOrchestrator:
                         )
                         
                         # Skip HTTP if we got enough configs
-                        if len(all_configs) >= per_source_cap * 2:
+                        if len(telegram_configs) >= per_source_cap * 2:
                             self.logger.info(
-                                f"[FlexibleFetch] Sufficient configs ({len(all_configs)}), "
+                                f"[FlexibleFetch] Sufficient Telegram configs ({len(telegram_configs)}), "
                                 f"skipping HTTP fallback"
                             )
                             tracker.source_done("HTTP-Fallback", count=0)
@@ -396,17 +403,15 @@ class HunterOrchestrator:
                 if self.dashboard:
                     self.dashboard.source_update("Telegram", status="failed")
             
-            # PHASE 2: HTTP / GitHub Fallback
-            # Always fetch from GitHub when Telegram failed; also fetch if we need more configs
+            # PHASE 2: HTTP / GitHub (always fetch — separate benchmark line)
             telegram_failed = "telegram" not in sources_used
-            need_more = len(all_configs) < per_source_cap
-            if (telegram_failed or need_more) and self.flexible_fetcher:
+            if self.flexible_fetcher:
                 try:
                     http_cap = max(per_source_cap, max_total // 2) if telegram_failed else per_source_cap
                     self.logger.info(
                         f"[FlexibleFetch] GitHub/HTTP fetch "
-                        f"({'Telegram failed — GitHub is PRIMARY' if telegram_failed else 'supplementing'}): "
-                        f"have {len(all_configs)}, cap {http_cap}"
+                        f"({'Telegram failed — GitHub is PRIMARY' if telegram_failed else 'parallel line'}): "
+                        f"cap {http_cap}"
                     )
                     
                     http_results = await self.flexible_fetcher.fetch_http_sources_parallel(
@@ -419,19 +424,19 @@ class HunterOrchestrator:
                     http_success_count = 0
                     for result in http_results:
                         if result.success:
-                            all_configs.update(result.configs)
+                            http_configs.update(result.configs)
                             if result.source not in sources_used:
                                 sources_used.append(result.source)
                             http_success_count += 1
                     
-                    tracker.source_done("HTTP-Fallback", count=http_success_count)
+                    tracker.source_done("HTTP-Fallback", count=len(http_configs))
                     if self.dashboard:
                         self.dashboard.source_update("HTTP-Fallback", status="done", 
-                                                    count=http_success_count)
+                                                    count=len(http_configs))
                     
                     self.logger.info(
-                        f"[FlexibleFetch] HTTP fallback: {http_success_count} sources, "
-                        f"total configs now {len(all_configs)}"
+                        f"[FlexibleFetch] HTTP/GitHub: {http_success_count} sources, "
+                        f"{len(http_configs)} configs"
                     )
                     
                 except Exception as e:
@@ -487,38 +492,46 @@ class HunterOrchestrator:
             except Exception:
                 pass
         
-        # Handle complete failure
-        if len(all_configs) == 0:
+        # Handle complete failure — push cache into http line
+        total_online = len(telegram_configs) + len(http_configs)
+        if total_online == 0:
             self._consecutive_scrape_failures += 1
             self.logger.warning(
                 f"[FlexibleFetch] All online sources failed (streak: {self._consecutive_scrape_failures}). "
                 f"Using cache."
             )
-            all_configs.update(cache_configs)
-            all_configs.update(balancer_uris)
+            http_configs.update(cache_configs)
+            http_configs.update(balancer_uris)
         else:
             self._consecutive_scrape_failures = 0
-            # Supplement with cache if we got some but not enough
-            if len(all_configs) < 500:
-                all_configs.update(cache_configs)
+            # Supplement http line with cache if we got some but not enough
+            if len(http_configs) < 500:
+                http_configs.update(cache_configs)
         
-        # Final cap
-        configs_list = list(all_configs)
-        if len(configs_list) > max_total * 2:
+        # Final cap per line
+        tg_list = list(telegram_configs)
+        http_list = list(http_configs)
+        cap = max_total * 2
+        if len(tg_list) > cap:
             import random as _rnd
-            _rnd.shuffle(configs_list)
-            configs_list = configs_list[:max_total * 2]
-            self.logger.info(f"[FlexibleFetch] Capped raw configs to {len(configs_list)}")
+            _rnd.shuffle(tg_list)
+            tg_list = tg_list[:cap]
+        if len(http_list) > cap:
+            import random as _rnd
+            _rnd.shuffle(http_list)
+            http_list = http_list[:cap]
         
         self.logger.info(
-            f"[FlexibleFetch] Total: {len(configs_list)} configs from sources: {sources_used}"
+            f"[FlexibleFetch] Total: {len(tg_list)} Telegram + {len(http_list)} HTTP/GitHub "
+            f"configs from sources: {sources_used}"
         )
-        return configs_list
+        return {"telegram": tg_list, "http": http_list}
     
-    async def _scrape_configs_original(self) -> List[str]:
+    async def _scrape_configs_original(self) -> dict:
         """Original scrape_configs implementation (fallback)."""
         import gc as _gc
-        configs = []
+        tg_configs = []
+        http_configs_list = []
         proxy_ports = [self.config.get("multiproxy_port", 10808)]
         gemini_port = self.config.get("gemini_port", 10809)
         if gemini_port not in proxy_ports and self.gemini_balancer:
@@ -600,7 +613,10 @@ class HunterOrchestrator:
             for idx, result in enumerate(results):
                 name = task_names[idx] if idx < len(task_names) else f"Source-{idx}"
                 if isinstance(result, list):
-                    configs.extend(result)
+                    if name == "Telegram":
+                        tg_configs.extend(result)
+                    else:
+                        http_configs_list.extend(result)
                     tracker.source_done(name, count=len(result))
                     if self.dashboard:
                         self.dashboard.source_update(name, status="done", count=len(result))
@@ -656,34 +672,47 @@ class HunterOrchestrator:
                 if self.dashboard:
                     self.dashboard.source_update("BalancerCache", status="done", count=0)
 
-        if len(configs) == 0:
+        total_online = len(tg_configs) + len(http_configs_list)
+        if total_online == 0:
             self._consecutive_scrape_failures += 1
             self.logger.warning(
                 f"[Resilience] All online sources failed (streak: {self._consecutive_scrape_failures}). "
                 f"Using cached configs as primary source."
             )
-            configs.extend(cache_configs)
-            configs.extend(balancer_uris)
+            http_configs_list.extend(cache_configs)
+            http_configs_list.extend(balancer_uris)
         else:
             self._consecutive_scrape_failures = 0
-            if len(configs) < 500:
-                configs.extend(cache_configs)
+            if len(http_configs_list) < 500:
+                http_configs_list.extend(cache_configs)
 
-        if len(configs) > max_total * 2:
+        cap = max_total * 2
+        if len(tg_configs) > cap:
             import random as _rnd
-            _rnd.shuffle(configs)
-            configs = configs[:max_total * 2]
-            self.logger.info(f"Capped raw configs to {len(configs)} (max_total={max_total})")
+            _rnd.shuffle(tg_configs)
+            tg_configs = tg_configs[:cap]
+        if len(http_configs_list) > cap:
+            import random as _rnd
+            _rnd.shuffle(http_configs_list)
+            http_configs_list = http_configs_list[:cap]
 
-        return configs
+        return {"telegram": tg_configs, "http": http_configs_list}
 
-    def validate_configs(self, configs: Iterable[str], max_workers: int = 50) -> List[HunterBenchResult]:
-        """Validate and benchmark configurations with adaptive thread management."""
+    def validate_configs(self, configs: Iterable[str], max_workers: int = 50,
+                         label: str = "", base_port_offset: int = 0) -> List[HunterBenchResult]:
+        """Validate and benchmark configurations with adaptive thread management.
+
+        Args:
+            label: Optional label for log messages (e.g. "Telegram", "GitHub").
+            base_port_offset: Offset added to the benchmark base port so two
+                parallel benchmark runs don't collide on SOCKS ports.
+        """
         try:
             from hunter.core.utils import prioritize_configs
         except ImportError:
             from core.utils import prioritize_configs
         
+        log_prefix = f"[Bench-{label}] " if label else ""
         results: List[HunterBenchResult] = []
         test_url = self.config.get("test_url", "https://www.cloudflare.com/cdn-cgi/trace")
         timeout = self.config.get("timeout_seconds", 10)
@@ -699,15 +728,15 @@ class HunterOrchestrator:
         
         # Check if we have any configs to validate
         if not deduped_configs:
-            self.logger.info("No configs to validate")
+            self.logger.info(f"{log_prefix}No configs to validate")
             return []
         
         # Check required components
         if self.parser is None or self.benchmarker is None:
-            self.logger.info("Parser or benchmarker not available - skipping validation")
+            self.logger.info(f"{log_prefix}Parser or benchmarker not available - skipping validation")
             return []
         
-        self.logger.info(f"Processing {len(deduped_configs)} unique configs for validation (max: {max_total})")
+        self.logger.info(f"{log_prefix}Processing {len(deduped_configs)} unique configs for validation (max: {max_total})")
         
         # Prioritize configs by anti-censorship features (Reality, gRPC, CDN, etc.)
         # In test mode, skip prioritization to validate all configs
@@ -727,7 +756,7 @@ class HunterOrchestrator:
                 )
             else:
                 limited_configs = prioritize_configs(deduped_configs)
-        self.logger.info(f"Prioritized {len(limited_configs)} configs by anti-DPI features")
+        self.logger.info(f"{log_prefix}Prioritized {len(limited_configs)} configs by anti-DPI features")
 
         # Start adaptive thread pool
         try:
@@ -777,7 +806,7 @@ class HunterOrchestrator:
         
         # Prepare configs for batch benchmarking
         benchmark_configs = []
-        base_port = int(self.config.get("multiproxy_port", 10808)) + 1000
+        base_port = int(self.config.get("multiproxy_port", 10808)) + 1000 + base_port_offset
         
         for i, parsed in enumerate(parsed_configs):
             socks_port = base_port + i
@@ -816,7 +845,7 @@ class HunterOrchestrator:
             pass
         
         # Use optimized batch benchmarking with adaptive thread management
-        self.logger.info(f"Starting batch benchmark of {len(benchmark_configs)} configs")
+        self.logger.info(f"{log_prefix}Starting batch benchmark of {len(benchmark_configs)} configs")
         results = self.benchmarker.benchmark_configs_batch(
             benchmark_configs, test_url, timeout
         )
@@ -1403,26 +1432,58 @@ class HunterOrchestrator:
                 except Exception:
                     pass
 
-            # Scrape configs
-            raw_configs = await self.scrape_configs()
-            self.logger.info(f"Total raw configs: {len(raw_configs)}")
+            # Scrape configs (returns dict with "telegram" and "http" lists)
+            scraped = await self.scrape_configs()
+            tg_raw = scraped.get("telegram", [])
+            http_raw = scraped.get("http", [])
+            self.logger.info(f"Total raw configs: {len(tg_raw)} Telegram + {len(http_raw)} HTTP/GitHub")
 
             # GC after scrape phase - critical for high memory situations
             gc.collect()
 
-            # Cache new configs
+            # Cache all new configs
+            all_raw = list(set(tg_raw) | set(http_raw))
             if self.cache is not None:
                 try:
-                    self.cache.save_configs(raw_configs, working=False)
+                    self.cache.save_configs(all_raw, working=False)
                 except Exception as e:
                     self.logger.info(f"Cache save skipped: {e}")
 
-            # Validate configs
-            validated = self.validate_configs(raw_configs)
-            self.logger.info(f"Validated configs: {len(validated)}")
+            # --- Two separate benchmark lines ---
+            validated = []
+
+            # Benchmark line 1: Telegram configs
+            if tg_raw:
+                self.logger.info(f"━━━ Benchmark Line 1: Telegram ({len(tg_raw)} configs) ━━━")
+                tg_validated = self.validate_configs(
+                    tg_raw, label="Telegram", base_port_offset=0
+                )
+                self.logger.info(f"[Bench-Telegram] Result: {len(tg_validated)} working configs")
+                validated.extend(tg_validated)
+                del tg_validated
+                gc.collect()
+            else:
+                self.logger.info("━━━ Benchmark Line 1: Telegram — no configs to test ━━━")
+
+            # Benchmark line 2: HTTP/GitHub configs
+            if http_raw:
+                self.logger.info(f"━━━ Benchmark Line 2: GitHub/HTTP ({len(http_raw)} configs) ━━━")
+                http_validated = self.validate_configs(
+                    http_raw, label="GitHub", base_port_offset=5000
+                )
+                self.logger.info(f"[Bench-GitHub] Result: {len(http_validated)} working configs")
+                validated.extend(http_validated)
+                del http_validated
+                gc.collect()
+            else:
+                self.logger.info("━━━ Benchmark Line 2: GitHub/HTTP — no configs to test ━━━")
+
+            # Sort merged results by latency
+            validated.sort(key=lambda r: r.latency_ms)
+            self.logger.info(f"Validated configs (combined): {len(validated)}")
 
             # Free raw configs to release memory immediately
-            del raw_configs
+            del tg_raw, http_raw, all_raw, scraped
             gc.collect()
 
             # Save working configs to cache for future cycles
