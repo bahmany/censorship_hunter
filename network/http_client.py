@@ -235,10 +235,11 @@ class ConfigFetcher:
         if not isinstance(url, str) or not url:
             return []
         if url.startswith("https://raw.githubusercontent.com/"):
+            path = url[len("https://"):]
             return [
                 url,
-                f"https://ghproxy.com/{url}",
-                f"https://ghproxy.net/{url}",
+                f"https://ghproxy.com/{path}",
+                f"https://ghproxy.net/{path}",
             ]
         return [url]
 

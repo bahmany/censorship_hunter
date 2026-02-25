@@ -1,4 +1,4 @@
-"""
+﻿"""
 Proxy benchmarking and connectivity testing.
 
 This module provides comprehensive testing capabilities for proxy
@@ -24,12 +24,12 @@ import yaml
 try:
     from hunter.core.models import HunterParsedConfig, HunterBenchResult
     from hunter.core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
-    from hunter.core.task_manager import HunterTaskManager
+    from hunter.core.task_manager import HunterTaskManager, AdaptiveThreadPool
 except ImportError:
     # Fallback for direct execution
     from core.models import HunterParsedConfig, HunterBenchResult
     from core.utils import resolve_executable_path, kill_process_on_port, tier_for_latency, resolve_ip, get_country_code, get_region
-    from core.task_manager import HunterTaskManager
+    from core.task_manager import HunterTaskManager, AdaptiveThreadPool
 
 # Test URLs for connectivity testing
 MULTI_TEST_URLS = [
@@ -793,7 +793,7 @@ class ProxyBenchmark:
         all_results = sorted(dedup.values(), key=lambda r: r.latency_ms)
         
         # Log final performance metrics
-        metrics = self.thread_pool.get_metrics()
+        metrics = self.thread_pool.get_metrics_object()
         elapsed_time = time.time() - self.start_time
         
         self.logger.info(
@@ -818,7 +818,7 @@ class ProxyBenchmark:
         if not self.thread_pool.running:
             return {"status": "Thread pool not running"}
         
-        metrics = self.thread_pool.get_metrics()
+        metrics = self.thread_pool.get_metrics_object()
         elapsed_time = time.time() - self.start_time
         
         return {
@@ -871,3 +871,4 @@ class ProxyBenchmark:
             region=region,
             tier=tier,
         )
+

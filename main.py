@@ -409,12 +409,20 @@ async def main():
 
         def _loop_exception_handler(loop_obj, context):
             exc = context.get("exception")
+            msg = context.get("message", "")
+            # Suppress ConnectionResetError for winerror 10054
             if isinstance(exc, ConnectionResetError):
                 try:
                     if getattr(exc, "winerror", None) == 10054:
                         return
                 except Exception:
                     pass
+            # Suppress "Task was destroyed but it is pending" warnings from Telethon
+            if "Task was destroyed but it is pending" in msg:
+                return
+            # Suppress GeneratorExit errors from Telethon connection loops
+            if isinstance(exc, RuntimeError) and "coroutine ignored GeneratorExit" in str(exc):
+                return
             loop_obj.default_exception_handler(context)
 
         loop.set_exception_handler(_loop_exception_handler)

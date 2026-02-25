@@ -476,3 +476,64 @@ class HunterTaskManager:
         except TypeError:
             self._cpu_pool.shutdown(wait=wait)
         logger.info("[TaskManager] Shutdown complete")
+
+
+class AdaptiveThreadPool:
+    """
+    Backward-compatibility shim for testing/benchmark.py.
+    The old AdaptiveThreadPool accepted pool-sizing kwargs; we ignore them
+    and delegate everything to the shared HunterTaskManager singleton so that
+    benchmark.py works without modification.
+    """
+
+    def __init__(
+        self,
+        min_threads: int = 2,
+        max_threads: int = 16,
+        target_cpu_utilization: float = 0.85,
+        target_queue_size: int = 100,
+        enable_work_stealing: bool = True,
+        enable_cpu_affinity: bool = False,
+        **kwargs,
+    ):
+        self._mgr = HunterTaskManager.get_instance()
+        self._running = True
+
+    @property
+    def running(self) -> bool:
+        return self._running and self._mgr._running
+
+    def start(self):
+        self._running = True
+
+    def stop(self):
+        self._running = False
+
+    def submit(self, fn: Callable[..., Any], *args, **kwargs) -> Future:
+        return self._mgr.submit_io(fn, *args, **kwargs)
+
+    def get_metrics(self) -> Dict[str, Any]:
+        return self._mgr.get_metrics()
+
+    def get_metrics_object(self) -> Any:
+        """Return metrics as an object with attributes (for backward compatibility)."""
+        from types import SimpleNamespace
+        m = self._mgr.get_metrics()
+        return SimpleNamespace(
+            total_tasks=m.get("io_submitted", 0),
+            completed_tasks=m.get("io_completed", 0),
+            failed_tasks=m.get("io_failed", 0),
+            tasks_per_second=m.get("io_completed", 0) / max(1, time.time() - self._mgr._hw_ts),
+            cpu_utilization=0.0,
+            memory_utilization=m.get("ram_percent", 0.0),
+            queue_size=0,
+        )
+
+    def shutdown(self, wait: bool = True):
+        self._running = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        pass

@@ -459,9 +459,44 @@ class TelegramScraper:
             return
         try:
             if self.client.is_connected():
+                # Disconnect gracefully first
                 await self.client.disconnect()
         except Exception:
             pass
+        
+        # Give Telethon's internal tasks time to clean up
+        try:
+            await asyncio.sleep(0.5)
+        except Exception:
+            pass
+        
+        # Cancel any remaining internal tasks from Telethon
+        try:
+            for task in asyncio.all_tasks():
+                if task is asyncio.current_task():
+                    continue
+                task_name = task.get_name() if hasattr(task, 'get_name') else str(task)
+                coro = getattr(task, '_coro', None)
+                coro_name = ''
+                if coro:
+                    coro_name = getattr(coro, '__qualname__', '')
+                
+                # Check if this is a Telethon internal connection task
+                if '_send_loop' in coro_name or '_recv_loop' in coro_name or 'telethon' in coro_name.lower():
+                    if not task.done():
+                        try:
+                            task.cancel()
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+        
+        # Wait a bit for cancellations to process
+        try:
+            await asyncio.sleep(0.3)
+        except Exception:
+            pass
+        
         try:
             sess = getattr(self.client, "session", None)
             if sess is not None:
@@ -471,11 +506,7 @@ class TelegramScraper:
                     pass
         except Exception:
             pass
-        # Give Telethon's internal tasks time to clean up
-        try:
-            await asyncio.sleep(0.3)
-        except Exception:
-            pass
+        
         self.client = None
 
     def _runtime_dir(self) -> str:
@@ -1027,6 +1058,11 @@ class TelegramScraper:
                         pass
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
+            except Exception:
+                pass
+            # Properly disconnect client to prevent pending task warnings
+            try:
+                await self._reset_client()
             except Exception:
                 pass
 

@@ -23,6 +23,36 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from tqdm import tqdm
 
+ProxyBenchmark = None
+HunterConfig = None
+HunterBenchResult = None
+HTTPClientManager = None
+ConfigFetcher = None
+FlexibleConfigFetcher = None
+FetchStrategy = None
+UniversalParser = None
+MultiProxyServer = None
+TelegramScraper = None
+TelegramReporter = None
+BotReporter = None
+SmartCache = None
+StealthObfuscationEngine = None
+ObfuscationConfig = None
+ProxyStealthWrapper = None
+DPIEvasionOrchestrator = None
+load_json = None
+now_ts = None
+read_lines = None
+save_json = None
+write_lines = None
+ConfigReportingService = None
+DNSManager = None
+get_dns_config = None
+HunterUI = None
+LiveStatus = None
+ServiceManager = None
+HunterDashboard = None
+
 try:
     from hunter.core.config import HunterConfig
     from hunter.core.models import HunterBenchResult
@@ -47,7 +77,10 @@ except ImportError:
     from network.http_client import HTTPClientManager, ConfigFetcher
     from network.flexible_fetcher import FlexibleConfigFetcher, FetchStrategy
     from parsers import UniversalParser
-    from testing.benchmark import ProxyBenchmark
+    try:
+        from testing.benchmark import ProxyBenchmark
+    except Exception:
+        ProxyBenchmark = None
     from proxy.load_balancer import MultiProxyServer
     from telegram.scraper import TelegramScraper, TelegramReporter, BotReporter
     from config.cache import SmartCache
@@ -1756,7 +1789,23 @@ class HunterOrchestrator:
         if self.gemini_balancer:
             self.gemini_balancer.stop()
         if self.telegram_scraper:
-            await self.telegram_scraper.disconnect()
+            try:
+                # Cancel all pending asyncio tasks to prevent GeneratorExit errors
+                try:
+                    tasks = [t for t in asyncio.all_tasks() 
+                             if t is not asyncio.current_task() and not t.done()]
+                    if tasks:
+                        for task in tasks:
+                            task.cancel()
+                        # Wait briefly for tasks to acknowledge cancellation
+                        await asyncio.wait(tasks, timeout=1.0, return_when=asyncio.ALL_COMPLETED)
+                except Exception:
+                    pass
+                await asyncio.wait_for(self.telegram_scraper.disconnect(), timeout=5.0)
+            except asyncio.TimeoutError:
+                self.logger.debug("Telegram scraper disconnect timed out")
+            except Exception as e:
+                self.logger.debug(f"Telegram scraper disconnect error: {e}")
 
     def get_stealth_metrics(self) -> Dict[str, Any]:
         """Get stealth obfuscation metrics."""
