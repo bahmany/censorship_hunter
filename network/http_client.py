@@ -10,6 +10,7 @@ import logging
 import random
 import subprocess
 import sys
+import threading
 import time
 from concurrent.futures import as_completed
 from typing import List, Optional, Set
@@ -30,6 +31,8 @@ except ImportError:
     from core.utils import extract_raw_uris_from_text, safe_b64decode
 
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+logging.getLogger("urllib3.util.retry").setLevel(logging.ERROR)
+logging.getLogger("urllib3.connectionpool").setLevel(logging.ERROR)
 
 # Browser user agents for rotation
 BROWSER_USER_AGENTS = [
@@ -65,6 +68,9 @@ GITHUB_REPOS = [
     "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
     "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
     "https://raw.githubusercontent.com/vveg26/get_proxy/main/dist/v2ray.txt",
+    "https://raw.githubusercontent.com/roosterkid/openproxylist/main/V2RAY_RAW.txt",
+    "https://raw.githubusercontent.com/ShatakVPN/ConfigForge-V2Ray/main/configs/ir/all.txt",
+    "https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/main/sub.txt",
 ]
 
 # Anti-censorship sources (Reality-focused, CDN-hosted)
@@ -127,6 +133,7 @@ class HTTPClientManager:
     
     def __init__(self):
         self._session: Optional[requests.Session] = None
+        self._proxy_session: Optional[requests.Session] = None
         self._pool_size: int = 10  # default conservative
     
     def _get_memory_pct(self) -> float:
@@ -137,9 +144,10 @@ class HTTPClientManager:
         except Exception:
             return 50.0
     
-    def _create_session(self, pool_connections: int = 10, pool_maxsize: int = 10, retries: int = 2) -> requests.Session:
+    def _create_session(self, pool_connections: int = 10, pool_maxsize: int = 10, retries: int = 0) -> requests.Session:
         """Create a requests session with connection pooling."""
         session = requests.Session()
+        session.trust_env = False
         retry_strategy = Retry(
             total=retries,
             backoff_factor=0.3,
@@ -155,7 +163,7 @@ class HTTPClientManager:
         return session
     
     def get_session(self) -> requests.Session:
-        """Get or create the global HTTP session with memory-aware pooling."""
+        """Get or create the direct HTTP session (no retries — fast fail)."""
         if self._session is None:
             mem = self._get_memory_pct()
             if mem >= 90:
@@ -167,17 +175,25 @@ class HTTPClientManager:
             else:
                 pool_conn, pool_max = 10, 20
             self._pool_size = pool_max
-            self._session = self._create_session(pool_conn, pool_max)
+            self._session = self._create_session(pool_conn, pool_max, retries=0)
         return self._session
+
+    def get_proxy_session(self) -> requests.Session:
+        """Get or create the proxy HTTP session (1 retry for transient proxy errors)."""
+        if self._proxy_session is None:
+            self._proxy_session = self._create_session(10, 20, retries=1)
+        return self._proxy_session
     
     def reset_session(self):
         """Close and reset session (e.g. after memory pressure)."""
-        if self._session:
-            try:
-                self._session.close()
-            except Exception:
-                pass
-            self._session = None
+        for s in (self._session, self._proxy_session):
+            if s:
+                try:
+                    s.close()
+                except Exception:
+                    pass
+        self._session = None
+        self._proxy_session = None
     
     def random_user_agent(self) -> str:
         """Get a random user agent."""
@@ -188,7 +204,11 @@ class HTTPClientManager:
 
 
 class ConfigFetcher:
-    """Fetches proxy configurations from various sources with circuit breaker."""
+    """Fetches proxy configurations from various sources with circuit breaker.
+    
+    Auto-detects whether direct GitHub access works. If not, switches to
+    proxy-first mode to avoid hundreds of wasted connection attempts.
+    """
     
     def __init__(self, http_manager: HTTPClientManager):
         self.http_manager = http_manager
@@ -196,6 +216,10 @@ class ConfigFetcher:
         self._failed_urls: dict = {}  # url -> (fail_count, last_fail_time)
         self._circuit_breaker_threshold = 3  # failures before skipping
         self._circuit_breaker_reset = 600  # seconds before retrying failed URL
+        self._direct_works: Optional[bool] = None  # None=unknown, True/False after probe
+        self._direct_fail_streak: int = 0  # consecutive direct failures
+        self._DIRECT_FAIL_THRESHOLD = 2  # after this many, assume direct is blocked
+        self._direct_check_lock = threading.Lock()  # prevent race in _check_direct_access
     
     def _is_circuit_open(self, url: str) -> bool:
         """Check if circuit breaker is open (URL should be skipped)."""
@@ -231,9 +255,37 @@ class ConfigFetcher:
             pass
         return extract_raw_uris_from_text(text)
 
+    def _check_direct_access(self) -> bool:
+        """Quick probe: can we reach raw.githubusercontent.com directly?
+        Thread-safe: only one thread does the actual probe."""
+        if self._direct_works is not None:
+            return self._direct_works
+        with self._direct_check_lock:
+            # Double-check after acquiring lock
+            if self._direct_works is not None:
+                return self._direct_works
+            session = self.http_manager.get_session()
+            try:
+                resp = session.head(
+                    "https://raw.githubusercontent.com",
+                    timeout=4, verify=False,
+                    headers={"User-Agent": self.http_manager.random_user_agent()},
+                )
+                self._direct_works = resp.status_code < 500
+            except Exception:
+                self._direct_works = False
+            if not self._direct_works:
+                self.logger.info("[Fetch] Direct GitHub access blocked — using proxy-first mode")
+            else:
+                self.logger.info("[Fetch] Direct GitHub access works")
+            return self._direct_works
+
     def _expand_mirrors(self, url: str) -> List[str]:
         if not isinstance(url, str) or not url:
             return []
+        # If direct is blocked, mirrors (ghproxy) are almost certainly blocked too
+        if self._direct_works is False:
+            return [url]
         if url.startswith("https://raw.githubusercontent.com/"):
             path = url[len("https://"):]
             return [
@@ -264,39 +316,82 @@ class ConfigFetcher:
         except Exception:
             return False
 
+    # Common SOCKS proxy ports to scan beyond what the caller provides
+    _EXTRA_PROXY_PORTS = [11808, 11809, 9250, 1080, 1081, 2080, 7890, 10808, 10809]
+
+    def _find_best_proxy_port(self, proxy_ports: List[int]) -> Optional[int]:
+        """Find the first alive and fast proxy port.
+        Checks caller-supplied ports first, then well-known extras (Tor, etc.)."""
+        # Deduplicate while preserving priority order
+        seen = set()
+        candidates = []
+        for p in list(proxy_ports) + self._EXTRA_PROXY_PORTS:
+            if p not in seen:
+                seen.add(p)
+                candidates.append(p)
+        for p in candidates:
+            if self._is_port_alive(p) and self._is_proxy_fast_enough(p):
+                return p
+        return None
+
     def _fetch_single_url_fast(self, url: str, proxy_ports: List[int], timeout: int = 8) -> Set[str]:
-        """Fast fetch using requests session with connection pooling."""
+        """Fast fetch: proxy-first when direct is blocked, direct-first otherwise."""
         if self._is_circuit_open(url):
             return set()
         
-        session = self.http_manager.get_session()
         headers = {"User-Agent": self.http_manager.random_user_agent()}
-        
-        for candidate in self._expand_mirrors(url):
-            try:
-                resp = session.get(candidate, headers=headers, timeout=timeout, verify=False)
-                if resp.status_code == 200 and resp.text:
-                    found = self._try_decode_and_extract(resp.text)
-                    if found:
-                        self._record_success(url)
-                        return found
-            except Exception:
-                continue
-        
-        live_ports = [p for p in proxy_ports[:1] if self._is_port_alive(p)]
-        if live_ports and self._is_proxy_fast_enough(live_ports[0]):
-            proxy_port = live_ports[0]
-            proxies = {"http": f"socks5h://127.0.0.1:{proxy_port}", "https": f"socks5h://127.0.0.1:{proxy_port}"}
-            for candidate in self._expand_mirrors(url):
+        direct_blocked = (self._direct_works is False)
+
+        # --- Strategy A: Proxy-first (when direct is known blocked) ---
+        if direct_blocked:
+            best_port = self._find_best_proxy_port(proxy_ports)
+            if best_port:
+                proxy_session = self.http_manager.get_proxy_session()
+                proxies = {"http": f"socks5h://127.0.0.1:{best_port}", "https": f"socks5h://127.0.0.1:{best_port}"}
                 try:
-                    resp = session.get(candidate, headers=headers, timeout=min(timeout, 6), verify=False, proxies=proxies)
+                    resp = proxy_session.get(url, headers=headers, timeout=timeout, verify=False, proxies=proxies)
                     if resp.status_code == 200 and resp.text:
                         found = self._try_decode_and_extract(resp.text)
                         if found:
                             self._record_success(url)
                             return found
                 except Exception:
-                    continue
+                    pass
+            self._record_failure(url)
+            return set()
+
+        # --- Strategy B: Direct-first (when direct works or unknown) ---
+        session = self.http_manager.get_session()
+        for candidate in self._expand_mirrors(url):
+            try:
+                resp = session.get(candidate, headers=headers, timeout=min(timeout, 5), verify=False)
+                if resp.status_code == 200 and resp.text:
+                    found = self._try_decode_and_extract(resp.text)
+                    if found:
+                        self._direct_fail_streak = 0
+                        self._record_success(url)
+                        return found
+            except Exception:
+                self._direct_fail_streak += 1
+                if self._direct_fail_streak >= self._DIRECT_FAIL_THRESHOLD:
+                    self._direct_works = False
+                    self.logger.info("[Fetch] Direct access failed %d times — switching to proxy-first", self._direct_fail_streak)
+                break  # don't try all mirrors if first fails
+        
+        # Fallback to proxy
+        best_port = self._find_best_proxy_port(proxy_ports)
+        if best_port:
+            proxy_session = self.http_manager.get_proxy_session()
+            proxies = {"http": f"socks5h://127.0.0.1:{best_port}", "https": f"socks5h://127.0.0.1:{best_port}"}
+            try:
+                resp = proxy_session.get(url, headers=headers, timeout=timeout, verify=False, proxies=proxies)
+                if resp.status_code == 200 and resp.text:
+                    found = self._try_decode_and_extract(resp.text)
+                    if found:
+                        self._record_success(url)
+                        return found
+            except Exception:
+                pass
         
         self._record_failure(url)
         return set()
@@ -306,34 +401,42 @@ class ConfigFetcher:
         if self._is_circuit_open(url):
             return set()
         
+        # Probe direct access on first call
+        if self._direct_works is None:
+            self._check_direct_access()
+
         # Try fast method first
         result = self._fetch_single_url_fast(url, proxy_ports, timeout=min(timeout, 8))
         if result:
             return result
         
-        # Fallback to curl for stubborn URLs
+        # Fallback to curl with proxy (skip direct curl if blocked)
         curl_cmd = "curl.exe" if sys.platform == "win32" else "curl"
-        
-        for candidate in self._expand_mirrors(url):
-            try:
-                cmd = [
-                    curl_cmd,
-                    "-s",
-                    "-m", str(timeout),
-                    "-k",
-                    "--connect-timeout", "4",
-                    "-A", self.http_manager.random_user_agent(),
-                    candidate,
-                ]
-                proc_result = subprocess.run(cmd, capture_output=True, timeout=timeout + 2)
-                if proc_result.returncode == 0 and proc_result.stdout:
-                    text = proc_result.stdout.decode('utf-8', errors='ignore')
-                    found = self._try_decode_and_extract(text)
-                    if found:
-                        self._record_success(url)
-                        return found
-            except Exception:
-                continue
+        best_port = self._find_best_proxy_port(proxy_ports)
+        proxy_arg = []
+        if best_port:
+            proxy_arg = ["--socks5-hostname", f"127.0.0.1:{best_port}"]
+
+        try:
+            cmd = [
+                curl_cmd,
+                "-s",
+                "-m", str(timeout),
+                "-k",
+                "--connect-timeout", "4",
+                "-A", self.http_manager.random_user_agent(),
+                *proxy_arg,
+                url,
+            ]
+            proc_result = subprocess.run(cmd, capture_output=True, timeout=timeout + 2)
+            if proc_result.returncode == 0 and proc_result.stdout:
+                text = proc_result.stdout.decode('utf-8', errors='ignore')
+                found = self._try_decode_and_extract(text)
+                if found:
+                    self._record_success(url)
+                    return found
+        except Exception:
+            pass
         
         self._record_failure(url)
         return set()
@@ -376,6 +479,8 @@ class ConfigFetcher:
 
     def fetch_github_configs(self, proxy_ports: List[int], max_workers: int = 10, max_configs: int = 0) -> Set[str]:
         """Fetch configs from GitHub repos in parallel with proxy fallback."""
+        if self._direct_works is None:
+            self._check_direct_access()
         cap = max_configs if max_configs > 0 else 0
         return self._fetch_urls_parallel(GITHUB_REPOS, proxy_ports, 7, 25.0, cap, "GitHub")
     

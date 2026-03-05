@@ -142,6 +142,13 @@ class HunterConfig:
             "udp_port_hopping": os.getenv("HUNTER_UDP_HOP", "true").lower() == "true",
             "udp_port_range": os.getenv("HUNTER_UDP_PORT_RANGE", "20000-40000"),
             "udp_hop_interval": int(os.getenv("HUNTER_UDP_HOP_INTERVAL", "30")),
+            
+            # === Aggressive Harvesting & Continuous Validation ===
+            "max_db_configs": int(os.getenv("HUNTER_MAX_DB_CONFIGS", "250000")),
+            "dpi_pressure_intensity": float(os.getenv("HUNTER_DPI_PRESSURE_INTENSITY", "0.7")),
+            "harvest_interval": int(os.getenv("HUNTER_HARVEST_INTERVAL", "1800")),
+            "validator_batch_size": int(os.getenv("HUNTER_VALIDATOR_BATCH", "80")),
+            "validator_interval": int(os.getenv("HUNTER_VALIDATOR_INTERVAL", "30")),
         }
     
     def _load_env_file(self):

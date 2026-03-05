@@ -3,222 +3,249 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Hunter Admin</title>
+<title>Hunter Dashboard</title>
 <style>
 :root {
-  --bg: #0a0e14;
-  --bg-card: #131920;
-  --bg-card-hover: #1a2230;
-  --border: #1e2a36;
-  --text: #c5d0dc;
-  --text-dim: #6b7b8d;
-  --text-bright: #e8edf2;
-  --accent: #00bfff;
-  --accent-glow: rgba(0,191,255,.15);
-  --success: #00e676;
-  --warning: #ffab00;
-  --error: #ff5252;
-  --gold: #ffd700;
-  --silver: #c0c0c0;
-  --radius: 8px;
-  --gap: 10px;
+  --bg: #09090b;
+  --bg-card: #111113;
+  --bg-hover: #1a1a1e;
+  --bg-inset: #0c0c0e;
+  --border: #1f1f23;
+  --border-light: #27272a;
+  --text: #a1a1aa;
+  --text-dim: #52525b;
+  --text-bright: #fafafa;
+  --accent: #3b82f6;
+  --accent-soft: rgba(59,130,246,.1);
+  --cyan: #22d3ee;
+  --green: #22c55e;
+  --green-soft: rgba(34,197,94,.1);
+  --amber: #f59e0b;
+  --amber-soft: rgba(245,158,11,.1);
+  --red: #ef4444;
+  --red-soft: rgba(239,68,68,.1);
+  --gold: #eab308;
+  --silver: #a1a1aa;
+  --r: 10px;
+  --g: 8px;
+  --mono: 'SF Mono','Cascadia Code','Consolas','Liberation Mono',monospace;
 }
-*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-  background: var(--bg); color: var(--text); font-size: 13px; line-height: 1.5;
-  min-height: 100vh; overflow-x: hidden;
-}
-::-webkit-scrollbar { width: 5px; height: 5px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);font-size:13px;line-height:1.5;min-height:100vh}
+::-webkit-scrollbar{width:4px;height:4px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
 
-.header {
-  display: flex; align-items: center; gap: 14px; padding: 8px 16px;
-  background: var(--bg-card); border-bottom: 1px solid var(--border);
-  position: sticky; top: 0; z-index: 100;
-}
-.logo { font-size: 15px; font-weight: 800; letter-spacing: 1px; color: var(--accent); display: flex; align-items: center; gap: 6px; }
-.logo svg { width: 20px; height: 20px; }
-.badge {
-  display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 10px;
-  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px;
-}
-.badge-phase { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(0,191,255,.3); }
-.badge-phase.scraping { color: #00bfff; }
-.badge-phase.validating { background: rgba(255,171,0,.12); color: #ffab00; border-color: rgba(255,171,0,.3); }
-.badge-phase.balancing { background: rgba(0,230,118,.12); color: #00e676; border-color: rgba(0,230,118,.3); }
-.badge-phase.sleeping { background: rgba(107,123,141,.12); color: #6b7b8d; border-color: rgba(107,123,141,.3); }
-.badge-phase.starting { background: rgba(255,82,82,.12); color: #ff5252; border-color: rgba(255,82,82,.3); }
-.header-stats { display: flex; align-items: center; gap: 14px; margin-left: auto; font-size: 11px; color: var(--text-dim); }
-.header-stats .sv { color: var(--text-bright); font-weight: 600; }
-.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; animation: pulse 2s ease-in-out infinite; }
-.dot-ok { background: var(--success); box-shadow: 0 0 5px var(--success); }
-.dot-warn { background: var(--warning); }
-.dot-err { background: var(--error); }
-@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
+/* === NAV === */
+nav{display:flex;align-items:center;gap:12px;padding:10px 20px;border-bottom:1px solid var(--border);position:sticky;top:0;z-index:100;background:var(--bg);backdrop-filter:blur(12px)}
+.brand{font-size:14px;font-weight:700;letter-spacing:.5px;color:var(--text-bright);display:flex;align-items:center;gap:6px}
+.brand svg{width:18px;height:18px;color:var(--accent)}
+.pill{padding:2px 8px;border-radius:99px;font-size:10px;font-weight:600;letter-spacing:.3px;text-transform:uppercase}
+.pill-blue{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(59,130,246,.2)}
+.pill-green{background:var(--green-soft);color:var(--green);border:1px solid rgba(34,197,94,.2)}
+.pill-amber{background:var(--amber-soft);color:var(--amber);border:1px solid rgba(245,158,11,.2)}
+.pill-red{background:var(--red-soft);color:var(--red);border:1px solid rgba(239,68,68,.2)}
+.pill-dim{background:rgba(82,82,91,.1);color:var(--text-dim);border:1px solid rgba(82,82,91,.2)}
+nav .spacer{flex:1}
+nav .stat{font-size:11px;color:var(--text-dim)}
+nav .stat b{color:var(--text-bright);font-weight:600}
+.live-dot{width:6px;height:6px;border-radius:50%;display:inline-block;vertical-align:middle;margin-right:4px}
+.live-dot.ok{background:var(--green);box-shadow:0 0 6px var(--green)}
+.live-dot.warn{background:var(--amber)}
+.live-dot.err{background:var(--red)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
 
-.main {
-  display: grid; grid-template-columns: 1fr 1fr;
-  gap: var(--gap); padding: var(--gap); max-width: 1480px; margin: 0 auto;
-}
-.full { grid-column: 1 / -1; }
+/* === LAYOUT === */
+.shell{max-width:1400px;margin:0 auto;padding:var(--g) 12px}
+.row{display:grid;gap:var(--g)}
+.row-2{grid-template-columns:1fr 1fr}
+.row-3{grid-template-columns:1fr 1fr 1fr}
+.row-auto{grid-template-columns:repeat(auto-fit,minmax(130px,1fr))}
+.span-full{grid-column:1/-1}
 
-.card { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
-.card-h {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 8px 12px; border-bottom: 1px solid var(--border);
-  font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .7px; color: var(--text-dim);
-}
-.card-b { padding: 8px 12px; }
+/* === CARD === */
+.card{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.card-head{display:flex;align-items:center;justify-content:space-between;padding:8px 14px;border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--text-dim);text-transform:uppercase;letter-spacing:.5px}
+.card-body{padding:10px 14px}
 
-table { width: 100%; border-collapse: collapse; }
-th { text-align: left; padding: 5px 7px; font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-dim); border-bottom: 1px solid var(--border); font-weight: 600; }
-td { padding: 5px 7px; border-bottom: 1px solid rgba(30,42,54,.4); font-size: 12px; }
-tr:last-child td { border-bottom: none; }
-td.n { text-align: right; font-family: 'Cascadia Code','SF Mono',monospace; font-weight: 600; }
-.sd { width: 6px; height: 6px; border-radius: 50%; display: inline-block; margin-right: 5px; }
-.sd-ok { background: var(--success); }
-.sd-run { background: var(--accent); animation: pulse 1s infinite; }
-.sd-wait { background: var(--text-dim); }
-.sd-fail { background: var(--error); }
+/* === METRIC TILES === */
+.mtile{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px}
+.mtile .label{font-size:10px;color:var(--text-dim);text-transform:uppercase;letter-spacing:.3px;margin-bottom:2px}
+.mtile .value{font-size:22px;font-weight:700;font-family:var(--mono);line-height:1.2}
 
-.metrics { grid-column: 1/-1; display: grid; grid-template-columns: repeat(auto-fit, minmax(110px,1fr)); gap: var(--gap); }
-.mc { background: var(--bg-card); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; text-align: center; }
-.mc .l { font-size: 9px; color: var(--text-dim); text-transform: uppercase; letter-spacing: .4px; margin-bottom: 2px; }
-.mc .v { font-size: 20px; font-weight: 800; font-family: 'Cascadia Code','SF Mono',monospace; }
+/* === TABLE === */
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:6px 10px;font-size:10px;text-transform:uppercase;letter-spacing:.3px;color:var(--text-dim);border-bottom:1px solid var(--border);font-weight:600}
+td{padding:6px 10px;border-bottom:1px solid rgba(31,31,35,.5);font-size:12px}
+tr:last-child td{border-bottom:none}
+td.r{text-align:right;font-family:var(--mono);font-weight:600}
 
-.progress-bar { height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; margin-top: 4px; }
-.progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent), var(--success)); border-radius: 3px; transition: width .5s; }
+/* === DOT === */
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block;margin-right:5px}
+.dot-ok{background:var(--green)}
+.dot-run{background:var(--accent);animation:pulse 1.2s infinite}
+.dot-wait{background:var(--text-dim)}
+.dot-fail{background:var(--red)}
 
-.log-box { height: 220px; overflow-y: auto; padding: 4px 8px; font-family: 'Cascadia Code','SF Mono','Consolas',monospace; font-size: 11px; line-height: 1.6; }
-.le { white-space: nowrap; }
-.lt { color: var(--text-dim); }
-.ll { font-weight: 700; margin: 0 3px; }
-.ll.INFO { color: var(--accent); }
-.ll.WARNING { color: var(--warning); }
-.ll.ERROR { color: var(--error); }
-.ll.DEBUG { color: var(--text-dim); }
+/* === BTN === */
+.btn{padding:6px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg-card);color:var(--text);font-size:10px;font-weight:600;cursor:pointer;transition:all .15s;letter-spacing:.3px;white-space:nowrap}
+.btn:hover{background:var(--bg-hover);border-color:var(--accent);color:var(--accent)}
+.btn:disabled{opacity:.35;cursor:not-allowed}
+.btn-accent{background:var(--accent-soft);border-color:rgba(59,130,246,.3);color:var(--accent)}
+.btn-accent:hover{background:rgba(59,130,246,.2)}
+.btn-green{border-color:rgba(34,197,94,.3);color:var(--green)}
+.btn-green:hover{background:var(--green-soft)}
+.btn-red{border-color:rgba(239,68,68,.3);color:var(--red)}
+.btn-red:hover{background:var(--red-soft)}
 
-.cmd-bar { grid-column: 1/-1; display: flex; gap: 6px; align-items: center; }
-.cmd-bar .card { flex: 1; display: flex; align-items: center; padding: 0; }
-.ci { flex: 1; background: transparent; border: none; color: var(--text); padding: 8px 12px; font-family: 'Cascadia Code',monospace; font-size: 12px; outline: none; }
-.ci::placeholder { color: var(--text-dim); }
-.btn {
-  padding: 7px 14px; border: 1px solid var(--border); border-radius: var(--radius);
-  background: var(--bg-card); color: var(--text); font-size: 10px; font-weight: 600;
-  cursor: pointer; transition: all .15s; text-transform: uppercase; letter-spacing: .4px; white-space: nowrap;
-}
-.btn:hover { background: var(--bg-card-hover); border-color: var(--accent); color: var(--accent); }
-.btn:disabled { opacity: .4; cursor: not-allowed; }
-.btn-p { background: rgba(0,191,255,.12); border-color: var(--accent); color: var(--accent); }
-.btn-p:hover { background: rgba(0,191,255,.25); }
-.btn-d { border-color: var(--error); color: var(--error); }
-.btn-d:hover { background: rgba(255,82,82,.12); }
-.btn-s { border-color: var(--success); color: var(--success); }
-.btn-s:hover { background: rgba(0,230,118,.12); }
+/* === PROGRESS === */
+.pbar{height:4px;background:var(--border);border-radius:2px;overflow:hidden;margin-top:4px}
+.pfill{height:100%;background:linear-gradient(90deg,var(--accent),var(--cyan));border-radius:2px;transition:width .5s}
 
-/* Traffic chart */
-.chart-wrap { position: relative; height: 100px; padding: 4px 0; }
-canvas { width: 100% !important; height: 100% !important; }
+/* === WORKER CARDS === */
+.wk{background:var(--bg-inset);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.wk-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:4px}
+.wk-name{font-weight:600;font-size:12px;color:var(--text-bright)}
+.wk-meta{font-size:10px;color:var(--text-dim);line-height:1.6}
 
-/* Tabs */
-.tab-bar { display: flex; gap: 2px; padding: 4px; background: var(--bg); border-radius: var(--radius); margin-bottom: 8px; }
-.tab-btn { flex: 1; padding: 5px 8px; border: none; background: transparent; color: var(--text-dim); font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .3px; cursor: pointer; border-radius: 5px; transition: all .15s; text-align: center; }
-.tab-btn:hover { color: var(--text); background: var(--bg-card-hover); }
-.tab-btn.active { color: var(--accent); background: var(--accent-glow); }
-.tab-content { display: none; }
-.tab-content.active { display: block; }
+/* === LOG === */
+.log-panel{height:260px;overflow-y:auto;padding:6px 10px;font-family:var(--mono);font-size:11px;line-height:1.7;background:var(--bg-inset)}
+.le{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lt{color:var(--text-dim)}
+.ll{font-weight:700;margin:0 4px}
+.ll.INFO{color:var(--accent)}
+.ll.WARNING{color:var(--amber)}
+.ll.ERROR{color:var(--red)}
+.ll.DEBUG{color:var(--text-dim)}
 
-/* Backend list items */
-.be-item { display: flex; align-items: center; gap: 8px; padding: 5px 8px; border-bottom: 1px solid rgba(30,42,54,.4); font-size: 11px; }
-.be-item:last-child { border-bottom: none; }
-.be-uri { flex: 1; font-family: monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 10px; color: var(--text); }
-.be-lat { font-family: monospace; font-weight: 600; min-width: 50px; text-align: right; }
-.be-tag { font-size: 8px; padding: 1px 5px; border-radius: 4px; font-weight: 700; text-transform: uppercase; }
-.be-tag-forced { background: rgba(255,171,0,.15); color: var(--warning); border: 1px solid rgba(255,171,0,.3); }
-.be-tag-manual { background: rgba(0,191,255,.12); color: var(--accent); border: 1px solid rgba(0,191,255,.3); }
-.be-actions { display: flex; gap: 3px; }
+/* === CHART === */
+.chart-wrap{position:relative;height:80px}
+canvas{width:100%!important;height:100%!important}
 
-/* Category badges */
-.cat-badge { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 6px; font-size: 10px; font-weight: 600; margin: 2px; }
-.cat-tg { background: rgba(0,136,204,.12); color: #0088cc; border: 1px solid rgba(0,136,204,.3); }
-.cat-gemini { background: rgba(66,133,244,.12); color: #4285f4; border: 1px solid rgba(66,133,244,.3); }
-.cat-windsurf { background: rgba(0,230,118,.12); color: #00e676; border: 1px solid rgba(0,230,118,.3); }
-.cat-aws { background: rgba(255,153,0,.12); color: #ff9900; border: 1px solid rgba(255,153,0,.3); }
+/* === BACKEND === */
+.be-item{display:flex;align-items:center;gap:8px;padding:5px 8px;border-bottom:1px solid rgba(31,31,35,.4);font-size:11px}
+.be-item:last-child{border-bottom:none}
+.be-uri{flex:1;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:10px}
+.be-lat{font-family:var(--mono);font-weight:600;min-width:50px;text-align:right}
+.be-tag{font-size:8px;padding:1px 5px;border-radius:4px;font-weight:700;text-transform:uppercase}
+.be-tag-forced{background:var(--amber-soft);color:var(--amber);border:1px solid rgba(245,158,11,.3)}
+.be-tag-manual{background:var(--accent-soft);color:var(--accent);border:1px solid rgba(59,130,246,.3)}
 
-/* URI input */
-.uri-input { width: 100%; padding: 6px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-family: monospace; font-size: 11px; outline: none; resize: vertical; min-height: 32px; }
-.uri-input:focus { border-color: var(--accent); }
+/* === TABS === */
+.tabs{display:flex;gap:2px;padding:3px;background:var(--bg);border-radius:8px;margin-bottom:8px}
+.tab{flex:1;padding:5px 8px;border:none;background:transparent;color:var(--text-dim);font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.3px;cursor:pointer;border-radius:6px;transition:all .12s;text-align:center}
+.tab:hover{color:var(--text);background:var(--bg-hover)}
+.tab.on{color:var(--accent);background:var(--accent-soft)}
+.tp{display:none}.tp.on{display:block}
 
-/* Select dropdown */
-.sel { padding: 5px 8px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text); font-size: 11px; outline: none; }
-.sel:focus { border-color: var(--accent); }
+/* === INPUTS === */
+.inp{width:100%;padding:6px 10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:11px;outline:none;resize:vertical;min-height:32px}
+.inp:focus{border-color:var(--accent)}
+.sel{padding:5px 8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:11px;outline:none}
 
-/* Modal */
-.mo { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.7); backdrop-filter: blur(4px); z-index: 200; justify-content: center; align-items: center; }
-.mo.active { display: flex; }
-.md { background: var(--bg-card); border: 1px solid var(--accent); border-radius: 12px; padding: 24px; width: 360px; max-width: 90vw; box-shadow: 0 0 30px rgba(0,191,255,.15); }
-.md h2 { font-size: 15px; color: var(--accent); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
-.md p { color: var(--text-dim); font-size: 12px; margin-bottom: 14px; }
-.md input { width: 100%; padding: 10px 12px; background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); color: var(--text-bright); font-size: 18px; font-family: 'Cascadia Code',monospace; text-align: center; letter-spacing: 6px; outline: none; margin-bottom: 14px; }
-.md input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px var(--accent-glow); }
-.md input.pw { letter-spacing: 3px; }
-.md-a { display: flex; gap: 6px; }
-.md-a .btn { flex: 1; padding: 9px; text-align: center; }
+/* === MODAL === */
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);backdrop-filter:blur(4px);z-index:200;justify-content:center;align-items:center}
+.modal-bg.on{display:flex}
+.modal{background:var(--bg-card);border:1px solid var(--accent);border-radius:14px;padding:24px;width:380px;max-width:90vw;box-shadow:0 8px 40px rgba(0,0,0,.4)}
+.modal h2{font-size:15px;color:var(--text-bright);margin-bottom:6px}
+.modal p{color:var(--text-dim);font-size:12px;margin-bottom:14px}
+.modal input{width:100%;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text-bright);font-size:18px;font-family:var(--mono);text-align:center;letter-spacing:6px;outline:none;margin-bottom:14px}
+.modal input:focus{border-color:var(--accent)}
+.modal input.pw{letter-spacing:3px}
+.modal-actions{display:flex;gap:6px}
+.modal-actions .btn{flex:1;padding:9px;text-align:center}
+.export-box{background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;max-height:300px;overflow-y:auto;font-family:var(--mono);font-size:11px;word-break:break-all;white-space:pre-wrap;margin-bottom:12px}
 
-/* Export modal */
-.export-box { background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px; max-height: 300px; overflow-y: auto; font-family: monospace; font-size: 11px; word-break: break-all; white-space: pre-wrap; margin-bottom: 12px; color: var(--text); }
-
-@media (max-width: 768px) {
-  .main { grid-template-columns: 1fr; }
-  .header { flex-wrap: wrap; gap: 6px; }
-  .header-stats { margin-left: 0; flex-wrap: wrap; }
-  .log-box { height: 160px; }
-  .metrics { grid-template-columns: repeat(3,1fr); }
+/* === RESPONSIVE === */
+@media(max-width:768px){
+  .row-2,.row-3{grid-template-columns:1fr}
+  nav{flex-wrap:wrap;gap:6px}
+  .log-panel{height:180px}
+  .row-auto{grid-template-columns:repeat(3,1fr)}
 }
 </style>
 </head>
 <body>
 
-<div class="header">
-  <div class="logo">
+<nav>
+  <div class="brand">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
-    HUNTER
+    Hunter
   </div>
-  <span class="badge badge-phase" id="phase-badge">STARTING</span>
-  <span style="color:var(--text-dim);font-size:11px">C#<span id="cycle" class="sv">0</span></span>
-  <div class="header-stats">
-    <span><span class="dot dot-ok" id="status-dot"></span> <span id="mode">NORMAL</span></span>
-    <span>Mem <span id="mem-pct" class="sv">0%</span> <span id="mem-detail" style="color:var(--text-dim)"></span></span>
-    <span>CPU <span id="cpu-pct" class="sv">-</span></span>
-    <span>Up <span id="uptime" class="sv">0m</span></span>
+  <span class="pill pill-blue" id="phase-badge">STARTING</span>
+  <span class="stat">Cycle <b id="cycle">0</b></span>
+  <div class="spacer"></div>
+  <span class="stat"><span class="live-dot ok" id="status-dot"></span><b id="mode">NORMAL</b></span>
+  <span class="stat">RAM <b id="mem-pct">0%</b> <span id="mem-detail"></span></span>
+  <span class="stat">CPU <b id="cpu-pct">-</b></span>
+  <span class="stat">Up <b id="uptime">0m</b></span>
+</nav>
+
+<div class="shell">
+
+<!-- === METRICS === -->
+<div class="row row-auto" style="margin-bottom:var(--g)">
+  <div class="mtile"><div class="label">Scraped</div><div class="value" style="color:var(--accent)" id="m-scraped">0</div></div>
+  <div class="mtile"><div class="label">Tested</div><div class="value" id="m-tested">0</div></div>
+  <div class="mtile"><div class="label">Gold</div><div class="value" style="color:var(--gold)" id="m-gold">0</div></div>
+  <div class="mtile"><div class="label">Silver</div><div class="value" style="color:var(--silver)" id="m-silver">0</div></div>
+  <div class="mtile"><div class="label">Failed</div><div class="value" style="color:var(--red)" id="m-failed">0</div></div>
+  <div class="mtile"><div class="label">Backends</div><div class="value" style="color:var(--green)" id="m-backends">0</div></div>
+  <div class="mtile" style="grid-column:span 2">
+    <div class="label">Benchmark</div>
+    <div style="display:flex;align-items:center;gap:6px;margin-top:2px">
+      <span id="bench-text" style="font-size:11px;color:var(--text-dim)">Waiting</span>
+    </div>
+    <div class="pbar"><div class="pfill" id="bench-bar" style="width:0%"></div></div>
   </div>
 </div>
 
-<div class="main">
+<!-- === WORKERS + BALANCERS === -->
+<div class="row row-2" style="margin-bottom:var(--g)">
 
-  <!-- Metrics -->
-  <div class="metrics">
-    <div class="mc"><div class="l">Scraped</div><div class="v" style="color:var(--accent)" id="m-scraped">0</div></div>
-    <div class="mc"><div class="l">Tested</div><div class="v" id="m-tested">0</div></div>
-    <div class="mc"><div class="l">Gold</div><div class="v" style="color:var(--gold)" id="m-gold">0</div></div>
-    <div class="mc"><div class="l">Silver</div><div class="v" style="color:var(--silver)" id="m-silver">0</div></div>
-    <div class="mc"><div class="l">Failed</div><div class="v" style="color:var(--error)" id="m-failed">0</div></div>
-    <div class="mc"><div class="l">Backends</div><div class="v" style="color:var(--success)" id="m-backends">0</div></div>
-    <div class="mc" style="grid-column:span 2;">
-      <div class="l">Benchmark</div>
-      <div style="display:flex;align-items:center;gap:6px;justify-content:center;margin-top:2px;">
-        <span id="bench-text" style="font-size:11px;color:var(--text-dim)">Waiting</span>
+  <!-- Workers -->
+  <div class="card">
+    <div class="card-head"><span>Workers</span><button class="btn" onclick="loadThreadStatus()" style="font-size:9px;padding:3px 8px">Refresh</button></div>
+    <div class="card-body">
+      <div style="display:flex;gap:10px;font-size:11px;margin-bottom:8px;flex-wrap:wrap">
+        <span>Mode: <b id="tm-mode" style="color:var(--accent)">-</b></span>
+        <span>RAM: <b id="tm-ram">-</b></span>
+        <span>Threads: <b id="tm-threads">-</b></span>
       </div>
-      <div class="progress-bar"><div class="progress-fill" id="bench-bar" style="width:0%"></div></div>
+      <div id="tm-workers" style="display:grid;grid-template-columns:1fr 1fr;gap:6px"></div>
     </div>
   </div>
 
+  <!-- Balancers + Network -->
+  <div class="card">
+    <div class="card-head"><span>Balancers</span></div>
+    <div class="card-body" style="padding:0">
+      <table>
+        <thead><tr><th>Port</th><th>Backends</th><th>Status</th></tr></thead>
+        <tbody>
+          <tr><td id="bp1">10808</td><td class="r" id="bb1">0</td><td id="bs1"><span class="dot dot-wait"></span>starting</td></tr>
+          <tr><td id="bp2">10809</td><td class="r" id="bb2">0</td><td id="bs2"><span class="dot dot-wait"></span>starting</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="card-head" style="border-top:1px solid var(--border);border-bottom:none"><span>Network / DPI</span></div>
+    <div class="card-body">
+      <div style="display:flex;gap:14px;font-size:11px;flex-wrap:wrap">
+        <span>Strategy: <b id="dpi-strategy" style="color:var(--accent)">-</b></span>
+        <span>Network: <b id="dpi-network">-</b></span>
+        <span>Telegram: <b id="tg-status">-</b></span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- === SOURCES + TRAFFIC === -->
+<div class="row row-2" style="margin-bottom:var(--g)">
+
   <!-- Sources -->
   <div class="card">
-    <div class="card-h"><span>📡 Sources</span><span id="total-scraped" style="color:var(--accent)">0</span></div>
-    <div class="card-b" style="padding:0">
+    <div class="card-head"><span>Sources</span><span id="total-scraped" style="color:var(--accent)">0</span></div>
+    <div class="card-body" style="padding:0;max-height:200px;overflow-y:auto">
       <table>
         <thead><tr><th>Source</th><th>Status</th><th style="text-align:right">Count</th></tr></thead>
         <tbody id="sources-body"><tr><td colspan="3" style="color:var(--text-dim);text-align:center;padding:16px">Waiting...</td></tr></tbody>
@@ -226,53 +253,33 @@ canvas { width: 100% !important; height: 100% !important; }
     </div>
   </div>
 
-  <!-- Balancers + DPI -->
+  <!-- Traffic -->
   <div class="card">
-    <div class="card-h"><span>⚖️ Balancers</span></div>
-    <div class="card-b" style="padding:0">
-      <table>
-        <thead><tr><th>Port</th><th>Backends</th><th>Status</th></tr></thead>
-        <tbody>
-          <tr><td id="bp1">10808</td><td class="n" id="bb1">0</td><td id="bs1"><span class="sd sd-wait"></span>starting</td></tr>
-          <tr><td id="bp2">10809</td><td class="n" id="bb2">0</td><td id="bs2"><span class="sd sd-wait"></span>starting</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <div class="card-h" style="border-top:1px solid var(--border);border-bottom:none;"><span>🛡️ DPI / Network</span></div>
-    <div class="card-b">
-      <div style="display:flex;gap:12px;font-size:11px;flex-wrap:wrap;">
-        <span>Strategy: <strong id="dpi-strategy" style="color:var(--accent)">-</strong></span>
-        <span>Network: <strong id="dpi-network">-</strong></span>
-        <span>Telegram: <strong id="tg-status">-</strong></span>
-      </div>
-    </div>
-  </div>
-
-  <!-- Traffic Chart -->
-  <div class="card full">
-    <div class="card-h">
-      <span>📊 Network Traffic</span>
-      <div style="display:flex;gap:10px;font-size:10px;">
-        <span style="color:#00e676">▲ Upload</span>
-        <span style="color:#00bfff">▼ Download</span>
+    <div class="card-head">
+      <span>Traffic</span>
+      <div style="display:flex;gap:10px;font-size:10px">
+        <span style="color:var(--green)">&#9650; Up</span>
+        <span style="color:var(--accent)">&#9660; Down</span>
         <span id="traffic-rate" style="color:var(--text-dim)">0 KB/s</span>
       </div>
     </div>
-    <div class="card-b">
-      <div class="chart-wrap"><canvas id="traffic-canvas"></canvas></div>
-    </div>
+    <div class="card-body"><div class="chart-wrap"><canvas id="traffic-canvas"></canvas></div></div>
   </div>
+</div>
 
-  <!-- Top Configs -->
+<!-- === BACKENDS + CLIENTS === -->
+<div class="row row-2" style="margin-bottom:var(--g)">
+
+  <!-- Active Backends -->
   <div class="card">
-    <div class="card-h">
-      <span>🏆 Active Backends</span>
-      <div style="display:flex;gap:4px;">
-        <button class="btn btn-s" onclick="exportConfigs('gold')" style="font-size:9px;padding:4px 8px;">Export Gold</button>
-        <button class="btn" onclick="exportConfigs('silver')" style="font-size:9px;padding:4px 8px;">Export Silver</button>
+    <div class="card-head">
+      <span>Active Backends</span>
+      <div style="display:flex;gap:4px">
+        <button class="btn btn-green" onclick="exportConfigs('gold')" style="font-size:9px;padding:3px 8px">Gold</button>
+        <button class="btn" onclick="exportConfigs('silver')" style="font-size:9px;padding:3px 8px">Silver</button>
       </div>
     </div>
-    <div class="card-b" style="padding:0;max-height:180px;overflow-y:auto;">
+    <div class="card-body" style="padding:0;max-height:180px;overflow-y:auto">
       <table>
         <thead><tr><th>#</th><th>Config</th><th style="text-align:right">Latency</th><th>Health</th></tr></thead>
         <tbody id="top-configs-body"><tr><td colspan="4" style="color:var(--text-dim);text-align:center;padding:12px">No backends</td></tr></tbody>
@@ -280,255 +287,202 @@ canvas { width: 100% !important; height: 100% !important; }
     </div>
   </div>
 
-  <!-- Connected Clients -->
+  <!-- Clients -->
   <div class="card">
-    <div class="card-h"><span>👥 Connected Clients</span><span id="client-count" style="color:var(--accent)">0</span></div>
-    <div class="card-b" style="padding:0;max-height:180px;overflow-y:auto;">
+    <div class="card-head"><span>Connected Clients</span><span id="client-count" style="color:var(--accent)">0</span></div>
+    <div class="card-body" style="padding:0;max-height:180px;overflow-y:auto">
       <table>
-        <thead><tr><th>IP Address</th><th style="text-align:right">Connections</th><th>Port</th></tr></thead>
+        <thead><tr><th>IP</th><th style="text-align:right">Connections</th><th>Port</th></tr></thead>
         <tbody id="clients-body"><tr><td colspan="3" style="color:var(--text-dim);text-align:center;padding:12px">No external clients</td></tr></tbody>
       </table>
     </div>
   </div>
+</div>
 
-  <!-- Backend Management -->
-  <div class="card full">
-    <div class="card-h">
-      <span>🎛️ Backend Management</span>
-      <div style="display:flex;gap:4px;">
-        <button class="btn" onclick="loadBalancerDetails()" style="font-size:9px;padding:3px 8px;">Refresh</button>
+<!-- === BACKEND MANAGEMENT === -->
+<div class="row" style="margin-bottom:var(--g)">
+  <div class="card span-full">
+    <div class="card-head"><span>Backend Management</span><button class="btn" onclick="loadBalancerDetails()" style="font-size:9px;padding:3px 8px">Refresh</button></div>
+    <div class="card-body">
+      <div class="tabs">
+        <button class="tab on" onclick="switchBalTab('main',this)">Main</button>
+        <button class="tab" onclick="switchBalTab('gemini',this)">Gemini</button>
+        <button class="tab" onclick="switchBalTab('pool',this)">Pool</button>
+        <button class="tab" onclick="switchBalTab('force',this)">Force</button>
       </div>
-    </div>
-    <div class="card-b">
-      <div class="tab-bar">
-        <button class="tab-btn active" onclick="switchBalTab('main',this)">Main Balancer</button>
-        <button class="tab-btn" onclick="switchBalTab('gemini',this)">Gemini Balancer</button>
-        <button class="tab-btn" onclick="switchBalTab('pool',this)">Config Pool</button>
-        <button class="tab-btn" onclick="switchBalTab('force',this)">Force Backend</button>
-      </div>
-
-      <!-- Main Balancer Tab -->
-      <div class="tab-content active" id="bal-tab-main">
-        <div style="display:flex;gap:10px;margin-bottom:6px;font-size:11px;flex-wrap:wrap;">
-          <span>Status: <strong id="bal-main-st" style="color:var(--accent)">-</strong></span>
-          <span>Port: <strong id="bal-main-port">-</strong></span>
-          <span>Pool: <strong id="bal-main-pool">0</strong></span>
+      <div class="tp on" id="bal-tab-main">
+        <div style="display:flex;gap:10px;margin-bottom:6px;font-size:11px;flex-wrap:wrap">
+          <span>Status: <b id="bal-main-st" style="color:var(--accent)">-</b></span>
+          <span>Port: <b id="bal-main-port">-</b></span>
+          <span>Pool: <b id="bal-main-pool">0</b></span>
           <span id="bal-main-forced" style="display:none">Forced: <span class="be-tag be-tag-forced" id="bal-main-forced-uri">-</span></span>
         </div>
-        <div id="bal-main-backends" style="max-height:160px;overflow-y:auto;">
-          <div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">Loading...</div>
-        </div>
+        <div id="bal-main-backends" style="max-height:160px;overflow-y:auto"><div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px">Loading...</div></div>
       </div>
-
-      <!-- Gemini Balancer Tab -->
-      <div class="tab-content" id="bal-tab-gemini">
-        <div style="display:flex;gap:10px;margin-bottom:6px;font-size:11px;flex-wrap:wrap;">
-          <span>Status: <strong id="bal-gem-st" style="color:var(--accent)">-</strong></span>
-          <span>Port: <strong id="bal-gem-port">-</strong></span>
-          <span>Pool: <strong id="bal-gem-pool">0</strong></span>
+      <div class="tp" id="bal-tab-gemini">
+        <div style="display:flex;gap:10px;margin-bottom:6px;font-size:11px;flex-wrap:wrap">
+          <span>Status: <b id="bal-gem-st" style="color:var(--accent)">-</b></span>
+          <span>Port: <b id="bal-gem-port">-</b></span>
+          <span>Pool: <b id="bal-gem-pool">0</b></span>
           <span id="bal-gem-forced" style="display:none">Forced: <span class="be-tag be-tag-forced" id="bal-gem-forced-uri">-</span></span>
         </div>
-        <div id="bal-gem-backends" style="max-height:160px;overflow-y:auto;">
-          <div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">Loading...</div>
-        </div>
+        <div id="bal-gem-backends" style="max-height:160px;overflow-y:auto"><div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px">Loading...</div></div>
       </div>
-
-      <!-- Config Pool Tab -->
-      <div class="tab-content" id="bal-tab-pool">
-        <div style="margin-bottom:6px;font-size:11px;color:var(--text-dim);">Available configs in pool (select to force or set as backend)</div>
-        <div id="bal-pool-list" style="max-height:200px;overflow-y:auto;">
-          <div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px;">Loading...</div>
-        </div>
+      <div class="tp" id="bal-tab-pool">
+        <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px">Available configs in pool</div>
+        <div id="bal-pool-list" style="max-height:200px;overflow-y:auto"><div style="color:var(--text-dim);text-align:center;padding:10px;font-size:11px">Loading...</div></div>
       </div>
-
-      <!-- Force Backend Tab -->
-      <div class="tab-content" id="bal-tab-force">
-        <div style="margin-bottom:8px;">
-          <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px;">Paste config URI:</label>
-          <textarea class="uri-input" id="force-uri-input" rows="2" placeholder="vmess://... or vless://... or trojan://..."></textarea>
+      <div class="tp" id="bal-tab-force">
+        <div style="margin-bottom:8px">
+          <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px">Paste config URI:</label>
+          <textarea class="inp" id="force-uri-input" rows="2" placeholder="vmess://... or vless://... or trojan://..."></textarea>
         </div>
-        <div style="display:flex;gap:6px;align-items:center;margin-bottom:8px;flex-wrap:wrap;">
-          <select class="sel" id="force-balancer-select">
-            <option value="main">Main Balancer</option>
-            <option value="gemini">Gemini Balancer</option>
-          </select>
-          <label style="font-size:11px;display:flex;align-items:center;gap:4px;">
-            <input type="checkbox" id="force-permanent-check"> Permanent
-          </label>
-          <button class="btn btn-p" onclick="forceBackend()" style="font-size:10px;">⚡ Force</button>
-          <button class="btn btn-d" onclick="unforceBackend()" style="font-size:10px;">✕ Clear Force</button>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;margin-bottom:8px">
+          <select class="sel" id="force-balancer-select"><option value="main">Main</option><option value="gemini">Gemini</option></select>
+          <label style="font-size:11px;display:flex;align-items:center;gap:4px"><input type="checkbox" id="force-permanent-check"> Permanent</label>
+          <button class="btn btn-accent" onclick="forceBackend()">Force</button>
+          <button class="btn btn-red" onclick="unforceBackend()">Clear</button>
         </div>
-        <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:8px;">
-          <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px;">Manual backends (one URI per line):</label>
-          <textarea class="uri-input" id="manual-backends-input" rows="3" placeholder="vmess://...&#10;vless://...&#10;trojan://..."></textarea>
-          <div style="display:flex;gap:6px;margin-top:6px;">
-            <select class="sel" id="manual-balancer-select">
-              <option value="main">Main Balancer</option>
-              <option value="gemini">Gemini Balancer</option>
-            </select>
-            <button class="btn btn-s" onclick="setManualBackends()" style="font-size:10px;">Set Backends</button>
+        <div style="border-top:1px solid var(--border);padding-top:8px">
+          <label style="font-size:11px;color:var(--text-dim);display:block;margin-bottom:4px">Manual backends (one per line):</label>
+          <textarea class="inp" id="manual-backends-input" rows="3" placeholder="vmess://...&#10;vless://..."></textarea>
+          <div style="display:flex;gap:6px;margin-top:6px">
+            <select class="sel" id="manual-balancer-select"><option value="main">Main</option><option value="gemini">Gemini</option></select>
+            <button class="btn btn-green" onclick="setManualBackends()">Set</button>
           </div>
         </div>
       </div>
     </div>
   </div>
+</div>
 
-  <!-- Config Categories & Actions -->
+<!-- === ACTIONS ROW === -->
+<div class="row row-3" style="margin-bottom:var(--g)">
+
+  <!-- Actions -->
   <div class="card">
-    <div class="card-h">
-      <span>📂 Config Categories</span>
-      <button class="btn" onclick="loadCategories()" style="font-size:9px;padding:3px 8px;">Refresh</button>
-    </div>
-    <div class="card-b" id="categories-body">
-      <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:10px;">
-        <div class="cat-badge cat-tg">✈️ Telegram: <span id="cat-tg-count">?</span></div>
-        <div class="cat-badge cat-gemini">✦ Gemini: <span id="cat-gem-count">?</span></div>
-        <div class="cat-badge cat-windsurf">🌊 Windsurf: <span id="cat-ws-count">?</span></div>
-        <div class="cat-badge cat-aws">☁️ AWS: <span id="cat-aws-count">?</span></div>
+    <div class="card-head"><span>Actions</span></div>
+    <div class="card-body" style="display:flex;flex-direction:column;gap:6px">
+      <div style="display:flex;gap:4px">
+        <button class="btn btn-accent" onclick="manualTelegramFetch()" id="tg-fetch-btn" style="flex:1;font-size:10px">Fetch Telegram</button>
+        <button class="btn btn-green" onclick="manualPublishTelegram()" id="tg-publish-btn" style="flex:1;font-size:10px">Publish</button>
       </div>
-      <div style="font-size:10px;color:var(--text-dim);margin-bottom:6px;">Test a config's access to services:</div>
-      <div style="display:flex;gap:4px;">
-        <input class="uri-input" id="test-access-uri" placeholder="Paste URI to test..." style="min-height:28px;flex:1;">
-        <button class="btn btn-p" onclick="testConfigAccess()" id="test-access-btn" style="font-size:10px;white-space:nowrap;">🔍 Test</button>
-      </div>
-      <div id="test-access-result" style="margin-top:6px;font-size:11px;"></div>
-    </div>
-  </div>
-
-  <!-- Manual Actions -->
-  <div class="card">
-    <div class="card-h"><span>🔧 Manual Actions</span></div>
-    <div class="card-b" style="display:flex;flex-direction:column;gap:8px;">
-      <div style="display:flex;gap:6px;align-items:center;">
-        <button class="btn btn-p" onclick="manualTelegramFetch()" id="tg-fetch-btn" style="flex:1;">📥 Fetch from Telegram</button>
-        <button class="btn btn-s" onclick="manualPublishTelegram()" id="tg-publish-btn" style="flex:1;">📤 Publish to Telegram</button>
-      </div>
-      <div style="display:flex;gap:6px;align-items:center;">
-        <button class="btn" onclick="manualRescan()" id="rescan-btn" style="flex:1;">🔄 Re-scan Configs (Full Cycle)</button>
-      </div>
-      <div id="manual-action-status" style="font-size:11px;color:var(--text-dim);"></div>
-    </div>
-  </div>
-
-  <!-- Thread Manager Status -->
-  <div class="card full">
-    <div class="card-h">
-      <span>🧵 Thread Manager</span>
-      <button class="btn" onclick="loadThreadStatus()" style="font-size:9px;padding:3px 8px;">Refresh</button>
-    </div>
-    <div class="card-b" id="thread-status-body">
-      <div style="display:flex;gap:12px;font-size:11px;flex-wrap:wrap;margin-bottom:10px;">
-        <span>Mode: <strong id="tm-mode" style="color:var(--accent)">-</strong></span>
-        <span>RAM: <strong id="tm-ram">-</strong></span>
-        <span>CPU: <strong id="tm-cpu">-</strong></span>
-        <span>Threads: <strong id="tm-threads">-</strong></span>
-      </div>
-      <div id="tm-workers" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:10px;"></div>
-    </div>
-  </div>
-
-  <!-- Telegram Status -->
-  <div class="card full">
-    <div class="card-h">
-      <span>📊 Telegram Reporting Status</span>
-      <button class="btn" onclick="loadTelegramStatus()" style="font-size:9px;padding:3px 8px;">Refresh</button>
-    </div>
-    <div class="card-b" id="tg-status-body">
-      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px;">
-        <div>
-          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Bot API</div>
-          <div id="tg-bot-status" style="font-size:12px;">-</div>
-        </div>
-        <div>
-          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">User Account</div>
-          <div id="tg-user-status" style="font-size:12px;">-</div>
-        </div>
-        <div>
-          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Last Publish</div>
-          <div id="tg-last-publish" style="font-size:12px;">-</div>
-        </div>
-        <div>
-          <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Publish Count</div>
-          <div id="tg-publish-count" style="font-size:12px;">-</div>
-        </div>
-      </div>
-      <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap;">
-        <button class="btn btn-s" onclick="testTelegramSend(true)" id="tg-test-bot-btn">🧪 Test Bot</button>
-        <button class="btn btn-s" onclick="testTelegramSend(false)" id="tg-test-user-btn">🧪 Test User</button>
-      </div>
+      <button class="btn" onclick="manualRescan()" id="rescan-btn" style="font-size:10px">Re-scan (Full Cycle)</button>
+      <div id="manual-action-status" style="font-size:10px;color:var(--text-dim)"></div>
     </div>
   </div>
 
   <!-- Telegram Auth -->
-  <div class="card full">
-    <div class="card-h">
-      <span>✈️ Telegram Authentication</span>
-      <span id="tg-session-badge" class="badge" style="font-size:9px">checking</span>
-    </div>
-    <div class="card-b" style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;">
-      <div style="flex:1;min-width:180px;">
-        <div style="font-size:11px;color:var(--text-dim);margin-bottom:2px;">Session</div>
-        <div id="tg-session-info" style="font-size:12px;">Checking...</div>
-      </div>
-      <div style="display:flex;gap:6px;">
-        <button class="btn btn-p" id="tg-login-btn" onclick="telegramLogin()">🔑 Login Telegram</button>
-        <button class="btn" onclick="checkTelegramStatus()">🔄 Check</button>
+  <div class="card">
+    <div class="card-head"><span>Telegram Auth</span><span id="tg-session-badge" class="pill pill-dim" style="font-size:9px">checking</span></div>
+    <div class="card-body">
+      <div id="tg-session-info" style="font-size:12px;margin-bottom:8px">Checking...</div>
+      <div style="display:flex;gap:4px">
+        <button class="btn btn-accent" id="tg-login-btn" onclick="telegramLogin()" style="font-size:10px">Login</button>
+        <button class="btn" onclick="checkTelegramStatus()" style="font-size:10px">Check</button>
       </div>
     </div>
   </div>
 
-  <!-- System Info -->
-  <div class="card full">
-    <div class="card-h"><span>💻 System Info</span><button class="btn" onclick="loadSystemInfo()" style="font-size:9px;padding:3px 8px;">Refresh</button></div>
-    <div class="card-b" id="sys-info" style="display:flex;gap:20px;flex-wrap:wrap;font-size:12px;">
-      <span>Loading...</span>
+  <!-- Telegram Reporting -->
+  <div class="card">
+    <div class="card-head"><span>Telegram Reporting</span><button class="btn" onclick="loadTelegramStatus()" style="font-size:9px;padding:3px 8px">Refresh</button></div>
+    <div class="card-body" style="font-size:11px">
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 12px;margin-bottom:6px">
+        <span>Bot: <b id="tg-bot-status">-</b></span>
+        <span>User: <b id="tg-user-status">-</b></span>
+        <span>Published: <b id="tg-publish-count">-</b></span>
+        <span>Last: <b id="tg-last-publish">-</b></span>
+      </div>
+      <div style="display:flex;gap:4px">
+        <button class="btn btn-green" onclick="testTelegramSend(true)" id="tg-test-bot-btn" style="font-size:9px">Test Bot</button>
+        <button class="btn btn-green" onclick="testTelegramSend(false)" id="tg-test-user-btn" style="font-size:9px">Test User</button>
+      </div>
     </div>
   </div>
+</div>
 
-  <!-- Logs -->
-  <div class="card full">
-    <div class="card-h">
-      <span>📋 Logs</span>
-      <div style="display:flex;gap:4px;">
-        <button class="btn" onclick="toggleAutoScroll()" id="as-btn">⬇ Auto</button>
+<!-- === CONFIG CATEGORIES === -->
+<div class="row row-2" style="margin-bottom:var(--g)">
+  <div class="card">
+    <div class="card-head"><span>Config Categories</span><button class="btn" onclick="loadCategories()" style="font-size:9px;padding:3px 8px">Refresh</button></div>
+    <div class="card-body">
+      <div style="display:flex;flex-wrap:wrap;gap:6px;font-size:11px">
+        <span class="pill pill-blue">Telegram: <b id="cat-tg-count">?</b></span>
+        <span class="pill pill-blue">Gemini: <b id="cat-gem-count">?</b></span>
+        <span class="pill pill-green">Windsurf: <b id="cat-ws-count">?</b></span>
+        <span class="pill pill-amber">AWS: <b id="cat-aws-count">?</b></span>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-head"><span>Test Config Access</span></div>
+    <div class="card-body">
+      <div style="display:flex;gap:4px;margin-bottom:6px">
+        <input class="inp" id="test-access-uri" placeholder="Paste URI to test..." style="min-height:28px;flex:1">
+        <button class="btn btn-accent" onclick="testConfigAccess()" id="test-access-btn" style="font-size:10px">Test</button>
+      </div>
+      <div id="test-access-result" style="font-size:11px"></div>
+    </div>
+  </div>
+</div>
+
+<!-- === SYSTEM INFO === -->
+<div class="row" style="margin-bottom:var(--g)">
+  <div class="card span-full">
+    <div class="card-head"><span>System</span><button class="btn" onclick="loadSystemInfo()" style="font-size:9px;padding:3px 8px">Refresh</button></div>
+    <div class="card-body" id="sys-info" style="display:flex;gap:16px;flex-wrap:wrap;font-size:12px"><span>Loading...</span></div>
+  </div>
+</div>
+
+<!-- === LOGS === -->
+<div class="row" style="margin-bottom:var(--g)">
+  <div class="card span-full">
+    <div class="card-head">
+      <span>Logs</span>
+      <div style="display:flex;gap:4px">
+        <button class="btn" onclick="toggleAutoScroll()" id="as-btn" style="border-color:var(--accent);color:var(--accent)">Auto</button>
         <button class="btn" onclick="clearLogs()">Clear</button>
       </div>
     </div>
-    <div class="log-box" id="log-box"></div>
+    <div class="log-panel" id="log-box"></div>
   </div>
-
-  <!-- Command Bar -->
-  <div class="cmd-bar">
-    <div class="card"><input class="ci" id="cmd-input" type="text" placeholder="Command: status, force_cycle, clear_pid" onkeydown="if(event.key==='Enter')sendCommand()"></div>
-    <button class="btn btn-p" onclick="sendCommand()">Send</button>
-    <button class="btn" onclick="sendCmd('force_cycle')">Force Cycle</button>
-    <button class="btn btn-d" onclick="sendCmd('clear_pid')">Clear PID</button>
-  </div>
-
 </div>
 
+<!-- === COMMAND BAR === -->
+<div class="row" style="margin-bottom:20px">
+  <div style="display:flex;gap:6px;align-items:center">
+    <div class="card" style="flex:1;display:flex;padding:0"><input class="inp" id="cmd-input" type="text" placeholder="status / force_cycle / clear_pid" style="border:none;min-height:auto;padding:8px 12px" onkeydown="if(event.key==='Enter')sendCommand()"></div>
+    <button class="btn btn-accent" onclick="sendCommand()">Run</button>
+    <button class="btn" onclick="sendCmd('force_cycle')">Force Cycle</button>
+    <button class="btn btn-red" onclick="sendCmd('clear_pid')">Clear PID</button>
+  </div>
+</div>
+
+</div><!-- /shell -->
+
 <!-- Auth Modal -->
-<div class="mo" id="auth-modal">
-  <div class="md">
-    <h2 id="auth-title">🔐 Telegram Auth</h2>
+<div class="modal-bg" id="auth-modal">
+  <div class="modal">
+    <h2 id="auth-title">Telegram Auth</h2>
     <p id="auth-message">Enter verification code.</p>
     <input type="text" id="auth-input" placeholder="12345" maxlength="20" autocomplete="off" onkeydown="if(event.key==='Enter')submitAuth()">
-    <div class="md-a">
-      <button class="btn btn-p" onclick="submitAuth()">Submit</button>
-      <button class="btn btn-d" onclick="cancelAuth()">Cancel</button>
+    <div class="modal-actions">
+      <button class="btn btn-accent" onclick="submitAuth()">Submit</button>
+      <button class="btn btn-red" onclick="cancelAuth()">Cancel</button>
     </div>
   </div>
 </div>
 
 <!-- Export Modal -->
-<div class="mo" id="export-modal">
-  <div class="md" style="width:500px;">
-    <h2 id="export-title">📦 Export Configs</h2>
+<div class="modal-bg" id="export-modal">
+  <div class="modal" style="width:500px">
+    <h2 id="export-title">Export Configs</h2>
     <p id="export-info">Loading...</p>
     <div class="export-box" id="export-box"></div>
-    <div class="md-a">
-      <button class="btn btn-p" onclick="copyExport()">📋 Copy All</button>
-      <button class="btn" onclick="document.getElementById('export-modal').classList.remove('active')">Close</button>
+    <div class="modal-actions">
+      <button class="btn btn-accent" onclick="copyExport()">Copy All</button>
+      <button class="btn" onclick="document.getElementById('export-modal').classList.remove('on')">Close</button>
     </div>
   </div>
 </div>
@@ -560,7 +514,7 @@ function drawTrafficChart() {
   const maxVal = Math.max(10, ...allVals) * 1.1;
 
   // Grid lines
-  ctx.strokeStyle = 'rgba(30,42,54,.6)';
+  ctx.strokeStyle = 'rgba(31,31,35,.6)';
   ctx.lineWidth = 0.5;
   for (let i = 1; i <= 3; i++) {
     const y = H - (H * i / 4);
@@ -594,11 +548,11 @@ function drawTrafficChart() {
     ctx.stroke();
   }
 
-  drawLine(trafficData.down, 'rgba(0,191,255,1)', 0.08);
-  drawLine(trafficData.up, 'rgba(0,230,118,1)', 0.08);
+  drawLine(trafficData.down, 'rgba(59,130,246,1)', 0.08);
+  drawLine(trafficData.up, 'rgba(34,197,94,1)', 0.08);
 
   // Scale label
-  ctx.fillStyle = 'rgba(107,123,141,.6)';
+  ctx.fillStyle = 'rgba(82,82,91,.6)';
   ctx.font = '9px sans-serif';
   ctx.fillText(formatKB(maxVal), 2, 10);
 }
@@ -651,16 +605,18 @@ function pollStatus() {
 function updateDashboard(s) {
   const phase = s.phase||'starting';
   const pb = document.getElementById('phase-badge');
-  pb.textContent = phase.toUpperCase(); pb.className = 'badge badge-phase ' + phase;
+  pb.textContent = phase.toUpperCase();
+  const pillMap = {scraping:'pill-blue',validating:'pill-amber',balancing:'pill-green',sleeping:'pill-dim',starting:'pill-red',idle:'pill-dim'};
+  pb.className = 'pill ' + (pillMap[phase] || 'pill-blue');
   document.getElementById('cycle').textContent = s.cycle||0;
   document.getElementById('mode').textContent = s.mode||'NORMAL';
   const mp = (s.memory_pct||0).toFixed(0);
   const mEl = document.getElementById('mem-pct');
   mEl.textContent = mp+'%';
-  mEl.style.color = mp>90?'var(--error)':mp>80?'var(--warning)':'var(--success)';
+  mEl.style.color = mp>90?'var(--red)':mp>80?'var(--amber)':'var(--green)';
   if (s.memory_total_gb>0) document.getElementById('mem-detail').textContent = `(${(s.memory_used_gb||0).toFixed(1)}/${(s.memory_total_gb||0).toFixed(1)}G)`;
   document.getElementById('uptime').textContent = s.uptime||'0m';
-  document.getElementById('status-dot').className = 'dot '+(mp>90?'dot-err':mp>80?'dot-warn':'dot-ok');
+  document.getElementById('status-dot').className = 'live-dot '+(mp>90?'err':mp>80?'warn':'ok');
 
   const ts = Object.values(s.sources||{}).reduce((a,b)=>a+(b.count||0),0);
   document.getElementById('m-scraped').textContent = ts;
@@ -680,7 +636,7 @@ function updateDashboard(s) {
 
   // Sources
   const src=s.sources||{}, sk=Object.keys(src), sb=document.getElementById('sources-body');
-  if(sk.length>0){sb.innerHTML='';let tot=0;sk.forEach(n=>{const x=src[n],st=x.status||'waiting',c=x.count||0;tot+=c;const dc=st==='done'?'sd-ok':st==='fetching'?'sd-run':st==='failed'?'sd-fail':'sd-wait';const tr=document.createElement('tr');tr.innerHTML=`<td>${esc(n)}</td><td><span class="sd ${dc}"></span>${st}</td><td class="n">${c}</td>`;sb.appendChild(tr);});document.getElementById('total-scraped').textContent=tot+' configs';}
+  if(sk.length>0){sb.innerHTML='';let tot=0;sk.forEach(n=>{const x=src[n],st=x.status||'waiting',c=x.count||0;tot+=c;const dc=st==='done'?'dot-ok':st==='fetching'?'dot-run':st==='failed'?'dot-fail':'dot-wait';const tr=document.createElement('tr');tr.innerHTML=`<td>${esc(n)}</td><td><span class="dot ${dc}"></span>${st}</td><td class="r">${c}</td>`;sb.appendChild(tr);});document.getElementById('total-scraped').textContent=tot+' configs';}
 
   // Balancers
   setBal('1',s.bal_main_port||10808,s.bal_main_backends||0,s.bal_main_status||'starting');
@@ -694,8 +650,8 @@ function updateDashboard(s) {
 function setBal(i,port,backs,st){
   document.getElementById('bp'+i).textContent=port;
   document.getElementById('bb'+i).textContent=backs;
-  const dc=st==='OK'?'sd-ok':st==='starting'?'sd-wait':'sd-fail';
-  document.getElementById('bs'+i).innerHTML=`<span class="sd ${dc}"></span>${st}`;
+  const dc=st==='OK'?'dot-ok':st==='starting'?'dot-wait':'dot-fail';
+  document.getElementById('bs'+i).innerHTML=`<span class="dot ${dc}"></span>${st}`;
 }
 
 // --- Auth ---
@@ -705,11 +661,11 @@ function handleAuth(p) {
     const inp=document.getElementById('auth-input');
     if(p.type==='code'){document.getElementById('auth-title').textContent='🔐 Verification Code';document.getElementById('auth-message').textContent=p.message||'Enter 5-digit code';inp.placeholder='12345';inp.type='text';inp.className='';inp.maxLength=5;}
     else{document.getElementById('auth-title').textContent='🔐 2FA Password';document.getElementById('auth-message').textContent=p.message||'Enter 2FA password';inp.placeholder='••••••';inp.type='password';inp.className='pw';inp.maxLength=100;}
-    inp.value='';authModal.classList.add('active');setTimeout(()=>inp.focus(),100);
-  } else if(!p){lastAuthPending=null;authModal.classList.remove('active');}
+    inp.value='';authModal.classList.add('on');setTimeout(()=>inp.focus(),100);
+  } else if(!p){lastAuthPending=null;authModal.classList.remove('on');}
 }
-function submitAuth(){const v=document.getElementById('auth-input').value.trim();if(!v)return;fetch('/api/auth/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})}).then(r=>r.json()).then(d=>{if(d.ok){authModal.classList.remove('active');lastAuthPending=null;}});}
-function cancelAuth(){fetch('/api/auth/cancel',{method:'POST'}).then(()=>{authModal.classList.remove('active');lastAuthPending=null;});}
+function submitAuth(){const v=document.getElementById('auth-input').value.trim();if(!v)return;fetch('/api/auth/submit',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:v})}).then(r=>r.json()).then(d=>{if(d.ok){authModal.classList.remove('on');lastAuthPending=null;}});}
+function cancelAuth(){fetch('/api/auth/cancel',{method:'POST'}).then(()=>{authModal.classList.remove('on');lastAuthPending=null;});}
 
 // --- Commands ---
 function sendCommand(){const i=document.getElementById('cmd-input'),c=i.value.trim();if(!c)return;sendCmd(c);i.value='';}
@@ -721,8 +677,8 @@ let tgBusy=false;
 function checkTelegramStatus(){
   fetch('/api/telegram/status').then(r=>r.json()).then(d=>{
     const b=document.getElementById('tg-session-badge'),info=document.getElementById('tg-session-info'),btn=document.getElementById('tg-login-btn');
-    if(d.has_session){b.textContent='SESSION OK';b.style.cssText='font-size:9px;background:rgba(0,230,118,.12);color:var(--success);border:1px solid rgba(0,230,118,.3);padding:2px 8px;border-radius:10px;';info.innerHTML='<span style="color:var(--success)">✓</span> '+esc(d.session_file);btn.textContent='🔑 Re-Login';}
-    else{b.textContent='NO SESSION';b.style.cssText='font-size:9px;background:rgba(255,82,82,.12);color:var(--error);border:1px solid rgba(255,82,82,.3);padding:2px 8px;border-radius:10px;';info.innerHTML='<span style="color:var(--error)">✗</span> No session. Click Login.';btn.textContent='🔑 Login Telegram';}
+    if(d.has_session){b.textContent='SESSION OK';b.className='pill pill-green';info.innerHTML='<span style="color:var(--green)">&#10003;</span> '+esc(d.session_file);btn.textContent='Re-Login';}
+    else{b.textContent='NO SESSION';b.className='pill pill-red';info.innerHTML='<span style="color:var(--red)">&#10007;</span> No session. Click Login.';btn.textContent='Login';}
   }).catch(()=>{});
 }
 function telegramLogin(){
@@ -736,7 +692,7 @@ function telegramLogin(){
   }).catch(e=>{appendLog({timestamp:'--:--:--',level:'ERROR',message:'[Telegram] '+e});resetTgBtn(false);});
 }
 function pollLoginDone(){let c=0;const iv=setInterval(()=>{c++;fetch('/api/telegram/status').then(r=>r.json()).then(d=>{if(!d.auth_pending&&c>2){clearInterval(iv);checkTelegramStatus();appendLog({timestamp:ts(),level:'INFO',message:d.has_session?'[Telegram] Login OK! Session saved.':'[Telegram] Login failed.'});resetTgBtn(d.has_session);}}).catch(()=>{});if(c>=150){clearInterval(iv);resetTgBtn(false);}},2000);}
-function resetTgBtn(ok){tgBusy=false;const b=document.getElementById('tg-login-btn');b.disabled=false;b.style.opacity='1';b.textContent=ok?'🔑 Re-Login':'🔑 Login Telegram';checkTelegramStatus();}
+function resetTgBtn(ok){tgBusy=false;const b=document.getElementById('tg-login-btn');b.disabled=false;b.style.opacity='1';b.textContent=ok?'Re-Login':'Login';checkTelegramStatus();}
 
 // --- Top Configs ---
 function loadTopConfigs(){
@@ -744,7 +700,7 @@ function loadTopConfigs(){
     const tb=document.getElementById('top-configs-body');
     if(!data.length){tb.innerHTML='<tr><td colspan="4" style="color:var(--text-dim);text-align:center;padding:12px">No backends</td></tr>';return;}
     tb.innerHTML='';
-    data.forEach((c,i)=>{const tr=document.createElement('tr');const hc=c.healthy?'sd-ok':'sd-fail';tr.innerHTML=`<td class="n">${i+1}</td><td style="font-size:11px;font-family:monospace;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.uri_short)}</td><td class="n">${c.latency}ms</td><td><span class="sd ${hc}"></span>${c.healthy?'OK':'down'}</td>`;tb.appendChild(tr);});
+    data.forEach((c,i)=>{const tr=document.createElement('tr');const hc=c.healthy?'dot-ok':'dot-fail';tr.innerHTML=`<td class="r">${i+1}</td><td style="font-size:11px;font-family:var(--mono);max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(c.uri_short)}</td><td class="r">${c.latency}ms</td><td><span class="dot ${hc}"></span>${c.healthy?'OK':'down'}</td>`;tb.appendChild(tr);});
   }).catch(()=>{});
 }
 
@@ -755,7 +711,7 @@ function loadClients(){
     document.getElementById('client-count').textContent=data.length;
     if(!data.length){tb.innerHTML='<tr><td colspan="3" style="color:var(--text-dim);text-align:center;padding:12px">No external clients</td></tr>';return;}
     tb.innerHTML='';
-    data.forEach(c=>{const tr=document.createElement('tr');tr.innerHTML=`<td style="font-family:monospace">${esc(c.ip)}</td><td class="n">${c.connections}</td><td class="n">${c.port}</td>`;tb.appendChild(tr);});
+    data.forEach(c=>{const tr=document.createElement('tr');tr.innerHTML=`<td style="font-family:var(--mono)">${esc(c.ip)}</td><td class="r">${c.connections}</td><td class="r">${c.port}</td>`;tb.appendChild(tr);});
   }).catch(()=>{});
 }
 
@@ -765,7 +721,7 @@ function exportConfigs(tier){
     document.getElementById('export-title').textContent='📦 '+tier.toUpperCase()+' Configs';
     document.getElementById('export-info').textContent=d.count+' configs in '+d.file;
     document.getElementById('export-box').textContent=d.configs.join('\n');
-    document.getElementById('export-modal').classList.add('active');
+    document.getElementById('export-modal').classList.add('on');
   }).catch(()=>{});
 }
 function copyExport(){const t=document.getElementById('export-box').textContent;navigator.clipboard.writeText(t).then(()=>{appendLog({timestamp:ts(),level:'INFO',message:'[Export] Copied to clipboard'});});}
@@ -807,7 +763,7 @@ function renderBalancer(name, info, prefix) {
   }
   const st = info.status || {};
   document.getElementById(prefix+'-st').textContent = st.running ? 'Running' : 'Stopped';
-  document.getElementById(prefix+'-st').style.color = st.running ? 'var(--success)' : 'var(--error)';
+  document.getElementById(prefix+'-st').style.color = st.running ? 'var(--green)' : 'var(--red)';
   document.getElementById(prefix+'-port').textContent = st.port || '-';
   document.getElementById(prefix+'-pool').textContent = st.available_pool || 0;
   const forcedEl = document.getElementById(prefix+'-forced');
@@ -825,12 +781,12 @@ function renderBalancer(name, info, prefix) {
   }
   let html = '';
   backends.forEach((b,i) => {
-    const hc = b.healthy ? 'sd-ok' : 'sd-fail';
+    const hc = b.healthy ? 'dot-ok' : 'dot-fail';
     let tags = '';
     if (b.forced) tags += '<span class="be-tag be-tag-forced">forced</span> ';
     if (b.manual) tags += '<span class="be-tag be-tag-manual">manual</span> ';
     html += `<div class="be-item">
-      <span class="sd ${hc}"></span>
+      <span class="dot ${hc}"></span>
       <span class="be-uri" title="${esc(b.uri)}">${esc(b.uri_short)}</span>
       ${tags}
       <span class="be-lat">${b.latency}ms</span>
@@ -867,20 +823,20 @@ function renderPool(data) {
   container.innerHTML = html;
 }
 function switchBalTab(tab, btn) {
-  document.querySelectorAll('#bal-tab-main,#bal-tab-gemini,#bal-tab-pool,#bal-tab-force').forEach(e=>e.classList.remove('active'));
-  document.getElementById('bal-tab-'+tab).classList.add('active');
-  btn.parentElement.querySelectorAll('.tab-btn').forEach(b=>b.classList.remove('active'));
-  btn.classList.add('active');
+  document.querySelectorAll('#bal-tab-main,#bal-tab-gemini,#bal-tab-pool,#bal-tab-force').forEach(e=>e.classList.remove('on'));
+  document.getElementById('bal-tab-'+tab).classList.add('on');
+  btn.parentElement.querySelectorAll('.tab').forEach(b=>b.classList.remove('on'));
+  btn.classList.add('on');
 }
 function forceFromList(balancer, uri) {
   document.getElementById('force-uri-input').value = uri;
   document.getElementById('force-balancer-select').value = balancer;
   // Switch to force tab
-  document.querySelectorAll('#bal-tab-main,#bal-tab-gemini,#bal-tab-pool,#bal-tab-force').forEach(e=>e.classList.remove('active'));
-  document.getElementById('bal-tab-force').classList.add('active');
-  const tabs = document.querySelectorAll('.tab-btn');
-  tabs.forEach(b=>b.classList.remove('active'));
-  tabs[3].classList.add('active');
+  document.querySelectorAll('#bal-tab-main,#bal-tab-gemini,#bal-tab-pool,#bal-tab-force').forEach(e=>e.classList.remove('on'));
+  document.getElementById('bal-tab-force').classList.add('on');
+  const tabs = document.querySelectorAll('.tab');
+  tabs.forEach(b=>b.classList.remove('on'));
+  tabs[3].classList.add('on');
 }
 function forceBackend() {
   const uri = document.getElementById('force-uri-input').value.trim();
@@ -936,25 +892,25 @@ function testConfigAccess() {
   const btn = document.getElementById('test-access-btn');
   const res = document.getElementById('test-access-result');
   btn.disabled = true; btn.textContent = '⏳ Testing...';
-  res.innerHTML = '<span style="color:var(--text-dim)">Testing access (up to 60s)...</span>';
+  res.innerHTML = '<span style="color:var(--text-dim)">Testing (up to 60s)...</span>';
   fetch('/api/configs/test-access', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({uri})
   }).then(r=>r.json()).then(d => {
-    btn.disabled = false; btn.textContent = '🔍 Test';
-    if (!d.ok) { res.innerHTML = `<span style="color:var(--error)">${esc(d.error||'Failed')}</span>`; return; }
+    btn.disabled = false; btn.textContent = 'Test';
+    if (!d.ok) { res.innerHTML = `<span style="color:var(--red)">${esc(d.error||'Failed')}</span>`; return; }
     const a = d.access || {};
     let html = '';
     const labels = {telegram:'✈️ Telegram',gemini:'✦ Gemini',windsurf:'🌊 Windsurf',aws:'☁️ AWS'};
     for (const [k,v] of Object.entries(a)) {
-      const ok = v ? 'var(--success)' : 'var(--error)';
+      const ok = v ? 'var(--green)' : 'var(--red)';
       const icon = v ? '✓' : '✗';
       html += `<span style="color:${ok};margin-right:10px;">${icon} ${labels[k]||k}</span>`;
     }
     res.innerHTML = html;
   }).catch(e => {
-    btn.disabled = false; btn.textContent = '🔍 Test';
-    res.innerHTML = `<span style="color:var(--error)">${esc(''+e)}</span>`;
+    btn.disabled = false; btn.textContent = 'Test';
+    res.innerHTML = `<span style="color:var(--red)">${esc(''+e)}</span>`;
   });
 }
 
@@ -966,17 +922,17 @@ function manualTelegramFetch() {
   st.textContent = 'Fetching configs from Telegram...';
   appendLog({timestamp:ts(),level:'INFO',message:'[Manual] Fetching configs from Telegram...'});
   fetch('/api/telegram/fetch-configs', {method:'POST'}).then(r=>r.json()).then(d => {
-    btn.disabled = false; btn.textContent = '📥 Fetch from Telegram';
+    btn.disabled = false; btn.textContent = 'Fetch Telegram';
     if (d.ok) {
-      st.innerHTML = `<span style="color:var(--success)">✓ Fetched ${d.count} configs</span>`;
+      st.innerHTML = `<span style="color:var(--green)">✓ Fetched ${d.count} configs</span>`;
       appendLog({timestamp:ts(),level:'INFO',message:`[Manual] Fetched ${d.count} configs from Telegram`});
     } else {
-      st.innerHTML = `<span style="color:var(--error)">✗ ${esc(d.error||'Failed')}</span>`;
+      st.innerHTML = `<span style="color:var(--red)">✗ ${esc(d.error||'Failed')}</span>`;
       appendLog({timestamp:ts(),level:'WARNING',message:'[Manual] Telegram fetch: '+(d.error||'Failed')});
     }
   }).catch(e => {
-    btn.disabled = false; btn.textContent = '📥 Fetch from Telegram';
-    st.innerHTML = `<span style="color:var(--error)">✗ ${esc(''+e)}</span>`;
+    btn.disabled = false; btn.textContent = 'Fetch Telegram';
+    st.innerHTML = `<span style="color:var(--red)">✗ ${esc(''+e)}</span>`;
   });
 }
 function manualPublishTelegram() {
@@ -985,17 +941,17 @@ function manualPublishTelegram() {
   btn.disabled = true; btn.textContent = '⏳ Publishing...';
   st.textContent = 'Publishing configs to Telegram...';
   fetch('/api/telegram/publish', {method:'POST'}).then(r=>r.json()).then(d => {
-    btn.disabled = false; btn.textContent = '📤 Publish to Telegram';
+    btn.disabled = false; btn.textContent = 'Publish';
     if (d.ok) {
-      st.innerHTML = `<span style="color:var(--success)">✓ Published ${d.count} configs</span>`;
+      st.innerHTML = `<span style="color:var(--green)">✓ Published ${d.count} configs</span>`;
       appendLog({timestamp:ts(),level:'INFO',message:`[Manual] Published ${d.count} configs to Telegram`});
     } else {
-      st.innerHTML = `<span style="color:var(--error)">✗ ${esc(d.error||'Failed')}</span>`;
+      st.innerHTML = `<span style="color:var(--red)">✗ ${esc(d.error||'Failed')}</span>`;
       appendLog({timestamp:ts(),level:'WARNING',message:'[Manual] Publish: '+(d.error||'Failed')});
     }
   }).catch(e => {
-    btn.disabled = false; btn.textContent = '📤 Publish to Telegram';
-    st.innerHTML = `<span style="color:var(--error)">✗ ${esc(''+e)}</span>`;
+    btn.disabled = false; btn.textContent = 'Publish';
+    st.innerHTML = `<span style="color:var(--red)">✗ ${esc(''+e)}</span>`;
   });
 }
 
@@ -1006,7 +962,7 @@ function loadThreadStatus() {
     const hw = d.hardware || {};
     document.getElementById('tm-mode').textContent = hw.mode || '-';
     const ramPct = hw.ram_percent || 0;
-    const ramColor = ramPct >= 90 ? 'var(--error)' : ramPct >= 75 ? 'var(--warning)' : 'var(--success)';
+    const ramColor = ramPct >= 90 ? 'var(--red)' : ramPct >= 75 ? 'var(--amber)' : 'var(--green)';
     document.getElementById('tm-ram').innerHTML = `<span style="color:${ramColor}">${ramPct.toFixed(0)}%</span> (${(hw.ram_used_gb||0).toFixed(1)}/${(hw.ram_total_gb||0).toFixed(1)} GB)`;
     document.getElementById('tm-cpu').textContent = `${hw.cpu_count || '?'} cores`;
     document.getElementById('tm-threads').textContent = hw.thread_count || '-';
@@ -1015,19 +971,19 @@ function loadThreadStatus() {
     const workers = d.workers || {};
     let html = '';
     const icons = {health_monitor:'\u2764\ufe0f',config_scanner:'\ud83d\udd0d',telegram_publisher:'\u2708\ufe0f',balancer:'\u2696\ufe0f'};
-    const stateColors = {running:'var(--accent)',sleeping:'var(--text-dim)',idle:'var(--text-dim)',error:'var(--error)',stopped:'var(--error)'};
+    const stateColors = {running:'var(--accent)',sleeping:'var(--text-dim)',idle:'var(--text-dim)',error:'var(--red)',stopped:'var(--red)'};
     for (const [name, w] of Object.entries(workers)) {
       const icon = icons[name] || '\u2699\ufe0f';
       const sc = stateColors[w.state] || 'var(--text)';
       const nextIn = w.state === 'sleeping' && w.next_run_in > 0 ? `<br><small>next in ${Math.floor(w.next_run_in/60)}m ${w.next_run_in%60}s</small>` : '';
-      const errLine = w.last_error ? `<br><small style="color:var(--error)">${esc(w.last_error.substring(0,80))}</small>` : '';
-      html += `<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--radius);padding:8px;">
-        <div style="display:flex;justify-content:space-between;align-items:center;">
-          <strong>${icon} ${name.replace(/_/g,' ')}</strong>
-          <span class="badge" style="font-size:9px;background:${sc}22;color:${sc};border:1px solid ${sc}44;padding:1px 6px;border-radius:8px;">${w.state}</span>
+      const errLine = w.last_error ? `<br><small style="color:var(--red)">${esc(w.last_error.substring(0,80))}</small>` : '';
+      html += `<div class="wk">
+        <div class="wk-head">
+          <span class="wk-name">${icon} ${name.replace(/_/g,' ')}</span>
+          <span class="pill" style="font-size:9px;background:${sc}22;color:${sc};border:1px solid ${sc}44">${w.state}</span>
         </div>
-        <div style="font-size:11px;color:var(--text-dim);margin-top:4px;">
-          runs: ${w.runs} &nbsp; errors: ${w.errors} &nbsp; interval: ${Math.floor((w.interval||0)/60)}m
+        <div class="wk-meta">
+          runs: ${w.runs} &middot; errors: ${w.errors} &middot; ${Math.floor((w.interval||0)/60)}m interval
           ${nextIn}${errLine}
         </div>
       </div>`;
@@ -1042,17 +998,17 @@ function loadTelegramStatus() {
     // Bot API status
     const botStatus = document.getElementById('tg-bot-status');
     if (d.bot_configured) {
-      botStatus.innerHTML = `<span style="color:var(--success)">✓ Configured</span><br><small>${d.bot_token_preview}</small><br><small>Chat: ${d.chat_id}</small>`;
+      botStatus.innerHTML = `<span style="color:var(--green)">&#10003;</span> ${d.bot_token_preview}`;
     } else {
-      botStatus.innerHTML = `<span style="color:var(--error)">✗ Not configured</span><br><small>Set TOKEN & CHAT_ID</small>`;
+      botStatus.innerHTML = `<span style="color:var(--red)">&#10007;</span> Not set`;
     }
     
     // User account status
     const userStatus = document.getElementById('tg-user-status');
     if (d.user_configured) {
-      userStatus.innerHTML = `<span style="color:var(--success)">✓ Configured</span><br><small>${d.phone_preview}</small>`;
+      userStatus.innerHTML = `<span style="color:var(--green)">&#10003;</span> ${d.phone_preview}`;
     } else {
-      userStatus.innerHTML = `<span style="color:var(--warning)">⚠ Not configured</span><br><small>Set API credentials</small>`;
+      userStatus.innerHTML = `<span style="color:var(--amber)">&#9888;</span> Not set`;
     }
     
     // Publish status
@@ -1114,15 +1070,15 @@ function manualRescan() {
   st.textContent = 'Full config scan cycle started...';
   appendLog({timestamp:ts(),level:'INFO',message:'[Manual] Full re-scan cycle started...'});
   fetch('/api/engine/rescan', {method:'POST'}).then(r=>r.json()).then(d => {
-    btn.disabled = false; btn.textContent = '🔄 Re-scan Configs (Full Cycle)';
+    btn.disabled = false; btn.textContent = 'Re-scan (Full Cycle)';
     if (d.ok) {
-      st.innerHTML = `<span style="color:var(--success)">✓ ${esc(d.message||'Rescan started')}</span>`;
+      st.innerHTML = `<span style="color:var(--green)">✓ ${esc(d.message||'Rescan started')}</span>`;
     } else {
-      st.innerHTML = `<span style="color:var(--error)">✗ ${esc(d.error||'Failed')}</span>`;
+      st.innerHTML = `<span style="color:var(--red)">✗ ${esc(d.error||'Failed')}</span>`;
     }
   }).catch(e => {
-    btn.disabled = false; btn.textContent = '🔄 Re-scan Configs (Full Cycle)';
-    st.innerHTML = `<span style="color:var(--error)">✗ ${esc(''+e)}</span>`;
+    btn.disabled = false; btn.textContent = 'Re-scan (Full Cycle)';
+    st.innerHTML = `<span style="color:var(--red)">✗ ${esc(''+e)}</span>`;
   });
 }
 

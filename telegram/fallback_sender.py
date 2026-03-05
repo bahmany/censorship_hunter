@@ -74,7 +74,7 @@ class TelegramFallbackSender:
                 return {"ok": True, "method": "SSH Servers", "attempts": attempts}
         
         # 3. Try through local ports
-        for port in [1080, 11808]:
+        for port in [11808, 11809, 10808, 1080]:
             result = await self._send_via_local_port(message, port)
             attempts.append((f"Local Port {port}", result))
             if result.get("success"):
@@ -184,34 +184,32 @@ class TelegramFallbackSender:
         
         try:
             # Check if port is open
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex(("127.0.0.1", port))
-            sock.close()
-            
-            if result != 0:
-                return {"success": False, "error": f"Port {port} not open"}
-            
-            # Send through SOCKS proxy using urllib ProxyHandler (no global monkey-patch)
-            import urllib.request
-            proxy_handler = urllib.request.ProxyHandler({
-                'http': f'socks5h://127.0.0.1:{port}',
-                'https': f'socks5h://127.0.0.1:{port}',
-            })
-            opener = urllib.request.build_opener(proxy_handler)
-            
+            with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+                pass
+        except Exception:
+            return {"success": False, "error": f"Port {port} not open"}
+
+        try:
+            import requests as _req
+            sess = _req.Session()
+            sess.trust_env = False
+            sess.proxies = {
+                "http": f"socks5h://127.0.0.1:{port}",
+                "https": f"socks5h://127.0.0.1:{port}",
+            }
             url = f"https://api.telegram.org/bot{self.token}/sendMessage"
             data = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
-            body = json.dumps(data).encode('utf-8')
-            req = Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
-            
             loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, lambda: opener.open(req, timeout=30).read())
-            result_json = json.loads(resp)
+            resp = await loop.run_in_executor(
+                None,
+                lambda: sess.post(url, json=data, timeout=30),
+            )
+            result_json = resp.json()
             if result_json.get('ok'):
                 return {"success": True, "port": port}
             return {"success": False, "error": result_json.get('description', 'unknown')}
-                
+        except ImportError:
+            return {"success": False, "error": "requests library not available"}
         except Exception as e:
             return {"success": False, "error": str(e)}
     
@@ -251,23 +249,24 @@ class TelegramFallbackSender:
             
             if process.poll() is not None:
                 return False
-            
-            # Send through XRay SOCKS proxy using urllib ProxyHandler (no global monkey-patch)
-            import urllib.request
-            proxy_handler = urllib.request.ProxyHandler({
-                'http': f'socks5h://127.0.0.1:{port}',
-                'https': f'socks5h://127.0.0.1:{port}',
-            })
-            opener = urllib.request.build_opener(proxy_handler)
-            
+
+            import requests as _req
+            sess = _req.Session()
+            sess.trust_env = False
+            sess.proxies = {
+                "http": f"socks5h://127.0.0.1:{port}",
+                "https": f"socks5h://127.0.0.1:{port}",
+            }
+
             url = f"https://api.telegram.org/bot{self.token}/sendMessage"
             data = {"chat_id": self.chat_id, "text": message, "parse_mode": "Markdown"}
-            body = json.dumps(data).encode('utf-8')
-            req = Request(url, data=body, headers={'Content-Type': 'application/json'}, method='POST')
-            
+
             loop = asyncio.get_running_loop()
-            resp = await loop.run_in_executor(None, lambda: opener.open(req, timeout=30).read())
-            result_json = json.loads(resp)
+            resp = await loop.run_in_executor(
+                None,
+                lambda: sess.post(url, json=data, timeout=30),
+            )
+            result_json = resp.json()
             return result_json.get('ok', False)
                 
         except Exception as e:

@@ -28,6 +28,23 @@ try:
 except ImportError:
     from core.task_manager import HunterTaskManager, HardwareSnapshot
 
+# New aggressive harvesting components
+AggressiveHarvester = None
+ConfigDatabase = None
+ContinuousValidator = None
+DPIPressureEngine = None
+try:
+    from hunter.network.aggressive_harvester import AggressiveHarvester
+    from hunter.network.continuous_validator import ConfigDatabase, ContinuousValidator
+    from hunter.network.dpi_pressure import DPIPressureEngine
+except ImportError:
+    try:
+        from network.aggressive_harvester import AggressiveHarvester
+        from network.continuous_validator import ConfigDatabase, ContinuousValidator
+        from network.dpi_pressure import DPIPressureEngine
+    except ImportError:
+        pass
+
 
 # ---------------------------------------------------------------------------
 # Data classes
@@ -142,6 +159,10 @@ class BaseWorker:
 # Concrete workers
 # ---------------------------------------------------------------------------
 
+# Shared lock to prevent harvester and scanner from fetching the same URLs simultaneously
+_fetch_lock = threading.Lock()
+
+
 class ConfigScannerWorker(BaseWorker):
     """Discovers and validates new proxy configs."""
     name = "config_scanner"
@@ -164,6 +185,7 @@ class ConfigScannerWorker(BaseWorker):
         self.orch.config.set("max_total", hw.max_configs)
         self.orch.config.set("max_workers", hw.io_pool_size)
 
+        acquired = _fetch_lock.acquire(timeout=120)
         try:
             ran = await self.orch.run_cycle()
             self.status.extra["last_cycle_ok"] = ran
@@ -171,6 +193,9 @@ class ConfigScannerWorker(BaseWorker):
         except Exception as exc:
             self.status.extra["last_cycle_ok"] = False
             raise
+        finally:
+            if acquired:
+                _fetch_lock.release()
 
         # Adaptive interval based on results
         if self.orch._last_validated_count == 0:
@@ -373,6 +398,325 @@ class HealthMonitorWorker(BaseWorker):
         self.status.extra["workers"] = worker_states
 
 
+class HarvesterWorker(BaseWorker):
+    """Aggressive config harvester — collects tens of thousands of configs."""
+    name = "harvester"
+    interval_seconds = 1800  # 30 minutes
+    initial_delay = 900  # 15 min offset so it doesn't overlap with scanner
+
+    def __init__(self, orchestrator, stop_event, hw_fn):
+        super().__init__(stop_event, hw_fn)
+        self.orch = orchestrator
+        self._harvester = None
+        self._harvest_count = 0
+        self._first_run = True
+
+    def _get_harvester(self):
+        if self._harvester is None and AggressiveHarvester is not None:
+            extra_ports = []
+            try:
+                extra_ports.append(self.orch.config.get("multiproxy_port", 10808))
+                extra_ports.append(self.orch.config.get("gemini_port", 10809))
+            except Exception:
+                pass
+            self._harvester = AggressiveHarvester(extra_proxy_ports=extra_ports)
+        return self._harvester
+
+    async def execute(self):
+        # Offset first run to avoid overlapping with scanner's initial cycle
+        if self._first_run:
+            self._first_run = False
+            self.logger.info(f"[Harvester] Initial delay {self.initial_delay}s to stagger with scanner")
+            remaining = self.initial_delay
+            while remaining > 0 and not self._stop.is_set():
+                await asyncio.sleep(min(5, remaining))
+                remaining -= 5
+            if self._stop.is_set():
+                return
+
+        harvester = self._get_harvester()
+        if harvester is None:
+            self.logger.info("[Harvester] AggressiveHarvester not available")
+            return
+
+        config_db = getattr(self.orch, 'config_db', None)
+        if config_db is None:
+            self.logger.info("[Harvester] ConfigDatabase not available on orchestrator")
+            return
+
+        # Acquire shared lock to prevent overlap with scanner
+        acquired = _fetch_lock.acquire(timeout=120)
+        if not acquired:
+            self.logger.info("[Harvester] Scanner is running, skipping this cycle")
+            return
+
+        loop = asyncio.get_event_loop()
+        mgr = HunterTaskManager.get_instance()
+
+        try:
+            self.logger.info("[Harvester] Starting aggressive harvest...")
+            configs = await loop.run_in_executor(mgr._io_pool, harvester.harvest)
+        finally:
+            _fetch_lock.release()
+
+        if configs:
+            added = config_db.add_configs(configs, tag="harvest")
+            self._harvest_count += 1
+            self.status.extra["last_count"] = len(configs)
+            self.status.extra["new_added"] = added
+            self.status.extra["db_size"] = config_db.size
+            self.status.extra["harvest_count"] = self._harvest_count
+            self.logger.info(
+                f"[Harvester] Got {len(configs)} configs, {added} new "
+                f"(DB: {config_db.size})"
+            )
+
+            # Feed healthy configs from DB into orchestrator's cache
+            try:
+                healthy = config_db.get_healthy_configs(max_count=200)
+                if healthy and hasattr(self.orch, '_last_good_configs'):
+                    existing = {u for u, _ in self.orch._last_good_configs}
+                    new_healthy = [(u, l) for u, l in healthy if u not in existing]
+                    if new_healthy:
+                        self.orch._last_good_configs.extend(new_healthy[:100])
+                        self.logger.info(
+                            f"[Harvester] Fed {len(new_healthy[:100])} healthy configs to orchestrator"
+                        )
+            except Exception as exc:
+                self.logger.debug(f"[Harvester] Feed error: {exc}")
+        else:
+            self.logger.warning("[Harvester] No configs collected")
+            self.status.extra["last_count"] = 0
+
+
+class GitHubDownloaderWorker(BaseWorker):
+    name = "github_downloader"
+    interval_seconds = 1800
+    initial_delay = 300
+
+    def __init__(self, orchestrator, stop_event, hw_fn):
+        super().__init__(stop_event, hw_fn)
+        self.orch = orchestrator
+        self._first_run = True
+        self._seen: Optional[set] = None
+        self._cache_path: Optional[str] = None
+        self._download_count = 0
+
+    def _cache_file(self) -> str:
+        if self._cache_path:
+            return self._cache_path
+        base_dir = ""
+        try:
+            state_file = str(self.orch.config.get("state_file", "") or "")
+            if state_file:
+                base_dir = os.path.dirname(state_file)
+        except Exception:
+            base_dir = ""
+        if not base_dir:
+            base_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "runtime")
+        try:
+            os.makedirs(base_dir, exist_ok=True)
+        except Exception:
+            pass
+        self._cache_path = os.path.join(base_dir, "HUNTER_github_configs_cache.txt")
+        return self._cache_path
+
+    def _load_seen(self) -> set:
+        if self._seen is not None:
+            return self._seen
+        try:
+            try:
+                from hunter.core.utils import read_lines
+            except ImportError:
+                from core.utils import read_lines
+            self._seen = set(read_lines(self._cache_file()))
+        except Exception:
+            self._seen = set()
+        return self._seen
+
+    def _append_new(self, configs: List[str]) -> int:
+        seen = self._load_seen()
+        new_lines = [c for c in configs if c and c not in seen]
+        if not new_lines:
+            return 0
+        try:
+            with open(self._cache_file(), "a", encoding="utf-8") as f:
+                for c in new_lines:
+                    f.write(c + "\n")
+        except Exception:
+            return 0
+        for c in new_lines:
+            seen.add(c)
+        return len(new_lines)
+
+    async def execute(self):
+        self.interval_seconds = 1800
+        enabled = os.getenv("HUNTER_GITHUB_BG_ENABLED", "true").lower() == "true"
+        if not enabled:
+            self.status.extra["reason"] = "disabled"
+            return
+
+        if self._first_run:
+            self._first_run = False
+            remaining = int(self.initial_delay)
+            while remaining > 0 and not self._stop.is_set():
+                await asyncio.sleep(min(5, remaining))
+                remaining -= 5
+            if self._stop.is_set():
+                return
+
+        fetcher = getattr(self.orch, "config_fetcher", None)
+        if fetcher is None:
+            self.status.extra["reason"] = "no_fetcher"
+            return
+
+        config_db = getattr(self.orch, "config_db", None)
+        proxy_ports = []
+        try:
+            proxy_ports.append(self.orch.config.get("multiproxy_port", 10808))
+            proxy_ports.append(self.orch.config.get("gemini_port", 10809))
+        except Exception:
+            pass
+
+        try:
+            cap = int(os.getenv("HUNTER_GITHUB_BG_CAP", "6000"))
+        except Exception:
+            cap = 6000
+        cap = max(200, min(60_000, cap))
+
+        acquired = _fetch_lock.acquire(timeout=120)
+        if not acquired:
+            self.status.extra["reason"] = "fetch_lock_busy"
+            self.interval_seconds = 300
+            return
+
+        loop = asyncio.get_event_loop()
+        mgr = HunterTaskManager.get_instance()
+        try:
+            configs = await loop.run_in_executor(
+                mgr._io_pool,
+                lambda: fetcher.fetch_github_configs(proxy_ports, max_configs=cap),
+            )
+        finally:
+            try:
+                _fetch_lock.release()
+            except Exception:
+                pass
+
+        if not configs:
+            self.logger.warning("[GitHubBG] No configs fetched")
+            self.status.extra["last_count"] = 0
+            self.interval_seconds = 300
+            return
+
+        if isinstance(configs, set):
+            configs_list = list(configs)
+        else:
+            configs_list = list(configs) if isinstance(configs, list) else []
+
+        appended = self._append_new(configs_list)
+        if self.orch.cache is not None:
+            try:
+                self.orch.cache.save_configs(configs_list, working=False)
+            except Exception:
+                pass
+
+        added = 0
+        if config_db is not None:
+            try:
+                added = config_db.add_configs(set(configs_list), tag="github_bg")
+            except Exception:
+                pass
+
+        self._download_count += 1
+        self.status.extra["last_count"] = len(configs_list)
+        self.status.extra["new_appended"] = appended
+        self.status.extra["new_added_db"] = added
+        self.status.extra["db_size"] = getattr(config_db, "size", 0) if config_db else 0
+        self.status.extra["downloads"] = self._download_count
+        self.logger.info(
+            f"[GitHubBG] Got {len(configs_list)} configs, appended {appended}, db+{added}"
+        )
+
+
+class ValidatorWorker(BaseWorker):
+    """Continuous background config validation."""
+    name = "validator"
+    interval_seconds = 30  # Run every 30 seconds (continuous small batches)
+
+    def __init__(self, orchestrator, stop_event, hw_fn):
+        super().__init__(stop_event, hw_fn)
+        self.orch = orchestrator
+        self._validator = None
+
+    def _get_validator(self):
+        if self._validator is None and ContinuousValidator is not None:
+            config_db = getattr(self.orch, 'config_db', None)
+            if config_db is not None:
+                self._validator = ContinuousValidator(config_db, batch_size=80)
+        return self._validator
+
+    async def execute(self):
+        validator = self._get_validator()
+        if validator is None:
+            return
+
+        loop = asyncio.get_event_loop()
+        mgr = HunterTaskManager.get_instance()
+        tested, passed = await loop.run_in_executor(
+            mgr._io_pool, validator.validate_batch
+        )
+
+        self.status.extra["last_tested"] = tested
+        self.status.extra["last_passed"] = passed
+        stats = validator.get_stats()
+        self.status.extra["total_tested"] = stats["total_tested"]
+        self.status.extra["total_passed"] = stats["total_passed"]
+        self.status.extra["db_alive"] = stats.get("db", {}).get("alive_configs", 0)
+
+        # Feed freshly validated healthy configs to balancer
+        config_db = getattr(self.orch, 'config_db', None)
+        if config_db and passed > 0:
+            try:
+                healthy = config_db.get_healthy_configs(max_count=50)
+                if healthy and self.orch.balancer is not None:
+                    self.orch.balancer.update_available_configs(healthy, trusted=True)
+            except Exception:
+                pass
+
+
+class DPIPressureWorker(BaseWorker):
+    """Periodic DPI stress testing to open bypass holes."""
+    name = "dpi_pressure"
+    interval_seconds = 300  # Every 5 minutes
+
+    def __init__(self, orchestrator, stop_event, hw_fn):
+        super().__init__(stop_event, hw_fn)
+        self.orch = orchestrator
+        self._engine = None
+
+    def _get_engine(self):
+        if self._engine is None and DPIPressureEngine is not None:
+            intensity = float(self.orch.config.get("dpi_pressure_intensity", 0.7))
+            self._engine = DPIPressureEngine(intensity=intensity)
+        return self._engine
+
+    async def execute(self):
+        engine = self._get_engine()
+        if engine is None:
+            self.logger.debug("[DPI-Pressure] Engine not available")
+            return
+
+        loop = asyncio.get_event_loop()
+        mgr = HunterTaskManager.get_instance()
+        stats = await loop.run_in_executor(mgr._io_pool, engine.run_pressure_cycle)
+
+        self.status.extra["tls_ok"] = stats.get("tls_probes_ok", 0)
+        self.status.extra["telegram_reachable"] = stats.get("telegram_reachable", 0)
+        self.status.extra["cycles"] = stats.get("pressure_cycles", 0)
+        self.status.extra["bytes_sent"] = stats.get("total_bytes_sent", 0)
+
+
 # ---------------------------------------------------------------------------
 # Thread Manager
 # ---------------------------------------------------------------------------
@@ -397,8 +741,15 @@ class ThreadManager:
         self.scanner = ConfigScannerWorker(orchestrator, self._stop_event, self._get_hw)
         self.telegram = TelegramPublisherWorker(orchestrator, self._stop_event, self._get_hw)
         self.balancer = BalancerWorker(orchestrator, self._stop_event, self._get_hw)
+        self.harvester = HarvesterWorker(orchestrator, self._stop_event, self._get_hw)
+        self.github_downloader = GitHubDownloaderWorker(orchestrator, self._stop_event, self._get_hw)
+        self.validator = ValidatorWorker(orchestrator, self._stop_event, self._get_hw)
+        self.dpi_pressure = DPIPressureWorker(orchestrator, self._stop_event, self._get_hw)
 
-        all_workers = [self.scanner, self.telegram, self.balancer]
+        all_workers = [
+            self.scanner, self.telegram, self.balancer,
+            self.harvester, self.github_downloader, self.validator, self.dpi_pressure,
+        ]
         self.health = HealthMonitorWorker(self._stop_event, self._get_hw, workers=all_workers)
 
         self._workers: List[BaseWorker] = [
@@ -406,6 +757,10 @@ class ThreadManager:
             self.balancer,
             self.scanner,
             self.telegram,
+            self.harvester,
+            self.github_downloader,
+            self.validator,
+            self.dpi_pressure,
         ]
 
     def _get_hw(self) -> HardwareSnapshot:

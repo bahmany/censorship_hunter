@@ -459,54 +459,42 @@ class TelegramScraper:
             return
         try:
             if self.client.is_connected():
-                # Disconnect gracefully first
                 await self.client.disconnect()
         except Exception:
             pass
-        
-        # Give Telethon's internal tasks time to clean up
+
+        to_cancel = []
         try:
-            await asyncio.sleep(0.5)
-        except Exception:
-            pass
-        
-        # Cancel any remaining internal tasks from Telethon
-        try:
+            current = asyncio.current_task()
             for task in asyncio.all_tasks():
-                if task is asyncio.current_task():
+                if task is current or task.done():
                     continue
-                task_name = task.get_name() if hasattr(task, 'get_name') else str(task)
                 coro = getattr(task, '_coro', None)
-                coro_name = ''
-                if coro:
-                    coro_name = getattr(coro, '__qualname__', '')
-                
-                # Check if this is a Telethon internal connection task
+                coro_name = getattr(coro, '__qualname__', '') if coro else ''
                 if '_send_loop' in coro_name or '_recv_loop' in coro_name or 'telethon' in coro_name.lower():
-                    if not task.done():
-                        try:
-                            task.cancel()
-                        except Exception:
-                            pass
+                    task.cancel()
+                    to_cancel.append(task)
         except Exception:
             pass
-        
-        # Wait a bit for cancellations to process
-        try:
-            await asyncio.sleep(0.3)
-        except Exception:
-            pass
-        
+
+        if to_cancel:
+            try:
+                await asyncio.wait_for(
+                    asyncio.gather(*to_cancel, return_exceptions=True),
+                    timeout=0.8,
+                )
+            except asyncio.TimeoutError:
+                pass
+            except Exception:
+                pass
+
         try:
             sess = getattr(self.client, "session", None)
             if sess is not None:
-                try:
-                    sess.close()
-                except Exception:
-                    pass
+                sess.close()
         except Exception:
             pass
-        
+
         self.client = None
 
     def _runtime_dir(self) -> str:
@@ -669,7 +657,7 @@ class TelegramScraper:
         # 5) Well-known local SOCKS ports (e.g. v2rayN, Clash, etc.)
         if use_proxy_fallback:
             import socket as _sock
-            for _lp in (10808, 1080, 2080, 7890):
+            for _lp in (11808, 11809, 10808, 1080, 2080, 7890):
                 try:
                     with _sock.create_connection(("127.0.0.1", _lp), timeout=0.5):
                         candidates.append((f"local:{_lp}", (socks.SOCKS5, '127.0.0.1', _lp)))
@@ -1347,31 +1335,93 @@ class BotReporter:
 
     # ---- low-level helpers ------------------------------------------------
 
+    _PROXY_PORTS = (11808, 11809, 10808, 9250, 1080, 2080, 7890)
+
+    def _get_proxy_session(self):
+        """Return a requests.Session routed through the first alive local SOCKS port.
+        Falls back to a direct (no-proxy) session if none are alive."""
+        import socket as _sock
+        try:
+            import requests as _req
+        except ImportError:
+            return None
+        for _port in self._PROXY_PORTS:
+            try:
+                with _sock.create_connection(("127.0.0.1", _port), timeout=0.5):
+                    sess = _req.Session()
+                    sess.trust_env = False
+                    sess.proxies = {
+                        "http": f"socks5h://127.0.0.1:{_port}",
+                        "https": f"socks5h://127.0.0.1:{_port}",
+                    }
+                    return sess
+            except Exception:
+                continue
+        sess = _req.Session()
+        sess.trust_env = False
+        return sess
+
+    def _get_direct_session(self):
+        try:
+            import requests as _req
+        except ImportError:
+            return None
+        sess = _req.Session()
+        sess.trust_env = False
+        return sess
+
     def _url(self, method: str) -> str:
         return self.BOT_API_URL.format(token=self.token, method=method)
 
     async def _post_json(self, method: str, data: dict) -> dict:
         """POST JSON to Bot API and return response dict."""
-        import urllib.request
-        import urllib.error
         url = self._url(method)
-        body = json.dumps(data).encode("utf-8")
-        req = urllib.request.Request(
-            url, data=body,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
         loop = asyncio.get_running_loop()
         try:
-            resp = await loop.run_in_executor(
-                None,
-                lambda: urllib.request.urlopen(req, timeout=30).read(),
-            )
-            return json.loads(resp)
-        except urllib.error.HTTPError as e:
-            err_body = e.read().decode(errors="ignore")
-            self.logger.info(f"Bot API {method} error {e.code}: {err_body[:200]}")
-            return {"ok": False, "description": err_body[:200]}
+            sess = self._get_proxy_session()
+            if sess is None:
+                import urllib.request
+                body = json.dumps(data).encode("utf-8")
+                req = urllib.request.Request(url, data=body,
+                    headers={"Content-Type": "application/json"}, method="POST")
+                resp = await loop.run_in_executor(None,
+                    lambda: urllib.request.urlopen(req, timeout=30).read())
+                return json.loads(resp)
+            try:
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: sess.post(url, json=data, timeout=30),
+                )
+            except Exception as e:
+                try:
+                    import requests as _req
+                    proxy_exc = (_req.exceptions.ProxyError,)
+                    conn_exc = (_req.exceptions.ConnectionError,)
+                except Exception:
+                    proxy_exc = ()
+                    conn_exc = ()
+                msg = str(e)
+                should_retry_direct = (
+                    (proxy_exc and isinstance(e, proxy_exc)) or
+                    (conn_exc and isinstance(e, conn_exc) and (
+                        "WinError 10061" in msg or "proxy" in msg.lower()
+                    ))
+                )
+                if should_retry_direct:
+                    ds = self._get_direct_session()
+                    if ds is not None:
+                        resp = await loop.run_in_executor(
+                            None,
+                            lambda: ds.post(url, json=data, timeout=30),
+                        )
+                    else:
+                        raise
+                else:
+                    raise
+            if resp.status_code >= 400:
+                self.logger.info(f"Bot API {method} error {resp.status_code}: {resp.text[:200]}")
+                return {"ok": False, "description": resp.text[:200]}
+            return resp.json()
         except Exception as e:
             self.logger.info(f"Bot API {method} failed: {e}")
             return {"ok": False, "description": str(e)}
@@ -1380,36 +1430,60 @@ class BotReporter:
                                file_field: str, filename: str,
                                file_bytes: bytes) -> dict:
         """POST multipart/form-data (for file uploads)."""
-        import urllib.request
-        import urllib.error
-        boundary = "----HunterBotBoundary"
-        body_parts = []
-        for key, val in fields.items():
-            body_parts.append(
-                f"--{boundary}\r\n"
-                f"Content-Disposition: form-data; name=\"{key}\"\r\n\r\n"
-                f"{val}\r\n"
-            )
-        body_parts.append(
-            f"--{boundary}\r\n"
-            f"Content-Disposition: form-data; name=\"{file_field}\"; filename=\"{filename}\"\r\n"
-            f"Content-Type: application/octet-stream\r\n\r\n"
-        )
-        payload = "".join(body_parts).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode("utf-8")
-
         url = self._url(method)
-        req = urllib.request.Request(
-            url, data=payload,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST",
-        )
         loop = asyncio.get_running_loop()
         try:
-            resp = await loop.run_in_executor(
-                None,
-                lambda: urllib.request.urlopen(req, timeout=60).read(),
-            )
-            return json.loads(resp)
+            sess = self._get_proxy_session()
+            if sess is None:
+                import urllib.request
+                boundary = "----HunterBotBoundary"
+                body_parts = []
+                for key, val in fields.items():
+                    body_parts.append(
+                        f"--{boundary}\r\nContent-Disposition: form-data; name=\"{key}\"\r\n\r\n{val}\r\n")
+                body_parts.append(
+                    f"--{boundary}\r\nContent-Disposition: form-data; name=\"{file_field}\"; "
+                    f"filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n")
+                payload = "".join(body_parts).encode("utf-8") + file_bytes + f"\r\n--{boundary}--\r\n".encode()
+                req = urllib.request.Request(url, data=payload,
+                    headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}, method="POST")
+                resp_bytes = await loop.run_in_executor(None,
+                    lambda: urllib.request.urlopen(req, timeout=60).read())
+                return json.loads(resp_bytes)
+            files = {file_field: (filename, file_bytes, "application/octet-stream")}
+            data = {k: str(v) for k, v in fields.items()}
+            try:
+                resp = await loop.run_in_executor(
+                    None,
+                    lambda: sess.post(url, data=data, files=files, timeout=60),
+                )
+            except Exception as e:
+                try:
+                    import requests as _req
+                    proxy_exc = (_req.exceptions.ProxyError,)
+                    conn_exc = (_req.exceptions.ConnectionError,)
+                except Exception:
+                    proxy_exc = ()
+                    conn_exc = ()
+                msg = str(e)
+                should_retry_direct = (
+                    (proxy_exc and isinstance(e, proxy_exc)) or
+                    (conn_exc and isinstance(e, conn_exc) and (
+                        "WinError 10061" in msg or "proxy" in msg.lower()
+                    ))
+                )
+                if should_retry_direct:
+                    ds = self._get_direct_session()
+                    if ds is not None:
+                        resp = await loop.run_in_executor(
+                            None,
+                            lambda: ds.post(url, data=data, files=files, timeout=60),
+                        )
+                    else:
+                        raise
+                else:
+                    raise
+            return resp.json()
         except Exception as e:
             self.logger.info(f"Bot API file upload failed: {e}")
             return {"ok": False, "description": str(e)}
@@ -1505,6 +1579,27 @@ class BotReporter:
         if silver:
             parts.append(f"🥈 {len(silver)} silver")
         summary += f"\n{'  •  '.join(parts)}"
+
+        try:
+            lang = os.getenv("HUNTER_LANG", "fa")
+            try:
+                from hunter.core.ollama_client import OllamaClient
+            except ImportError:
+                from core.ollama_client import OllamaClient
+            try:
+                from hunter.core.task_manager import HunterTaskManager
+            except ImportError:
+                from core.task_manager import HunterTaskManager
+            oc = OllamaClient(timeout_s=4.0)
+            mgr = HunterTaskManager.get_instance()
+            ai = await asyncio.wait_for(
+                mgr.run_in_io_async(oc.summarize_configs, configs, lang=lang),
+                timeout=4.5,
+            )
+            if ai:
+                summary += "\n\n" + ai
+        except Exception:
+            pass
         await self.send_message(summary, chat_id=chat_id)
 
     async def report_config_files(

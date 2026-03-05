@@ -40,6 +40,8 @@ StealthObfuscationEngine = None
 ObfuscationConfig = None
 ProxyStealthWrapper = None
 DPIEvasionOrchestrator = None
+ConfigDatabase = None
+AggressiveHarvester = None
 load_json = None
 now_ts = None
 read_lines = None
@@ -65,6 +67,8 @@ try:
     from hunter.config.cache import SmartCache
     from hunter.security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
     from hunter.security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
+    from hunter.network.continuous_validator import ConfigDatabase
+    from hunter.network.aggressive_harvester import AggressiveHarvester
     from hunter.core.utils import load_json, now_ts, read_lines, save_json, write_lines
     from hunter.telegram_config_reporter import ConfigReportingService
     from hunter.config.dns_servers import DNSManager, get_dns_config
@@ -86,6 +90,14 @@ except ImportError:
     from config.cache import SmartCache
     from security.stealth_obfuscation import StealthObfuscationEngine, ObfuscationConfig, ProxyStealthWrapper
     from security.dpi_evasion_orchestrator import DPIEvasionOrchestrator
+    try:
+        from network.continuous_validator import ConfigDatabase
+    except ImportError:
+        ConfigDatabase = None
+    try:
+        from network.aggressive_harvester import AggressiveHarvester
+    except ImportError:
+        AggressiveHarvester = None
     from core.utils import load_json, now_ts, read_lines, save_json, write_lines
     from telegram_config_reporter import ConfigReportingService
     from ui.progress import HunterUI, LiveStatus, ServiceManager
@@ -222,6 +234,16 @@ class HunterOrchestrator:
                 )
             except Exception as e:
                 self.logger.info(f"Gemini balancer init skipped: {e}")
+
+        # Config database (200k+ capacity) for aggressive harvesting
+        self.config_db = None
+        if ConfigDatabase is not None:
+            try:
+                max_db = int(os.getenv("HUNTER_MAX_DB_CONFIGS", "250000"))
+                self.config_db = ConfigDatabase(max_configs=max_db)
+                self.logger.info(f"ConfigDatabase initialized (capacity: {max_db:,})")
+            except Exception as e:
+                self.logger.info(f"ConfigDatabase init skipped: {e}")
 
         # State
         self.validated_configs: List[Tuple[str, float]] = []
@@ -1449,6 +1471,59 @@ class HunterOrchestrator:
                 except Exception as e:
                     self.logger.info(f"Cache save skipped: {e}")
 
+            # Store in ConfigDatabase (200k+ capacity) for continuous validation
+            if self.config_db is not None and all_raw:
+                try:
+                    added = self.config_db.add_configs(set(all_raw), tag="scrape")
+                    self.logger.info(
+                        f"[ConfigDB] Stored {added} new configs "
+                        f"(DB total: {self.config_db.size:,})"
+                    )
+                except Exception as e:
+                    self.logger.debug(f"[ConfigDB] Store skipped: {e}")
+
+            # Supplement with healthy configs from the database
+            if self.config_db is not None:
+                try:
+                    db_healthy = self.config_db.get_healthy_configs(max_count=300)
+                    if db_healthy:
+                        db_uris = [u for u, _ in db_healthy]
+                        existing = set(tg_raw) | set(http_raw)
+                        new_from_db = [u for u in db_uris if u not in existing]
+                        if new_from_db:
+                            http_raw.extend(new_from_db)
+                            self.logger.info(
+                                f"[ConfigDB] Supplemented with {len(new_from_db)} "
+                                f"healthy configs from database"
+                            )
+                except Exception as e:
+                    self.logger.debug(f"[ConfigDB] Supplement skipped: {e}")
+
+            if self.config_db is not None:
+                try:
+                    try:
+                        batch_size = int(os.getenv("HUNTER_BG_VALIDATION_BATCH", "120"))
+                    except Exception:
+                        batch_size = 120
+                    batch_size = max(0, min(400, batch_size))
+                    if batch_size > 0:
+                        batch = self.config_db.get_untested_batch(batch_size=batch_size)
+                        batch_uris = []
+                        for rec in batch:
+                            uri = getattr(rec, "uri", None)
+                            if isinstance(uri, str) and uri:
+                                batch_uris.append(uri)
+                        if batch_uris:
+                            existing = set(tg_raw) | set(http_raw)
+                            batch_uris = [u for u in batch_uris if u not in existing]
+                            if batch_uris:
+                                http_raw = batch_uris + list(http_raw)
+                                self.logger.info(
+                                    f"[ConfigDB] Queued full validation for {len(batch_uris)} configs"
+                                )
+                except Exception:
+                    pass
+
             # --- Two separate benchmark lines ---
             validated = []
 
@@ -1868,8 +1943,13 @@ class HunterOrchestrator:
                     if tasks:
                         for task in tasks:
                             task.cancel()
-                        # Wait briefly for tasks to acknowledge cancellation
-                        await asyncio.wait(tasks, timeout=1.0, return_when=asyncio.ALL_COMPLETED)
+                        try:
+                            await asyncio.wait_for(
+                                asyncio.gather(*tasks, return_exceptions=True),
+                                timeout=1.0,
+                            )
+                        except asyncio.TimeoutError:
+                            pass
                 except Exception:
                     pass
                 await asyncio.wait_for(self.telegram_scraper.disconnect(), timeout=5.0)
