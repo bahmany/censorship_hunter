@@ -1,0 +1,878 @@
+#include "orchestrator/thread_manager.h"
+#include "orchestrator/orchestrator.h"
+#include "core/utils.h"
+#include "core/constants.h"
+#include "core/task_manager.h"
+
+#include <chrono>
+#include <deque>
+#include <sstream>
+#include <iostream>
+#include <filesystem>
+#include <fstream>
+
+namespace hunter {
+namespace orchestrator {
+
+// ═══════════════════════════════════════════════════════════════════
+// BaseWorker
+// ═══════════════════════════════════════════════════════════════════
+
+BaseWorker::BaseWorker(const std::string& worker_name, int interval,
+                       std::atomic<bool>& stop_event)
+    : name(worker_name), interval_seconds(interval), stop_(stop_event) {
+    status_.name = worker_name;
+    status_.state = WorkerState::IDLE;
+}
+
+BaseWorker::~BaseWorker() {
+    if (thread_.joinable()) thread_.join();
+}
+
+void BaseWorker::start() {
+    if (thread_.joinable()) return;
+    thread_ = std::thread(&BaseWorker::runLoop, this);
+}
+
+void BaseWorker::join(float timeout) {
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+}
+
+WorkerStatus BaseWorker::getStatus() const {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    return status_;
+}
+
+void BaseWorker::updateExtra(const std::string& key, const std::string& value) {
+    std::lock_guard<std::mutex> lock(status_mutex_);
+    status_.extra[key] = value;
+}
+
+HardwareSnapshot BaseWorker::getHardware() {
+    return HunterTaskManager::instance().getHardware();
+}
+
+void BaseWorker::runLoop() {
+    std::cout << "[" << name << "] Thread started" << std::endl;
+    while (!stop_.load()) {
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.state = WorkerState::RUNNING;
+        }
+        try {
+            execute();
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.runs++;
+            status_.last_run = utils::nowTimestamp();
+            status_.last_error.clear();
+        } catch (const std::exception& e) {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.errors++;
+            status_.last_error = e.what();
+            status_.state = WorkerState::WORKER_ERROR;
+            std::cerr << "[" << name << "] Error: " << e.what() << std::endl;
+        }
+
+        if (stop_.load()) break;
+
+        // Sleep with countdown
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.state = WorkerState::SLEEPING;
+        }
+        int remaining = interval_seconds;
+        while (remaining > 0 && !stop_.load()) {
+            {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                status_.next_run_in = (double)remaining;
+            }
+            int sleep_ms = std::min(remaining, 5) * 1000;
+            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            remaining -= 5;
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_.state = WorkerState::STOPPED;
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ConfigScannerWorker
+// ═══════════════════════════════════════════════════════════════════
+
+ConfigScannerWorker::ConfigScannerWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("config_scanner", constants::SCANNER_INTERVAL_S, stop), orch_(orch) {
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_SCANNER_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
+}
+
+void ConfigScannerWorker::execute() {
+    auto hw = getHardware();
+    std::cout << "[Scanner] Starting cycle (mode=" << (int)hw.mode
+              << ", RAM=" << hw.ram_percent << "%, workers=" << hw.io_pool_size << ")" << std::endl;
+
+    updateExtra("mode", std::to_string((int)hw.mode));
+    updateExtra("ram_percent", std::to_string(hw.ram_percent));
+
+    orch_->config().set("max_total", hw.max_configs);
+    orch_->config().set("max_workers", hw.io_pool_size);
+
+    bool ran = orch_->runCycle();
+    updateExtra("last_cycle_ok", ran ? "true" : "false");
+    updateExtra("validated", std::to_string(orch_->lastValidatedCount()));
+
+    // Adaptive interval
+    // Default: continuous scanning (can be disabled via env HUNTER_CONTINUOUS=false)
+    // If user explicitly overrides interval via env, do not auto-adjust.
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_SCANNER_INTERVAL_S", -1);
+    if (env_interval > 0) {
+        interval_seconds = env_interval;
+        return;
+    }
+    const bool continuous = HunterConfig::getEnvBool("HUNTER_CONTINUOUS", true);
+    if (!continuous) {
+        if (orch_->lastValidatedCount() == 0) {
+            interval_seconds = 600;
+        } else if (orch_->lastValidatedCount() < 5) {
+            interval_seconds = 900;
+        } else {
+            interval_seconds = constants::SCANNER_INTERVAL_S;
+        }
+        return;
+    }
+
+    // Continuous mode: scale frequency with resource mode.
+    int base = 120;
+    switch (hw.mode) {
+        case ResourceMode::NORMAL: base = 60; break;
+        case ResourceMode::MODERATE: base = 75; break;
+        case ResourceMode::SCALED: base = 90; break;
+        case ResourceMode::CONSERVATIVE: base = 120; break;
+        case ResourceMode::REDUCED: base = 180; break;
+        case ResourceMode::MINIMAL: base = 240; break;
+        case ResourceMode::ULTRA_MINIMAL: base = 300; break;
+    }
+    // If we didn't validate anything, back off a bit.
+    if (orch_->lastValidatedCount() == 0) base = std::max(base, 180);
+    interval_seconds = base;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// TelegramPublisherWorker
+// ═══════════════════════════════════════════════════════════════════
+
+TelegramPublisherWorker::TelegramPublisherWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("telegram_publisher", constants::PUBLISHER_INTERVAL_S, stop), orch_(orch) {
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_PUBLISHER_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
+}
+
+void TelegramPublisherWorker::execute() {
+    auto* reporter = orch_->botReporter();
+    if (!reporter || !reporter->isConfigured()) return;
+
+    // Collect URIs from gold/silver files
+    auto gold_uris = utils::readLines(orch_->config().goldFile());
+    if (gold_uris.empty()) return;
+
+    int max_lines = orch_->config().getInt("telegram_publish_max_lines", 50);
+    if ((int)gold_uris.size() > max_lines)
+        gold_uris.resize(max_lines);
+
+    bool ok = reporter->reportConfigFiles(gold_uris);
+    updateExtra("published", ok ? "true" : "false");
+    updateExtra("count", std::to_string(gold_uris.size()));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// BalancerWorker
+// ═══════════════════════════════════════════════════════════════════
+
+BalancerWorker::BalancerWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("balancer", constants::BALANCER_CHECK_INTERVAL_S, stop), orch_(orch) {
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_BALANCER_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
+}
+
+void BalancerWorker::execute() {
+    auto* bal = orch_->balancer();
+    if (!bal) return;
+
+    auto status = bal->getStatus();
+    updateExtra("port", std::to_string(status.port));
+    updateExtra("backends", std::to_string(status.backend_count));
+    updateExtra("healthy", std::to_string(status.healthy_count));
+    updateExtra("running", status.running ? "true" : "false");
+
+    // Check if port responds, restart if needed
+    if (status.running && !utils::isPortAlive(status.port, 2000)) {
+        std::cout << "[Balancer] Port not responding, refreshing..." << std::endl;
+        // Balancer health monitor handles this internally
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// HealthMonitorWorker
+// ═══════════════════════════════════════════════════════════════════
+
+HealthMonitorWorker::HealthMonitorWorker(std::atomic<bool>& stop,
+                                          std::vector<BaseWorker*> all_workers)
+    : BaseWorker("health_monitor", constants::HEALTH_MONITOR_INTERVAL_S, stop),
+      workers_(std::move(all_workers)) {}
+
+void HealthMonitorWorker::execute() {
+    auto hw = HunterTaskManager::instance().getHardware();
+    updateExtra("ram_percent", std::to_string(hw.ram_percent));
+    updateExtra("cpu_count", std::to_string(hw.cpu_count));
+    updateExtra("mode", std::to_string((int)hw.mode));
+
+    // Check worker health
+    int running = 0, errors = 0;
+    for (auto* w : workers_) {
+        auto st = w->getStatus();
+        if (st.state == WorkerState::RUNNING || st.state == WorkerState::SLEEPING) running++;
+        if (st.state == WorkerState::WORKER_ERROR) errors++;
+    }
+    updateExtra("workers_running", std::to_string(running));
+    updateExtra("workers_error", std::to_string(errors));
+
+    // Memory pressure GC
+    if (hw.ram_percent >= 90) {
+        HunterTaskManager::instance().maybeResize();
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// HarvesterWorker
+// ═══════════════════════════════════════════════════════════════════
+
+HarvesterWorker::HarvesterWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("harvester", constants::HARVESTER_INTERVAL_S, stop), orch_(orch) {
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_HARVESTER_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
+}
+
+void HarvesterWorker::execute() {
+    if (first_run_) {
+        first_run_ = false;
+        std::cout << "[Harvester] Initial delay " << constants::HARVESTER_INITIAL_DELAY_S << "s" << std::endl;
+        int remaining = constants::HARVESTER_INITIAL_DELAY_S;
+        while (remaining > 0 && !stop_.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(std::min(remaining, 5)));
+            remaining -= 5;
+        }
+        if (stop_.load()) return;
+    }
+
+    auto* db = orch_->configDb();
+    if (!db) return;
+
+    auto& mgr = HunterTaskManager::instance();
+    std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::seconds(10))) {
+        std::cout << "[Harvester] Fetch lock busy, skipping" << std::endl;
+        return;
+    }
+
+    network::AggressiveHarvester harvester({
+        orch_->config().multiproxyPort(),
+        orch_->config().geminiPort()
+    });
+
+    const int harvest_timeout_s = HunterConfig::getEnvInt("HUNTER_HARVEST_TIMEOUT_S", 60);
+    auto configs = harvester.harvest((float)harvest_timeout_s);
+    lock.unlock();
+
+    if (!configs.empty()) {
+        int added = db->addConfigs(configs, "harvest");
+        harvest_count_++;
+        updateExtra("last_count", std::to_string(configs.size()));
+        updateExtra("new_added", std::to_string(added));
+        updateExtra("db_size", std::to_string(db->size()));
+        std::cout << "[Harvester] Got " << configs.size() << " configs, " << added << " new" << std::endl;
+    }
+
+    // In continuous mode, harvest more frequently (still respecting env override if set via constructor)
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_HARVESTER_INTERVAL_S", -1);
+    const bool continuous = HunterConfig::getEnvBool("HUNTER_CONTINUOUS", true);
+    if (continuous && env_interval <= 0) {
+        interval_seconds = std::min(interval_seconds, 900);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// GitHubDownloaderWorker
+// ═══════════════════════════════════════════════════════════════════
+
+GitHubDownloaderWorker::GitHubDownloaderWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("github_bg", constants::GITHUB_BG_INTERVAL_S, stop), orch_(orch) {
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
+}
+
+std::string GitHubDownloaderWorker::cacheFile() {
+    if (!cache_path_.empty()) return cache_path_;
+    std::string base = utils::dirName(orch_->config().stateFile());
+    if (base.empty()) base = "runtime";
+    utils::mkdirRecursive(base);
+    cache_path_ = base + "/HUNTER_github_configs_cache.txt";
+    return cache_path_;
+}
+
+void GitHubDownloaderWorker::loadSeen() {
+    if (!seen_.empty()) return;
+    auto lines = utils::readLines(cacheFile());
+    seen_.insert(lines.begin(), lines.end());
+}
+
+int GitHubDownloaderWorker::appendNew(const std::vector<std::string>& configs) {
+    loadSeen();
+    std::vector<std::string> new_lines;
+    for (const auto& c : configs) {
+        if (!c.empty() && seen_.find(c) == seen_.end()) {
+            new_lines.push_back(c);
+            seen_.insert(c);
+        }
+    }
+    if (new_lines.empty()) return 0;
+    std::ofstream f(cacheFile(), std::ios::app);
+    for (const auto& c : new_lines) f << c << "\n";
+    return (int)new_lines.size();
+}
+
+void GitHubDownloaderWorker::execute() {
+    interval_seconds = constants::GITHUB_BG_INTERVAL_S;
+
+    bool enabled = HunterConfig::getEnvBool("HUNTER_GITHUB_BG_ENABLED", true);
+    if (!enabled) {
+        updateExtra("reason", "disabled");
+        std::cout << "[GitHubBG] Disabled" << std::endl;
+        return;
+    }
+
+    if (first_run_) {
+        first_run_ = false;
+        updateExtra("reason", "initial_delay");
+        std::cout << "[GitHubBG] Initial delay " << constants::GITHUB_BG_INITIAL_DELAY_S << "s" << std::endl;
+        int remaining = constants::GITHUB_BG_INITIAL_DELAY_S;
+        while (remaining > 0 && !stop_.load()) {
+            std::this_thread::sleep_for(std::chrono::seconds(std::min(remaining, 5)));
+            remaining -= 5;
+        }
+        if (stop_.load()) return;
+    }
+
+    // Clear stale reason
+    {
+        std::lock_guard<std::mutex> lock(status_mutex_);
+        status_.extra.erase("reason");
+    }
+
+    int cap = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_CAP", constants::DEFAULT_GITHUB_BG_CAP);
+    cap = std::max(200, std::min(150000, cap));
+    std::cout << "[GitHubBG] Fetching (cap=" << cap << ")" << std::endl;
+
+    auto& mgr = HunterTaskManager::instance();
+    std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::seconds(10))) {
+        updateExtra("reason", "scrape_lock_busy");
+        std::cout << "[GitHubBG] Fetch lock busy, retrying soon" << std::endl;
+        interval_seconds = 60;
+        return;
+    }
+
+    std::vector<int> proxy_ports = {
+        orch_->config().multiproxyPort(),
+        orch_->config().geminiPort()
+    };
+
+    auto configs = orch_->configFetcher().fetchGithubConfigs(proxy_ports, cap);
+    lock.unlock();
+
+    if (configs.empty()) {
+        std::cout << "[GitHubBG] No configs fetched" << std::endl;
+        updateExtra("last_count", "0");
+        updateExtra("reason", "no_configs");
+        interval_seconds = 300;
+        return;
+    }
+
+    std::vector<std::string> configs_list(configs.begin(), configs.end());
+    int appended = appendNew(configs_list);
+
+    // Save to cache
+    auto* cache = orch_->cache();
+    if (cache) cache->saveConfigs(configs_list, false);
+
+    // Add to ConfigDB
+    int added = 0;
+    auto* db = orch_->configDb();
+    if (db) added = db->addConfigs(configs, "github_bg");
+
+    // Get tag stats
+    network::ConfigDatabase::TagStats tag_stats;
+    if (db) tag_stats = db->getTagStats("github_bg");
+
+    download_count_++;
+    updateExtra("last_count", std::to_string(configs_list.size()));
+    updateExtra("new_appended", std::to_string(appended));
+    updateExtra("new_added_db", std::to_string(added));
+    updateExtra("db_size", std::to_string(db ? db->size() : 0));
+    updateExtra("github_total", std::to_string(tag_stats.total));
+    updateExtra("github_alive", std::to_string(tag_stats.alive));
+    updateExtra("github_avg_latency_ms", std::to_string(tag_stats.avg_latency_ms));
+    updateExtra("github_untested", std::to_string(tag_stats.untested));
+    updateExtra("github_needs_retest", std::to_string(tag_stats.needs_retest));
+    updateExtra("downloads", std::to_string(download_count_));
+
+    std::cout << "[GitHubBG] Got " << configs_list.size() << " configs, appended "
+              << appended << ", db+" << added << std::endl;
+
+    // In continuous mode, check GitHub sources more frequently (still can be overridden by env)
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_INTERVAL_S", -1);
+    const bool continuous2 = HunterConfig::getEnvBool("HUNTER_CONTINUOUS", true);
+    if (continuous2 && env_interval <= 0) {
+        interval_seconds = std::min(interval_seconds, 300);
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ValidatorWorker
+// ═══════════════════════════════════════════════════════════════════
+
+ValidatorWorker::ValidatorWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("validator", constants::VALIDATOR_INTERVAL_S, stop), orch_(orch) {
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_VALIDATOR_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
+}
+
+void ValidatorWorker::execute() {
+    auto* db = orch_->configDb();
+    if (!db) {
+        std::cout << "[Validator] WARNING: ConfigDB is null, skipping validation" << std::endl;
+        return;
+    }
+
+    network::ContinuousValidator validator(*db, 80);
+    auto [tested, passed] = validator.validateBatch();
+
+    std::cout << "[Validator] Batch complete: tested=" << tested << " passed=" << passed << std::endl;
+
+    updateExtra("last_tested", std::to_string(tested));
+    updateExtra("last_passed", std::to_string(passed));
+
+    auto stats = validator.getStats();
+    updateExtra("db_total", std::to_string(stats.db.total));
+    updateExtra("db_alive", std::to_string(stats.db.alive));
+    updateExtra("db_tested_unique", std::to_string(stats.db.tested_unique));
+    updateExtra("db_untested_unique", std::to_string(stats.db.untested_unique));
+    updateExtra("db_stale_unique", std::to_string(stats.db.stale_unique));
+    updateExtra("total_tested", std::to_string(stats.db.total_tested));
+    updateExtra("total_passed", std::to_string(stats.db.total_passed));
+
+    static uint64_t last_ms = 0;
+    static int last_total_tests = 0;
+    static std::deque<std::string> history;
+
+    uint64_t now_ms = utils::nowMs();
+    double now_ts = utils::nowTimestamp();
+    double dt = (last_ms == 0) ? 0.0 : (double)(now_ms - last_ms) / 1000.0;
+    double rate_tests = 0.0;
+    if (dt > 0.0) {
+        int d = stats.db.total_tested - last_total_tests;
+        if (d < 0) d = 0;
+        rate_tests = (double)d / dt;
+    }
+    int pending_unique = stats.db.untested_unique + stats.db.stale_unique;
+    double eta_s = 0.0;
+    if (rate_tests > 0.0001 && pending_unique > 0) {
+        eta_s = (double)pending_unique / rate_tests;
+    }
+
+    updateExtra("rate_per_s", std::to_string(rate_tests));
+    updateExtra("pending_unique", std::to_string(pending_unique));
+    updateExtra("eta_s", std::to_string(eta_s));
+
+    {
+        std::ostringstream p;
+        p << "{\"ts\":" << now_ts
+          << ",\"tested_unique\":" << stats.db.tested_unique
+          << ",\"alive\":" << stats.db.alive
+          << ",\"untested_unique\":" << stats.db.untested_unique
+          << ",\"stale_unique\":" << stats.db.stale_unique
+          << ",\"pending_unique\":" << pending_unique
+          << ",\"rate_per_s\":" << rate_tests
+          << "}";
+        history.push_back(p.str());
+        while (history.size() > 180) history.pop_front();
+    }
+
+    last_ms = now_ms;
+    last_total_tests = stats.db.total_tested;
+
+    std::string base = utils::dirName(orch_->config().stateFile());
+    if (base.empty()) base = "runtime";
+    std::string status_path = base + "/HUNTER_status.json";
+
+    // Debug logging for status file path
+    static bool first_status_write = true;
+    if (first_status_write) {
+        std::cout << "[Validator] Writing status to: " << status_path << std::endl;
+        std::cout << "[Validator] State file config: " << orch_->config().stateFile() << std::endl;
+        first_status_write = false;
+    }
+
+    std::ostringstream hist;
+    hist << "[";
+    bool first = true;
+    for (auto& row : history) {
+        if (!first) hist << ",";
+        first = false;
+        hist << row;
+    }
+    hist << "]";
+
+    utils::JsonBuilder dbj;
+    dbj.add("total", stats.db.total)
+       .add("alive", stats.db.alive)
+       .add("tested_unique", stats.db.tested_unique)
+       .add("untested_unique", stats.db.untested_unique)
+       .add("stale_unique", stats.db.stale_unique)
+       .add("avg_latency_ms", stats.db.avg_latency_ms)
+       .add("total_tests", stats.db.total_tested)
+       .add("total_passes", stats.db.total_passed);
+
+    utils::JsonBuilder valj;
+    valj.add("last_tested", tested)
+       .add("last_passed", passed)
+       .add("interval_s", interval_seconds)
+       .add("rate_per_s", rate_tests);
+
+    utils::JsonBuilder root;
+    root.add("ts", now_ts)
+        .addRaw("db", dbj.build())
+        .addRaw("validator", valj.build())
+        .add("pending_unique", pending_unique)
+        .add("eta_seconds", eta_s)
+        .addRaw("history", hist.str());
+
+    bool write_ok = utils::saveJsonFile(status_path, root.build());
+    std::cout << "[Validator] Status file write: " << (write_ok ? "SUCCESS" : "FAILED") 
+              << " - db_total=" << stats.db.total << " alive=" << stats.db.alive << std::endl;
+
+    // In continuous mode, validate more frequently (still can be overridden by env)
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_VALIDATOR_INTERVAL_S", -1);
+    const bool continuous3 = HunterConfig::getEnvBool("HUNTER_CONTINUOUS", true);
+    if (continuous3 && env_interval <= 0) {
+        interval_seconds = std::min(interval_seconds, 2);
+    }
+
+    // Feed healthy configs to balancer
+    if (passed > 0 && orch_->balancer()) {
+        auto healthy = db->getHealthyConfigs(50);
+        if (!healthy.empty()) {
+            orch_->balancer()->updateAvailableConfigs(healthy, true);
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// DpiPressureWorker
+// ═══════════════════════════════════════════════════════════════════
+
+DpiPressureWorker::DpiPressureWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("dpi_pressure", constants::DPI_PRESSURE_INTERVAL_S, stop), orch_(orch) {}
+
+void DpiPressureWorker::execute() {
+    security::DpiPressureEngine engine(0.7f);
+    auto stats = engine.runPressureCycle();
+
+    updateExtra("tls_ok", std::to_string(stats["tls_probes_ok"]));
+    updateExtra("telegram_reachable", std::to_string(stats["telegram_reachable"]));
+    updateExtra("cycles", std::to_string(stats["pressure_cycles"]));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ImportWatcherWorker
+// ═══════════════════════════════════════════════════════════════════
+
+ImportWatcherWorker::ImportWatcherWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("import_watcher", 30, stop), orch_(orch) {}
+
+void ImportWatcherWorker::ensureImportDirs() {
+    namespace fs = std::filesystem;
+    try {
+        fs::create_directories("config/import");
+        fs::create_directories("config/import/processed");
+        fs::create_directories("config/import/invalid");
+    } catch (...) {}
+}
+
+bool ImportWatcherWorker::isValidProxyUri(const std::string& uri) const {
+    if (uri.size() < 10) return false;
+
+    // Must have a supported scheme
+    static const std::vector<std::string> schemes = {
+        "vmess://", "vless://", "trojan://", "ss://", "ssr://",
+        "hysteria2://", "hy2://", "tuic://"
+    };
+    bool has_scheme = false;
+    for (const auto& s : schemes) {
+        if (uri.compare(0, s.size(), s) == 0) { has_scheme = true; break; }
+    }
+    if (!has_scheme) return false;
+
+    // vmess:// must be followed by valid base64 that decodes to JSON
+    if (uri.compare(0, 8, "vmess://") == 0) {
+        std::string payload = uri.substr(8);
+        auto hash = payload.find('#');
+        if (hash != std::string::npos) payload = payload.substr(0, hash);
+        if (payload.size() < 10) return false;
+        std::string decoded = utils::base64Decode(payload);
+        if (decoded.empty() || decoded.find('{') == std::string::npos) return false;
+        // Must have "add" field (server address)
+        if (decoded.find("\"add\"") == std::string::npos) return false;
+        return true;
+    }
+
+    // For other schemes: scheme://payload — payload must not be empty
+    auto sep = uri.find("://");
+    if (sep == std::string::npos) return false;
+    std::string payload = uri.substr(sep + 3);
+    // Remove fragment
+    auto hash = payload.find('#');
+    if (hash != std::string::npos) payload = payload.substr(0, hash);
+    if (payload.size() < 3) return false;
+
+    // vless/trojan: must contain @ (uuid@host:port)
+    if (uri.compare(0, 8, "vless://") == 0 || uri.compare(0, 9, "trojan://") == 0) {
+        if (payload.find('@') == std::string::npos) return false;
+    }
+
+    // ss:// can be base64 encoded or method:password@host:port
+    // Just check it's not obviously garbage
+    if (uri.compare(0, 5, "ss://") == 0) {
+        if (payload.find('@') == std::string::npos) {
+            // Might be base64 encoded — try decode
+            std::string decoded = utils::base64Decode(payload);
+            if (decoded.empty() || decoded.find(':') == std::string::npos) return false;
+        }
+    }
+
+    return true;
+}
+
+void ImportWatcherWorker::execute() {
+    namespace fs = std::filesystem;
+    ensureImportDirs();
+
+    const std::string import_dir = "config/import";
+
+    // Scan for .txt files in import directory
+    std::vector<std::string> files_to_process;
+    try {
+        for (const auto& entry : fs::directory_iterator(import_dir)) {
+            if (!entry.is_regular_file()) continue;
+            std::string ext = entry.path().extension().string();
+            // Accept .txt, .conf, .list, .sub, or no extension
+            if (ext == ".txt" || ext == ".conf" || ext == ".list" || ext == ".sub" || ext.empty()) {
+                files_to_process.push_back(entry.path().string());
+            }
+        }
+    } catch (const std::exception& e) {
+        return; // Directory doesn't exist or access error
+    }
+
+    if (files_to_process.empty()) return;
+
+    auto* db = orch_->configDb();
+    if (!db) return;
+
+    int batch_valid = 0, batch_invalid = 0, batch_duplicate = 0;
+    std::set<std::string> valid_configs;
+    std::vector<std::string> invalid_lines;
+
+    for (const auto& file_path : files_to_process) {
+        std::string filename = fs::path(file_path).filename().string();
+        std::cout << "[Import] Processing: " << filename << std::endl;
+
+        auto lines = utils::readLines(file_path);
+        if (lines.empty()) {
+            std::cout << "[Import] " << filename << " is empty, skipping" << std::endl;
+            // Move empty file to processed
+            try {
+                fs::rename(file_path, import_dir + "/processed/" + filename);
+            } catch (...) {
+                try { fs::remove(file_path); } catch (...) {}
+            }
+            continue;
+        }
+
+        // Also try base64 decode the entire file content (some subscription URLs return base64)
+        std::set<std::string> extracted;
+        for (const auto& line : lines) {
+            std::string trimmed = utils::trim(line);
+            if (trimmed.empty()) continue;
+
+            // If line looks like a URI, add directly
+            if (trimmed.find("://") != std::string::npos) {
+                extracted.insert(trimmed);
+            } else {
+                // Try base64 decode
+                auto decoded_uris = utils::tryDecodeAndExtract(trimmed);
+                extracted.insert(decoded_uris.begin(), decoded_uris.end());
+            }
+        }
+
+        // Also try the whole file as base64
+        if (extracted.empty() && lines.size() == 1) {
+            auto decoded_uris = utils::tryDecodeAndExtract(lines[0]);
+            extracted.insert(decoded_uris.begin(), decoded_uris.end());
+        }
+
+        for (const auto& uri : extracted) {
+            // Dedup check
+            if (seen_uris_.count(uri)) {
+                batch_duplicate++;
+                continue;
+            }
+
+            // Validate URI format
+            if (!isValidProxyUri(uri)) {
+                batch_invalid++;
+                invalid_lines.push_back(uri);
+                continue;
+            }
+
+            seen_uris_.insert(uri);
+            valid_configs.insert(uri);
+            batch_valid++;
+        }
+
+        // Move processed file
+        try {
+            std::string dest = import_dir + "/processed/" + filename;
+            // If dest exists, add timestamp
+            if (fs::exists(dest)) {
+                auto now = std::chrono::system_clock::now().time_since_epoch();
+                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+                dest = import_dir + "/processed/" + std::to_string(ms) + "_" + filename;
+            }
+            fs::rename(file_path, dest);
+        } catch (...) {
+            try { fs::remove(file_path); } catch (...) {}
+        }
+    }
+
+    // Save invalid lines for user reference
+    if (!invalid_lines.empty()) {
+        std::string invalid_file = import_dir + "/invalid/last_invalid.txt";
+        std::ofstream f(invalid_file, std::ios::app);
+        if (f.is_open()) {
+            auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+            f << "# --- Import scan at " << std::ctime(&now);
+            for (const auto& line : invalid_lines) {
+                f << line << "\n";
+            }
+        }
+    }
+
+    // Add valid configs to database
+    if (!valid_configs.empty()) {
+        int added = db->addConfigs(valid_configs, "import");
+        total_imported_ += batch_valid;
+        total_invalid_ += batch_invalid;
+        total_duplicate_ += batch_duplicate;
+
+        std::cout << "[Import] Processed " << files_to_process.size() << " files: "
+                  << batch_valid << " valid, " << batch_invalid << " invalid, "
+                  << batch_duplicate << " duplicate -> " << added << " new to DB"
+                  << " (total imported: " << total_imported_ << ")" << std::endl;
+    } else if (batch_invalid > 0 || batch_duplicate > 0) {
+        std::cout << "[Import] Processed " << files_to_process.size() << " files: "
+                  << "0 valid, " << batch_invalid << " invalid, "
+                  << batch_duplicate << " duplicate" << std::endl;
+    }
+
+    updateExtra("total_imported", std::to_string(total_imported_));
+    updateExtra("total_invalid", std::to_string(total_invalid_));
+    updateExtra("total_duplicate", std::to_string(total_duplicate_));
+    updateExtra("db_size", std::to_string(db->size()));
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// ThreadManager
+// ═══════════════════════════════════════════════════════════════════
+
+ThreadManager::ThreadManager(HunterOrchestrator* orch) : orch_(orch) {
+    scanner_ = std::make_unique<ConfigScannerWorker>(orch, stop_event_);
+    telegram_ = std::make_unique<TelegramPublisherWorker>(orch, stop_event_);
+    balancer_ = std::make_unique<BalancerWorker>(orch, stop_event_);
+    harvester_ = std::make_unique<HarvesterWorker>(orch, stop_event_);
+    github_downloader_ = std::make_unique<GitHubDownloaderWorker>(orch, stop_event_);
+    validator_ = std::make_unique<ValidatorWorker>(orch, stop_event_);
+    dpi_pressure_ = std::make_unique<DpiPressureWorker>(orch, stop_event_);
+    import_watcher_ = std::make_unique<ImportWatcherWorker>(orch, stop_event_);
+
+    all_workers_ = {
+        scanner_.get(), telegram_.get(), balancer_.get(),
+        harvester_.get(), github_downloader_.get(), validator_.get(),
+        dpi_pressure_.get(), import_watcher_.get()
+    };
+
+    health_ = std::make_unique<HealthMonitorWorker>(stop_event_, all_workers_);
+    all_workers_.insert(all_workers_.begin(), health_.get());
+}
+
+ThreadManager::~ThreadManager() {
+    stopAll();
+}
+
+void ThreadManager::startAll() {
+    auto hw = HunterTaskManager::instance().getHardware();
+    std::cout << "ThreadManager starting - " << hw.cpu_count << " CPUs, "
+              << hw.ram_total_gb << " GB RAM (" << hw.ram_percent << "% used)"
+              << std::endl;
+
+    for (auto* w : all_workers_) {
+        try { w->start(); } catch (const std::exception& e) {
+            std::cerr << "Failed to start " << w->name << ": " << e.what() << std::endl;
+        }
+    }
+    std::cout << "All " << all_workers_.size() << " workers started" << std::endl;
+}
+
+void ThreadManager::stopAll(float timeout) {
+    std::cout << "ThreadManager: stopping all workers..." << std::endl;
+    stop_event_ = true;
+    for (auto* w : all_workers_) {
+        try { w->join(timeout / (float)all_workers_.size()); } catch (...) {}
+    }
+    std::cout << "ThreadManager: all workers stopped" << std::endl;
+}
+
+ThreadManager::Status ThreadManager::getStatus() const {
+    Status s;
+    auto hw = HunterTaskManager::instance().getHardware();
+    s.hardware.cpu_count = hw.cpu_count;
+    s.hardware.cpu_percent = hw.cpu_percent;
+    s.hardware.ram_total_gb = hw.ram_total_gb;
+    s.hardware.ram_used_gb = hw.ram_used_gb;
+    s.hardware.ram_percent = hw.ram_percent;
+    static const char* mode_names[] = {
+        "NORMAL","MODERATE","SCALED","CONSERVATIVE","REDUCED","MINIMAL","ULTRA-MINIMAL"
+    };
+    s.hardware.mode = mode_names[std::min((int)hw.mode, 6)];
+    s.hardware.thread_count = 0; // Would need platform-specific thread count
+
+    for (auto* w : all_workers_) {
+        s.workers[w->name] = w->getStatus();
+    }
+    return s;
+}
+
+} // namespace orchestrator
+} // namespace hunter

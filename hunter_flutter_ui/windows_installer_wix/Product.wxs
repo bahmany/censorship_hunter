@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<?define ProductName="Hunter Dashboard"?>
+<?define Manufacturer="bahmany"?>
+<?define ProductVersion="1.0.0"?>
+<?define UpgradeCode="B4D87577-3DB4-4DD4-8DAF-10FA51A94D8C"?>
+
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product
+    Id="*"
+    Name="$(var.ProductName)"
+    Language="1033"
+    Version="$(var.ProductVersion)"
+    Manufacturer="$(var.Manufacturer)"
+    UpgradeCode="$(var.UpgradeCode)">
+
+    <Package InstallerVersion="500" Compressed="yes" InstallScope="perMachine" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Hunter Dashboard is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFiles64Folder">
+        <Directory Id="INSTALLDIR" Name="Hunter Dashboard">
+          <Directory Id="INSTALLFOLDER" Name="app" />
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <DirectoryRef Id="INSTALLFOLDER" />
+
+    <Feature Id="ProductFeature" Title="Hunter Dashboard" Level="1">
+      <ComponentGroupRef Id="ReleaseFiles" />
+    </Feature>
+
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <UIRef Id="WixUI_InstallDir" />
+    <UIRef Id="WixUI_ErrorProgressText" />
+
+    <Icon Id="app_icon.ico" SourceFile="..\windows\runner\resources\app_icon.ico" />
+    <Property Id="ARPPRODUCTICON" Value="app_icon.ico" />
+
+  </Product>
+</Wix>
