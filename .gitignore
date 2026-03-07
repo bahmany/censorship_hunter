@@ -1,92 +1,47 @@
 # =============================================================
-# Python
-# =============================================================
-
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*$py.class
-
-# C extensions
-*.so
-
-# Distribution / packaging
-*.egg-info/
-*.egg
-.eggs/
-dist/
-build/
-wheels/
-pip-wheel-metadata/
-share/python-wheels/
-MANIFEST
-
-# PyInstaller
-*.spec
-
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-env.bak/
-venv.bak/
-__pypackages__/
-
-# Testing & coverage
-.pytest_cache/
-.hypothesis/
-.tox/
-.nox/
-htmlcov/
-.coverage
-.coverage.*
-coverage.xml
-nosetests.xml
-*.cover
-
-# Type checkers
-.mypy_cache/
-.dmypy.json
-dmypy.json
-.pyre/
-
-# Jupyter
-.ipynb_checkpoints
-
-# =============================================================
 # OS & IDE
 # =============================================================
 
-# macOS
 .DS_Store
-
-# Windows
 Thumbs.db
-
-# Linux
 *~
-
-# Editors
 .vscode/
 .idea/
 *.swp
 *.swo
-.spyderproject
-.spyproject
-.ropeproject
+
+# =============================================================
+# C++ Build Artifacts
+# =============================================================
+
+hunter_cpp/build/
+*.o
+*.obj
+*.a
+*.lib
+*.exe
+!bin/*.exe
+
+# =============================================================
+# Flutter
+# =============================================================
+
+hunter_flutter_ui/.dart_tool/
+hunter_flutter_ui/.packages
+hunter_flutter_ui/build/
+hunter_flutter_ui/.flutter-plugins
+hunter_flutter_ui/.flutter-plugins-dependencies
+hunter_flutter_ui/pubspec.lock
+*.iml
 
 # =============================================================
 # Sensitive / Secrets
 # =============================================================
 
-# Environment files — keep only the example template
 .env
 *.env
 !.env.example
 hunter_secrets.env
-
-# Telegram session files
 *.session
 
 # =============================================================
@@ -95,8 +50,6 @@ hunter_secrets.env
 
 *.log
 logs/
-diagnostic_output.txt
-test_validation.log
 
 # =============================================================
 # Project Runtime & Cache
@@ -116,52 +69,9 @@ HUNTER_*.json
 HUNTER_*.txt
 
 # =============================================================
-# Android Native App — keep source, ignore build artifacts
+# Misc
 # =============================================================
 
-native/android/.gradle/
-native/android/.idea/
-native/android/android-sdk/
-native/android/build/
-native/android/cmdline-tools/
-native/android/cmdline-tools.zip
-native/android/commandlinetools-win.zip
-native/android/gradle/
-native/android/gradle-*/
-native/android/gradle-*.zip
-native/android/gradle-*.jar
-native/android/jdk-*/
-native/android/jdk*.zip
-native/android/local-repo/
-native/android/temp_apk/
-native/android/local.properties
-native/android/build_log.txt
-native/android/compile_errors.log
-native/android/dex_errors.log
-native/android/error.txt
-native/android/gradle_error.log
-native/android/temp_signed.*
-native/android/debug.keystore
-
-# APK and keystore files (anywhere in repo)
-*.apk
-*.apk.idsig
-*.keystore
-
-# =============================================================
-# Misc Project Directories
-# =============================================================
-
-# Internal / generated configs with sensitive data
 config/
-
-# Old / archived code
-old/
-
-# Internal development notes (may contain sensitive data)
-# Only ARCHITECTURE.md is public-safe
 docs/
 !docs/ARCHITECTURE.md
-
-# Test scripts (not for public)
-testing/

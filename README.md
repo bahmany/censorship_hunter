@@ -262,6 +262,163 @@ MIT License — see [LICENSE](LICENSE) file for details.
 
 ---
 
+## 🖥️ Hunter C++ (Native Engine)
+
+Hunter also includes a high-performance **C++ native engine** (`hunter_cpp/`) that runs as a standalone Windows/Linux binary. This is the recommended version for production use.
+
+### Architecture
+
+```
+hunter_cli.exe
+├── Orchestrator          Main coordinator — manages all phases
+│   ├── Phase -1          Kill port occupants
+│   ├── Phase 0           Load configs (raw files → cache → bundle → import)
+│   ├── Phase 1           Censorship detection + emergency bootstrap
+│   ├── Phase 2           Start DPI evasion engines
+│   ├── Phase 3           Startup banner
+│   ├── Phase 4           Start all worker threads
+│   └── Phase 5           Main loop + dashboard
+│
+├── Worker Threads (9 parallel)
+│   ├── config_scanner    Scrapes configs from Telegram + GitHub
+│   ├── github_bg         Background GitHub config downloader
+│   ├── harvester         Aggressive multi-source harvester
+│   ├── validator         Tests configs for speed and connectivity
+│   ├── balancer          Health-checks the load balancer
+│   ├── import_watcher    Watches config/import/ for manual imports
+│   ├── telegram_pub      Publishes working configs to Telegram
+│   ├── dpi_pressure      Anti-DPI pressure testing
+│   └── health_monitor    RAM/CPU monitoring
+│
+├── ConfigDatabase        In-memory config store with health tracking
+├── Load Balancer         SOCKS5 multi-backend (port 10808)
+├── Gemini Balancer       Secondary balancer (port 10809)
+└── Provisioned Ports     Individual proxies on 10801-10805
+```
+
+### Ports
+
+| Port | Purpose |
+|------|---------|
+| **10808** | Main SOCKS5 load balancer (multi-backend) |
+| **10809** | Gemini balancer (secondary) |
+| **10801-10805** | Individual proxy ports (top configs) |
+
+### Config Sources
+
+Hunter loads configs from multiple sources in priority order:
+
+1. **Raw files** — `config/All_Configs_Sub.txt`, `config/all_extracted_configs.txt`, `config/sub.txt`
+2. **Cache** — `runtime/HUNTER_all_cache.txt` (previous session's configs)
+3. **Bundle files** — `bundle/*.txt` (shipped config packs)
+4. **Manual import** — `config/import/*.txt` (user-added configs)
+5. **GitHub** — Automatic background fetching from GitHub repos
+6. **Telegram** — Scraping from configured Telegram channels
+7. **Harvester** — Aggressive multi-source harvesting
+
+### 📥 Manual Config Import
+
+You can manually import configs from any source:
+
+1. **Download** configs from GitHub, Telegram, or any website
+2. **Save** them as a `.txt` file (one URI per line)
+3. **Copy** the file into `config/import/`
+4. **Done!** Hunter scans this folder every 30 seconds
+
+**Supported formats:**
+- `.txt`, `.conf`, `.list`, `.sub` files
+- One proxy URI per line (`vmess://`, `vless://`, `trojan://`, `ss://`, etc.)
+- Base64-encoded subscription content (auto-decoded)
+
+**Automatic cleanup:**
+- ✅ Duplicates are removed automatically
+- ✅ Malformed/invalid URIs are rejected
+- ✅ vmess:// payloads are validated (must decode to JSON with `"add"` field)
+- ✅ vless:// and trojan:// must have `uuid@host:port` format
+- ✅ Processed files are moved to `config/import/processed/`
+- ✅ Invalid URIs are logged in `config/import/invalid/last_invalid.txt`
+
+**Supported protocols:** `vmess://`, `vless://`, `trojan://`, `ss://`, `ssr://`, `hysteria2://`, `hy2://`, `tuic://`
+
+### Directory Structure (C++)
+
+```
+hunter/
+├── bin/
+│   ├── hunter_cli.exe          CLI binary
+│   ├── hunter_ui.exe           Windows GUI binary
+│   └── xray.exe                XRay core engine
+├── config/
+│   ├── All_Configs_Sub.txt     Raw config files
+│   ├── all_extracted_configs.txt
+│   ├── sub.txt
+│   └── import/                 ★ Drop your .txt files here!
+│       ├── README.txt          Instructions
+│       ├── processed/          Processed files moved here
+│       └── invalid/            Invalid URI logs
+├── bundle/                     Bundled config packs
+├── runtime/
+│   ├── HUNTER_status.json      Live status (DB stats, validator progress)
+│   ├── HUNTER_all_cache.txt    All-configs cache
+│   ├── hunter_state.json       Persisted state
+│   └── HUNTER_balancer_cache.json
+└── hunter_cpp/                 C++ source code
+    ├── CMakeLists.txt
+    ├── include/                Headers
+    └── src/                    Source files
+```
+
+### Environment Variables (C++)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HUNTER_CONTINUOUS` | `true` | Continuous scanning mode |
+| `HUNTER_SCANNER_INTERVAL_S` | auto | Config scanner interval |
+| `HUNTER_VALIDATOR_INTERVAL_S` | auto | Validator interval |
+| `HUNTER_GITHUB_BG_ENABLED` | `true` | Enable GitHub background fetch |
+| `HUNTER_GITHUB_BG_INTERVAL_S` | auto | GitHub fetch interval |
+| `HUNTER_GITHUB_BG_CAP` | `5000` | Max configs per GitHub fetch |
+| `HUNTER_HARVESTER_INTERVAL_S` | auto | Harvester interval |
+
+### Building from Source
+
+```bash
+# Requires MSYS2 UCRT64 on Windows
+pacman -S mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
+          mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-curl \
+          mingw-w64-ucrt-x86_64-zlib
+
+cd hunter_cpp
+mkdir build && cd build
+cmake .. -G Ninja
+cmake --build . --target hunter_cli
+```
+
+### Status Monitoring
+
+Hunter writes live status to `runtime/HUNTER_status.json`:
+
+```json
+{
+  "db": {
+    "total": 355,
+    "alive": 12,
+    "tested_unique": 200,
+    "untested_unique": 155,
+    "avg_latency_ms": 450.5
+  },
+  "validator": {
+    "last_tested": 20,
+    "last_passed": 3,
+    "rate_per_s": 0.8
+  }
+}
+```
+
+The dashboard prints every 15 seconds in the console showing uptime, DB size, alive configs, RAM usage, worker status, and DPI strategy.
+
+---
+
 <a name="persian-farsi"></a>
 <div dir="rtl" align="right">
 
@@ -389,6 +546,24 @@ python scripts/enhanced_hunter.py
 | **نیازمندی** | اندروید 8.0+ (API 26+) |
 
 برای دستورالعمل ساخت، [`native/android/README.md`](native/android/README.md) را ببینید.
+
+### 📥 وارد کردن دستی کانفیگ
+
+می‌توانید کانفیگ‌هایی که از گیت‌هاب، تلگرام یا هر منبع دیگری دانلود کرده‌اید را به صورت دستی وارد کنید:
+
+1. کانفیگ‌ها را در یک فایل `.txt` ذخیره کنید (هر خط یک URI)
+2. فایل را در پوشه `config/import/` کپی کنید
+3. **تمام!** Hunter هر ۳۰ ثانیه این پوشه را اسکن می‌کند
+
+**پاکسازی خودکار:**
+- ✅ کانفیگ‌های تکراری حذف می‌شوند
+- ✅ کانفیگ‌های خراب و نامعتبر رد می‌شوند
+- ✅ فایل‌های پردازش‌شده به `config/import/processed/` منتقل می‌شوند
+- ✅ URIهای نامعتبر در `config/import/invalid/last_invalid.txt` ذخیره می‌شوند
+
+**فرمت‌های پشتیبانی‌شده:** `.txt`، `.conf`، `.list`، `.sub`
+
+**پروتکل‌های پشتیبانی‌شده:** `vmess://`، `vless://`، `trojan://`، `ss://`، `ssr://`، `hysteria2://`، `hy2://`، `tuic://`
 
 ### 🐛 عیب‌یابی
 
