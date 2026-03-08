@@ -69,6 +69,7 @@ private:
     HttpServer::Response handleApiCommand(const HttpServer::Request& req);
     HttpServer::Response handleApiLogStream(const HttpServer::Request& req);
     HttpServer::Response handleApiTelegramStatus(const HttpServer::Request& req);
+    HttpServer::Response handleApiAliveConfigs(const HttpServer::Request& req);
 
     // Generate the full HTML dashboard
     static std::string generateDashboardHtml();

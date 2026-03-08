@@ -216,8 +216,8 @@ void HunterOrchestrator::start() {
         }
     }
 
-    // ═══ PHASE 5: Main loop with periodic dashboard ═══
-    int dashboard_tick = 0;
+    // ═══ PHASE 5: Main loop with real-time dashboard ═══
+    int status_tick = 0;
     while (!stop_requested_.load() && thread_manager_ && thread_manager_->isRunning()) {
         if (utils::fileExists(stop_flag)) {
             try { std::filesystem::remove(stop_flag); } catch (...) {}
@@ -226,13 +226,14 @@ void HunterOrchestrator::start() {
             break;
         }
 
-        if (++dashboard_tick >= 15) {
-            dashboard_tick = 0;
-            printDashboard();
+        printDashboard();
+        
+        if (++status_tick >= 8) {
+            status_tick = 0;
             writeStatusFile("running");
         }
 
-        std::this_thread::sleep_for(std::chrono::seconds(1));
+        std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
     if (thread_manager_) {
@@ -257,25 +258,28 @@ void HunterOrchestrator::stop() {
 bool HunterOrchestrator::runCycle() {
     std::unique_lock<std::mutex> lock(cycle_lock_, std::try_to_lock);
     if (!lock.owns_lock()) {
-        std::cout << "[CycleLock] Another cycle is already running, skipping" << std::endl;
+        utils::LogRingBuffer::instance().push("[CycleLock] Another cycle is already running, skipping");
         return false;
     }
 
     cycle_count_++;
     double cycle_start = utils::nowTimestamp();
-    std::cout << "Starting hunter cycle #" << cycle_count_.load() << std::endl;
+    { std::ostringstream _ls; _ls << "Starting hunter cycle #" << cycle_count_.load();
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // Memory status
     auto hw = HunterTaskManager::instance().getHardware();
-    std::cout << "Memory status: " << hw.ram_percent << "% used ("
-              << hw.ram_used_gb << "GB / " << hw.ram_total_gb << "GB)" << std::endl;
+    { std::ostringstream _ls; _ls << "Memory status: " << hw.ram_percent << "% used ("
+              << hw.ram_used_gb << "GB / " << hw.ram_total_gb << "GB)";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // Scrape configs
     auto scraped = scrapeConfigs();
     auto& tg_raw = scraped.telegram;
     auto& http_raw = scraped.http;
-    std::cout << "Total raw configs: " << tg_raw.size() << " Telegram + "
-              << http_raw.size() << " HTTP/GitHub" << std::endl;
+    { std::ostringstream _ls; _ls << "Total raw configs: " << tg_raw.size() << " Telegram + "
+              << http_raw.size() << " HTTP/GitHub";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // Store in ConfigDB
     if (config_db_) {
@@ -289,8 +293,9 @@ bool HunterOrchestrator::runCycle() {
             std::set<std::string> http_set(http_raw.begin(), http_raw.end());
             added_http = config_db_->addConfigs(http_set, "http");
         }
-        std::cout << "[ConfigDB] Stored new configs: +" << added_tg << " telegram, +" << added_http
-                  << " http (DB total: " << config_db_->size() << ")" << std::endl;
+        { std::ostringstream _ls; _ls << "[ConfigDB] Stored +" << added_tg << " tg, +" << added_http
+                  << " http (DB: " << config_db_->size() << ")";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
     }
 
     // Supplement with healthy DB configs
@@ -322,7 +327,8 @@ bool HunterOrchestrator::runCycle() {
             }
             if (!batch_uris.empty()) {
                 http_raw.insert(http_raw.begin(), batch_uris.begin(), batch_uris.end());
-                std::cout << "[ConfigDB] Queued full validation for " << batch_uris.size() << " configs" << std::endl;
+                { std::ostringstream _ls; _ls << "[ConfigDB] Queued validation for " << batch_uris.size() << " configs";
+                  utils::LogRingBuffer::instance().push(_ls.str()); }
             }
         }
     }
@@ -330,28 +336,34 @@ bool HunterOrchestrator::runCycle() {
     // Benchmark line 1: Telegram configs
     std::vector<BenchResult> validated;
     if (!tg_raw.empty()) {
-        std::cout << "━━━ Benchmark Line 1: Telegram (" << tg_raw.size() << " configs) ━━━" << std::endl;
+        { std::ostringstream _ls; _ls << "[Bench] Telegram: " << tg_raw.size() << " configs";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
         auto tg_validated = validateConfigs(tg_raw, "Telegram", 0);
-        std::cout << "[Bench-Telegram] Result: " << tg_validated.size() << " working configs" << std::endl;
+        { std::ostringstream _ls; _ls << "[Bench-Telegram] Result: " << tg_validated.size() << " working";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
         validated.insert(validated.end(), tg_validated.begin(), tg_validated.end());
     }
 
     // Benchmark line 2: HTTP/GitHub configs
     if (!http_raw.empty()) {
-        std::cout << "━━━ Benchmark Line 2: GitHub/HTTP (" << http_raw.size() << " configs) ━━━" << std::endl;
+        { std::ostringstream _ls; _ls << "[Bench] GitHub/HTTP: " << http_raw.size() << " configs";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
         auto http_validated = validateConfigs(http_raw, "GitHub", 5000);
-        std::cout << "[Bench-GitHub] Result: " << http_validated.size() << " working configs" << std::endl;
+        { std::ostringstream _ls; _ls << "[Bench-GitHub] Result: " << http_validated.size() << " working";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
         validated.insert(validated.end(), http_validated.begin(), http_validated.end());
     }
 
     // Sort by latency
     std::sort(validated.begin(), validated.end(),
               [](const BenchResult& a, const BenchResult& b) { return a.latency_ms < b.latency_ms; });
-    std::cout << "Validated configs (combined): " << validated.size() << std::endl;
+    { std::ostringstream _ls; _ls << "Validated configs (combined): " << validated.size();
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // Tier configs
     auto tiered = tierConfigs(validated);
-    std::cout << "Gold tier: " << tiered.gold.size() << ", Silver tier: " << tiered.silver.size() << std::endl;
+    { std::ostringstream _ls; _ls << "Gold: " << tiered.gold.size() << ", Silver: " << tiered.silver.size();
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // Update balancer
     std::vector<std::pair<std::string, float>> all_configs;
@@ -395,7 +407,8 @@ bool HunterOrchestrator::runCycle() {
     }
 
     double cycle_time = utils::nowTimestamp() - cycle_start;
-    std::cout << "Cycle completed in " << cycle_time << " seconds" << std::endl;
+    { std::ostringstream _ls; _ls << "Cycle #" << cycle_count_.load() << " completed in " << (int)cycle_time << "s";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     return true;
 }
@@ -484,10 +497,10 @@ HunterOrchestrator::ScrapeResult HunterOrchestrator::scrapeConfigs() {
 
         for (auto& u : tg_set) result.telegram.push_back(u);
 
-        std::cout << "[TelegramScrape] targets=" << tg_targets_raw.size()
+        { std::ostringstream _ls; _ls << "[TelegramScrape] targets=" << tg_targets_raw.size()
                   << ", configs=" << result.telegram.size()
-                  << ", proxy=" << last_used_proxy
-                  << std::endl;
+                  << ", proxy=" << last_used_proxy;
+          utils::LogRingBuffer::instance().push(_ls.str()); }
     }
 
     // HTTP/GitHub fetch
@@ -495,7 +508,7 @@ HunterOrchestrator::ScrapeResult HunterOrchestrator::scrapeConfigs() {
         auto& mgr = HunterTaskManager::instance();
         std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
         if (!lock.try_lock_for(std::chrono::seconds(10))) {
-            std::cout << "[Scrape] Fetch lock busy, proceeding without lock" << std::endl;
+            utils::LogRingBuffer::instance().push("[Scrape] Fetch lock busy, proceeding without lock");
         }
 
         int http_cap = per_source_cap;
@@ -525,8 +538,9 @@ HunterOrchestrator::ScrapeResult HunterOrchestrator::scrapeConfigs() {
         }
     }
 
-    std::cout << "[Fetch] Total: " << result.telegram.size() << " Telegram + "
-              << result.http.size() << " HTTP/GitHub" << std::endl;
+    { std::ostringstream _ls; _ls << "[Fetch] Total: " << result.telegram.size() << " Telegram + "
+              << result.http.size() << " HTTP/GitHub";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
     return result;
 }
 
@@ -552,7 +566,8 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
         deduped = network::prioritizeConfigs(deduped);
     }
 
-    std::cout << "[Bench-" << label << "] Testing " << deduped.size() << " configs via ProxyTester" << std::endl;
+    { std::ostringstream _ls; _ls << "[Bench-" << label << "] Testing " << deduped.size() << " configs";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // Process in small chunks to avoid saturating the thread pool.
     // Each chunk submits up to CHUNK_SIZE tasks, waits for completion,
@@ -575,10 +590,11 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
 
                 BenchResult br;
                 br.uri = uri;
-                br.success = result.success;
-                br.latency_ms = result.success ? (result.download_speed_kbps > 0 ? 1000.0f / result.download_speed_kbps : 5000.0f) : 0;
-                br.tier = result.success ? (br.latency_ms <= 3000 ? "gold" : "silver") : "dead";
+                br.success = result.success && !result.telegram_only;
+                br.latency_ms = br.success ? (result.download_speed_kbps > 0 ? 1000.0f / result.download_speed_kbps : 5000.0f) : 0;
+                br.tier = br.success ? (br.latency_ms <= 3000 ? "gold" : "silver") : "dead";
                 br.error = result.error_message;
+                if (result.telegram_only) br.error = "Telegram-only (no HTTP download)";
                 return br;
             }));
         }
@@ -595,7 +611,8 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
         }
 
         if (offset + CHUNK_SIZE < deduped.size()) {
-            std::cout << "[Bench-" << label << "] Progress: " << results.size() << "/" << deduped.size() << std::endl;
+            { std::ostringstream _ls; _ls << "[Bench-" << label << "] Progress: " << results.size() << "/" << deduped.size();
+              utils::LogRingBuffer::instance().push(_ls.str()); }
         }
     }
 
@@ -636,14 +653,16 @@ void HunterOrchestrator::saveToFiles(const std::vector<BenchResult>& gold,
         std::vector<std::string> uris;
         for (auto& r : gold) uris.push_back(r.uri);
         int added = appendUniqueLines(gold_file, uris);
-        if (added > 0) std::cout << "Gold file: " << added << " new configs appended" << std::endl;
+        if (added > 0) { std::ostringstream _ls; _ls << "Gold file: +" << added << " configs";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
     }
 
     if (!silver_file.empty() && !silver.empty()) {
         std::vector<std::string> uris;
         for (auto& r : silver) uris.push_back(r.uri);
         int added = appendUniqueLines(silver_file, uris);
-        if (added > 0) std::cout << "Silver file: " << added << " new configs appended" << std::endl;
+        if (added > 0) { std::ostringstream _ls; _ls << "Silver file: +" << added << " configs";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
     }
 }
 
@@ -872,7 +891,58 @@ void HunterOrchestrator::printStartupBanner() {
     << std::endl;
 }
 
+// ANSI color/style helpers
+namespace ansi {
+    const char* RESET   = "\033[0m";
+    const char* BOLD    = "\033[1m";
+    const char* DIM     = "\033[2m";
+    const char* RED     = "\033[31m";
+    const char* GREEN   = "\033[32m";
+    const char* YELLOW  = "\033[33m";
+    const char* BLUE    = "\033[34m";
+    const char* MAGENTA = "\033[35m";
+    const char* CYAN    = "\033[36m";
+    const char* WHITE   = "\033[37m";
+    const char* BG_RED  = "\033[41m";
+    const char* BG_GREEN= "\033[42m";
+    const char* CLEAR_SCREEN = "\033[2J\033[H";
+
+    std::string bar(int filled, int total, int width = 20) {
+        if (total <= 0) return std::string(width, '-');
+        int f = (filled * width) / total;
+        if (f > width) f = width;
+        std::string b;
+        for (int i = 0; i < width; i++) {
+            if (i < f) b += "\033[32m\xe2\x96\x88\033[0m";  // green block
+            else b += "\033[90m\xe2\x96\x91\033[0m";          // dark shade
+        }
+        return b;
+    }
+
+    std::string ramBar(float pct, int width = 20) {
+        int f = (int)(pct * width / 100.0f);
+        if (f > width) f = width;
+        std::string b;
+        for (int i = 0; i < width; i++) {
+            if (i < f) {
+                if (pct > 85) b += "\033[31m\xe2\x96\x88\033[0m";       // red
+                else if (pct > 65) b += "\033[33m\xe2\x96\x88\033[0m";  // yellow
+                else b += "\033[36m\xe2\x96\x88\033[0m";                 // cyan
+            } else {
+                b += "\033[90m\xe2\x96\x91\033[0m";
+            }
+        }
+        return b;
+    }
+}
+
+static int s_dashboard_frame = 0;
+
 void HunterOrchestrator::printDashboard() {
+    s_dashboard_frame++;
+    const char* spinner[] = {"\xe2\x97\x89", "\xe2\x97\x8b", "\xe2\x97\x89", "\xe2\x97\x8b"};  // ◉ ◯
+    const char* spin = spinner[s_dashboard_frame % 4];
+
     double uptime = utils::nowTimestamp() - start_time_;
     int up_h = (int)(uptime / 3600);
     int up_m = ((int)uptime % 3600) / 60;
@@ -881,7 +951,17 @@ void HunterOrchestrator::printDashboard() {
     auto hw = HunterTaskManager::instance().getHardware();
     int validated = last_validated_count_.load();
     int cycles = cycle_count_.load();
-    int db_size = config_db_ ? config_db_->size() : 0;
+
+    // DB stats
+    int db_total = 0, db_alive = 0, db_untested = 0;
+    float db_avg_lat = 0.0f;
+    if (config_db_) {
+        auto st = config_db_->getStats();
+        db_total = st.total;
+        db_alive = st.alive;
+        db_untested = st.untested_unique;
+        db_avg_lat = st.avg_latency_ms;
+    }
 
     // Balancer status
     int bal_backends = 0, bal_healthy = 0;
@@ -902,55 +982,173 @@ void HunterOrchestrator::printDashboard() {
     }
 
     // DPI status
-    std::string dpi_str = "off";
+    std::string dpi_str = "OFF";
+    std::string dpi_color = ansi::DIM;
     if (dpi_evasion_) {
         auto m = dpi_evasion_->getMetrics();
         dpi_str = m.strategy;
-        if (!m.cdn_reachable && !m.google_reachable) dpi_str += " [blocked]";
+        if (!m.cdn_reachable && !m.google_reachable) {
+            dpi_str += " BLOCKED";
+            dpi_color = ansi::RED;
+        } else {
+            dpi_color = ansi::GREEN;
+        }
     }
 
-    // Worker status summary
-    std::string workers_summary;
+    // Workers
+    int w_running = 0, w_sleeping = 0, w_err = 0, w_total = 0;
+    std::vector<std::pair<std::string, WorkerStatus>> worker_list;
     if (thread_manager_) {
         auto st = thread_manager_->getStatus();
-        int running = 0, sleeping = 0, err = 0;
-        for (auto& [_, ws] : st.workers) {
-            if (ws.state == WorkerState::RUNNING) running++;
-            else if (ws.state == WorkerState::SLEEPING) sleeping++;
-            else if (ws.state == WorkerState::WORKER_ERROR) err++;
+        for (auto& [name, ws] : st.workers) {
+            w_total++;
+            if (ws.state == WorkerState::RUNNING) w_running++;
+            else if (ws.state == WorkerState::SLEEPING) w_sleeping++;
+            else if (ws.state == WorkerState::WORKER_ERROR) w_err++;
+            worker_list.push_back({name, ws});
         }
-        workers_summary = std::to_string(running) + " run, "
-            + std::to_string(sleeping) + " sleep";
-        if (err > 0) workers_summary += ", " + std::to_string(err) + " ERR";
+    }
+
+    // Provisioned ports
+    int prov_alive = 0, prov_total = 0;
+    {
+        std::lock_guard<std::mutex> plock(provision_mutex_);
+        prov_total = (int)provisioned_ports_.size();
+        for (auto& s : provisioned_ports_) if (s.alive) prov_alive++;
     }
 
     char time_buf[32];
     std::snprintf(time_buf, sizeof(time_buf), "%02d:%02d:%02d", up_h, up_m, up_s);
 
-    std::cout << "\n"
-    "--- HUNTER Status [" << time_buf << "] ---\n"
-    "  Cycles: " << cycles
-        << "  Validated: " << validated
-        << "  DB: " << db_size
-        << "  RAM: " << (int)hw.ram_percent << "%\n"
-    "  Main:" << config_.multiproxyPort() << (bal_running?" UP ":" DOWN ")
-        << bal_healthy << "/" << bal_backends << " backends"
-    "  Gemini:" << config_.geminiPort() << (gem_running?" UP ":" DOWN ")
-        << gem_healthy << "/" << gem_backends << " backends\n"
-    "  Proxies: ";
-    {
-        std::lock_guard<std::mutex> plock(provision_mutex_);
-        int prov_alive = 0;
-        for (auto& s : provisioned_ports_) if (s.alive) prov_alive++;
-        std::cout << prov_alive << "/" << (int)provisioned_ports_.size()
-                  << " on " << PROVISION_PORT_BASE << "-"
-                  << (PROVISION_PORT_BASE + PROVISION_PORT_COUNT - 1);
+    // ═══ Clear screen and draw ═══
+    std::ostringstream out;
+    out << ansi::CLEAR_SCREEN;
+
+    // Header
+    out << ansi::BOLD << ansi::CYAN
+        << "  \xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88"  // ███████
+        << "  H U N T E R  " << spin << "  "
+        << ansi::WHITE << time_buf
+        << ansi::DIM << "  uptime" << ansi::RESET << "\n";
+
+    out << ansi::CYAN
+        << "  \xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"  // ┅┅┅┅┅┅┅
+        << "\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"
+        << "\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"
+        << "\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"
+        << "\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"
+        << "\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"
+        << "\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81\xe2\x94\x81"
+        << ansi::RESET << "\n\n";
+
+    // ── Config Database ──
+    out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " CONFIG DATABASE" << ansi::RESET << "\n";
+    out << "    Total: " << ansi::BOLD << ansi::WHITE << db_total << ansi::RESET
+        << "   " << ansi::GREEN << "\xe2\x97\x8f " << db_alive << " alive" << ansi::RESET
+        << "   " << ansi::DIM << db_untested << " untested" << ansi::RESET
+        << "   " << ansi::DIM << "avg " << (int)db_avg_lat << "ms" << ansi::RESET << "\n";
+    out << "    " << ansi::bar(db_alive, db_total > 0 ? db_total : 1, 40) 
+        << " " << ansi::DIM << (db_total > 0 ? (db_alive * 100 / db_total) : 0) << "% alive" << ansi::RESET << "\n\n";
+
+    // ── Balancers ──
+    out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " LOAD BALANCERS" << ansi::RESET << "\n";
+
+    // Main balancer
+    out << "    " << (bal_running ? ansi::GREEN : ansi::RED) << (bal_running ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
+        << " Main  :" << config_.multiproxyPort() << "  "
+        << ansi::bar(bal_healthy, bal_backends > 0 ? bal_backends : 1, 15)
+        << " " << ansi::BOLD << bal_healthy << "/" << bal_backends << ansi::RESET
+        << (bal_running ? "" : (std::string(ansi::RED) + " DOWN" + ansi::RESET)) << "\n";
+
+    // Gemini balancer
+    out << "    " << (gem_running ? ansi::GREEN : ansi::RED) << (gem_running ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
+        << " Gemini:" << config_.geminiPort() << "  "
+        << ansi::bar(gem_healthy, gem_backends > 0 ? gem_backends : 1, 15)
+        << " " << ansi::BOLD << gem_healthy << "/" << gem_backends << ansi::RESET
+        << (gem_running ? "" : (std::string(ansi::RED) + " DOWN" + ansi::RESET)) << "\n";
+
+    // Provisioned proxies
+    out << "    " << (prov_alive > 0 ? ansi::GREEN : ansi::DIM) << "\xe2\x97\x89" << ansi::RESET
+        << " Proxies:" << PROVISION_PORT_BASE << "-" << (PROVISION_PORT_BASE + PROVISION_PORT_COUNT - 1)
+        << "  " << ansi::bar(prov_alive, prov_total > 0 ? prov_total : 1, 15)
+        << " " << ansi::BOLD << prov_alive << "/" << prov_total << ansi::RESET << "\n\n";
+
+    // ── Workers ──
+    out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " WORKERS "
+        << ansi::DIM << "(" << w_running << " run " << w_sleeping << " sleep";
+    if (w_err > 0) out << " " << ansi::RED << w_err << " err" << ansi::DIM;
+    out << ")" << ansi::RESET << "\n";
+
+    for (auto& [name, ws] : worker_list) {
+        const char* state_icon;
+        const char* state_color;
+        switch (ws.state) {
+            case WorkerState::RUNNING:
+                state_icon = "\xe2\x9a\xa1"; // ⚡
+                state_color = ansi::GREEN;
+                break;
+            case WorkerState::SLEEPING:
+                state_icon = "\xe2\x8f\xb8";  // ⏸
+                state_color = ansi::DIM;
+                break;
+            case WorkerState::WORKER_ERROR:
+                state_icon = "\xe2\x9c\x96"; // ✖
+                state_color = ansi::RED;
+                break;
+            default:
+                state_icon = "\xe2\x97\x8b"; // ◯
+                state_color = ansi::DIM;
+                break;
+        }
+        // Truncate name
+        std::string short_name = name.size() > 18 ? name.substr(0, 18) : name;
+        while (short_name.size() < 18) short_name += ' ';
+
+        out << "    " << state_color << state_icon << " " << short_name << ansi::RESET;
+        out << " runs:" << ansi::BOLD << ws.runs << ansi::RESET;
+        if (ws.errors > 0) out << " " << ansi::RED << "err:" << ws.errors << ansi::RESET;
+        if (ws.state == WorkerState::SLEEPING && ws.next_run_in > 0) {
+            out << " " << ansi::DIM << "next:" << (int)ws.next_run_in << "s" << ansi::RESET;
+        }
+        out << "\n";
     }
-    std::cout << "\n"
-    "  Workers: " << workers_summary
-        << "  DPI: " << dpi_str << "\n"
-    "-------------------------------\n"
-    << std::flush;
+    out << "\n";
+
+    // ── System ──
+    out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " SYSTEM" << ansi::RESET << "\n";
+    out << "    RAM: " << ansi::ramBar(hw.ram_percent, 25) 
+        << " " << ansi::BOLD << (int)hw.ram_percent << "%" << ansi::RESET
+        << ansi::DIM << " (" << std::fixed << std::setprecision(1) << hw.ram_used_gb << "/" << hw.ram_total_gb << " GB)" << ansi::RESET << "\n";
+    out << "    DPI: " << dpi_color << dpi_str << ansi::RESET
+        << "    Cycles: " << ansi::BOLD << cycles << ansi::RESET
+        << "    Validated: " << ansi::BOLD << ansi::GREEN << validated << ansi::RESET << "\n\n";
+
+    // ── Live Activity ──
+    auto recent_logs = utils::LogRingBuffer::instance().recent(12);
+    if (!recent_logs.empty()) {
+        out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " LIVE ACTIVITY" << ansi::RESET << "\n";
+        for (auto& line : recent_logs) {
+            // Color code based on content
+            if (line.find("] OK ") != std::string::npos || line.find("TG-OK") != std::string::npos) {
+                out << ansi::GREEN;
+            } else if (line.find("FAIL") != std::string::npos || line.find("DEAD") != std::string::npos) {
+                out << ansi::RED;
+            } else if (line.find("SKIP") != std::string::npos || line.find("error=") != std::string::npos) {
+                out << ansi::DIM;
+            } else {
+                out << ansi::DIM;
+            }
+            // Truncate long lines
+            std::string display = line.size() > 90 ? line.substr(0, 87) + "..." : line;
+            out << "   " << display << ansi::RESET << "\n";
+        }
+        out << "\n";
+    }
+
+    // Footer
+    out << ansi::DIM << "  [Ctrl+C to stop | runtime/stop.flag for graceful shutdown]" << ansi::RESET << "\n";
+
+    std::cout << out.str() << std::flush;
 }
 
 void HunterOrchestrator::killPortOccupants() {
@@ -1213,7 +1411,7 @@ bool HunterOrchestrator::testCachedConfigs() {
     // This is now a no-op — validation is handled by ValidatorWorker
     // which runs in parallel with proper batching and status updates.
     // Keeping the method for API compatibility.
-    std::cout << "[CachedTest] Delegated to ValidatorWorker (parallel testing)" << std::endl;
+    utils::LogRingBuffer::instance().push("[CachedTest] Delegated to ValidatorWorker");
     return false;
 }
 

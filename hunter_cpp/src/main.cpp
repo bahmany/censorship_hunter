@@ -69,6 +69,19 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // Enable ANSI colors on Windows console
+#ifdef _WIN32
+    {
+        HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+        if (hOut != INVALID_HANDLE_VALUE) {
+            DWORD mode = 0;
+            GetConsoleMode(hOut, &mode);
+            SetConsoleMode(hOut, mode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
+        }
+        SetConsoleOutputCP(CP_UTF8);
+    }
+#endif
+
     // Setup signal handlers
 #ifdef _WIN32
     SetConsoleCtrlHandler(consoleHandler, 1);
@@ -86,7 +99,8 @@ int main(int argc, char* argv[]) {
         config.loadFromFile(config_path);
         std::cout << "Config loaded from " << config_path << std::endl;
     } else {
-        std::cout << "No config file found, using defaults" << std::endl;
+        std::cout << "No config file at " << config_path << ", creating with defaults" << std::endl;
+        config.saveToFile(config_path);
     }
 
     // Override from CLI

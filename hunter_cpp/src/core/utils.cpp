@@ -553,12 +553,14 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     
     // CURLE_WRITE_ERROR is expected when we abort after enough data
     if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
-        std::cerr << "    [curl:" << proxy_port << "] error=" << (int)res 
-                  << " (" << curl_easy_strerror(res) << ") bytes=" << prog.total_bytes << std::endl;
+        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] error=" << (int)res 
+                  << " (" << curl_easy_strerror(res) << ") bytes=" << prog.total_bytes;
+          LogRingBuffer::instance().push(_ls.str()); }
         return -1.0f;
     }
     if (http_code >= 400) {
-        std::cerr << "    [curl:" << proxy_port << "] HTTP " << http_code << std::endl;
+        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] HTTP " << http_code;
+          LogRingBuffer::instance().push(_ls.str()); }
         return -1.0f;
     }
     // HTTP 204 No Content = connectivity check passed (generate_204 endpoints)
@@ -567,7 +569,8 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
         return (elapsed > 0.001) ? (float)(1.0 / elapsed) : 1.0f; // Return latency-based score
     }
     if (prog.total_bytes < 100) {
-        std::cerr << "    [curl:" << proxy_port << "] too few bytes: " << prog.total_bytes << std::endl;
+        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] too few bytes: " << prog.total_bytes;
+          LogRingBuffer::instance().push(_ls.str()); }
         return -1.0f;
     }
     

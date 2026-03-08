@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <functional>
 #include <regex>
+#include <mutex>
 
 // ─── Platform network headers (must be before namespace) ───
 #ifdef _WIN32
@@ -246,6 +247,40 @@ public:
 
 private:
     std::vector<std::string> pairs_;
+};
+
+/**
+ * @brief Thread-safe ring buffer for recent log lines (dashboard display)
+ */
+class LogRingBuffer {
+public:
+    static LogRingBuffer& instance() {
+        static LogRingBuffer inst;
+        return inst;
+    }
+
+    void push(const std::string& line) {
+        std::lock_guard<std::mutex> lock(mu_);
+        buf_[write_pos_ % CAPACITY] = line;
+        write_pos_++;
+    }
+
+    std::vector<std::string> recent(int n) const {
+        std::lock_guard<std::mutex> lock(mu_);
+        std::vector<std::string> result;
+        int count = (int)std::min((size_t)n, write_pos_);
+        for (int i = count; i > 0; i--) {
+            result.push_back(buf_[(write_pos_ - i) % CAPACITY]);
+        }
+        return result;
+    }
+
+private:
+    LogRingBuffer() : write_pos_(0) {}
+    static constexpr size_t CAPACITY = 200;
+    std::string buf_[CAPACITY];
+    size_t write_pos_;
+    mutable std::mutex mu_;
 };
 
 } // namespace utils

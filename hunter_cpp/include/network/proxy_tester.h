@@ -11,6 +11,7 @@ namespace network {
  */
 struct ProxyTestResult {
     bool success = false;
+    bool telegram_only = false;        // True if proxy works for Telegram but HTTP download failed
     float download_speed_kbps = 0.0f;  // Download speed in KB/s
     std::string error_message;
     std::string engine_used;  // "xray", "sing-box", "mihomo", etc.

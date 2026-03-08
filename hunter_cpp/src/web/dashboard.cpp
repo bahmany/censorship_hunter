@@ -42,6 +42,7 @@ void Dashboard::registerRoutes() {
     server_->post("/api/command", [this](const HttpServer::Request& req) { return handleApiCommand(req); });
     server_->get("/api/logs/stream", [this](const HttpServer::Request& req) { return handleApiLogStream(req); });
     server_->get("/api/telegram/report-status", [this](const HttpServer::Request& req) { return handleApiTelegramStatus(req); });
+    server_->get("/api/alive-configs", [this](const HttpServer::Request& req) { return handleApiAliveConfigs(req); });
 }
 
 HttpServer::Response Dashboard::handleIndex(const HttpServer::Request&) {
@@ -190,6 +191,33 @@ HttpServer::Response Dashboard::handleApiTelegramStatus(const HttpServer::Reques
     jb.add("publish_count", rs.publish_count);
     jb.add("last_publish", rs.last_publish);
     jb.add("user_configured", false);
+    return HttpServer::Response::json(jb.build());
+}
+
+HttpServer::Response Dashboard::handleApiAliveConfigs(const HttpServer::Request&) {
+    if (!orch_) return HttpServer::Response::error("Orchestrator not available", 503);
+    
+    // Get alive configs from orchestrator - need to access config database
+    auto* config_db = orch_->configDB();
+    if (!config_db) return HttpServer::Response::error("Config DB not available", 503);
+    
+    auto alive_configs = config_db->getAliveConfigs(50); // Get up to 50 alive configs
+    
+    utils::JsonBuilder jb;
+    jb.add("ok", true);
+    jb.add("count", (int)alive_configs.size());
+    
+    // Start configs array
+    jb.beginArray("configs");
+    for (const auto& config : alive_configs) {
+        jb.beginObject();
+        jb.add("uri", config.uri);
+        jb.add("latency_ms", config.latency_ms);
+        jb.add("last_seen", config.last_seen);
+        jb.endObject();
+    }
+    jb.endArray();
+    
     return HttpServer::Response::json(jb.build());
 }
 

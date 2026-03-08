@@ -55,7 +55,7 @@ HardwareSnapshot BaseWorker::getHardware() {
 }
 
 void BaseWorker::runLoop() {
-    std::cout << "[" << name << "] Thread started" << std::endl;
+    utils::LogRingBuffer::instance().push("[" + name + "] Thread started");
     while (!stop_.load()) {
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
@@ -111,8 +111,9 @@ ConfigScannerWorker::ConfigScannerWorker(HunterOrchestrator* orch, std::atomic<b
 
 void ConfigScannerWorker::execute() {
     auto hw = getHardware();
-    std::cout << "[Scanner] Starting cycle (mode=" << (int)hw.mode
-              << ", RAM=" << hw.ram_percent << "%, workers=" << hw.io_pool_size << ")" << std::endl;
+    { std::ostringstream _ls; _ls << "[Scanner] Starting cycle (mode=" << (int)hw.mode
+              << ", RAM=" << hw.ram_percent << "%, workers=" << hw.io_pool_size << ")";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     updateExtra("mode", std::to_string((int)hw.mode));
     updateExtra("ram_percent", std::to_string(hw.ram_percent));
@@ -209,7 +210,7 @@ void BalancerWorker::execute() {
 
     // Check if port responds, restart if needed
     if (status.running && !utils::isPortAlive(status.port, 2000)) {
-        std::cout << "[Balancer] Port not responding, refreshing..." << std::endl;
+        utils::LogRingBuffer::instance().push("[Balancer] Port not responding, refreshing...");
         // Balancer health monitor handles this internally
     }
 }
@@ -258,7 +259,8 @@ HarvesterWorker::HarvesterWorker(HunterOrchestrator* orch, std::atomic<bool>& st
 void HarvesterWorker::execute() {
     if (first_run_) {
         first_run_ = false;
-        std::cout << "[Harvester] Initial delay " << constants::HARVESTER_INITIAL_DELAY_S << "s" << std::endl;
+        { std::ostringstream _ls; _ls << "[Harvester] Initial delay " << constants::HARVESTER_INITIAL_DELAY_S << "s";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
         int remaining = constants::HARVESTER_INITIAL_DELAY_S;
         while (remaining > 0 && !stop_.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(std::min(remaining, 5)));
@@ -273,7 +275,7 @@ void HarvesterWorker::execute() {
     auto& mgr = HunterTaskManager::instance();
     std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
     if (!lock.try_lock_for(std::chrono::seconds(10))) {
-        std::cout << "[Harvester] Fetch lock busy, skipping" << std::endl;
+        utils::LogRingBuffer::instance().push("[Harvester] Fetch lock busy, skipping");
         return;
     }
 
@@ -292,7 +294,8 @@ void HarvesterWorker::execute() {
         updateExtra("last_count", std::to_string(configs.size()));
         updateExtra("new_added", std::to_string(added));
         updateExtra("db_size", std::to_string(db->size()));
-        std::cout << "[Harvester] Got " << configs.size() << " configs, " << added << " new" << std::endl;
+        { std::ostringstream _ls; _ls << "[Harvester] Got " << configs.size() << " configs, " << added << " new";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
     }
 
     // In continuous mode, harvest more frequently (still respecting env override if set via constructor)
@@ -349,14 +352,15 @@ void GitHubDownloaderWorker::execute() {
     bool enabled = HunterConfig::getEnvBool("HUNTER_GITHUB_BG_ENABLED", true);
     if (!enabled) {
         updateExtra("reason", "disabled");
-        std::cout << "[GitHubBG] Disabled" << std::endl;
+        utils::LogRingBuffer::instance().push("[GitHubBG] Disabled");
         return;
     }
 
     if (first_run_) {
         first_run_ = false;
         updateExtra("reason", "initial_delay");
-        std::cout << "[GitHubBG] Initial delay " << constants::GITHUB_BG_INITIAL_DELAY_S << "s" << std::endl;
+        { std::ostringstream _ls; _ls << "[GitHubBG] Initial delay " << constants::GITHUB_BG_INITIAL_DELAY_S << "s";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
         int remaining = constants::GITHUB_BG_INITIAL_DELAY_S;
         while (remaining > 0 && !stop_.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(std::min(remaining, 5)));
@@ -373,13 +377,14 @@ void GitHubDownloaderWorker::execute() {
 
     int cap = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_CAP", constants::DEFAULT_GITHUB_BG_CAP);
     cap = std::max(200, std::min(150000, cap));
-    std::cout << "[GitHubBG] Fetching (cap=" << cap << ")" << std::endl;
+    { std::ostringstream _ls; _ls << "[GitHubBG] Fetching (cap=" << cap << ")";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     auto& mgr = HunterTaskManager::instance();
     std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
     if (!lock.try_lock_for(std::chrono::seconds(10))) {
         updateExtra("reason", "scrape_lock_busy");
-        std::cout << "[GitHubBG] Fetch lock busy, retrying soon" << std::endl;
+        utils::LogRingBuffer::instance().push("[GitHubBG] Fetch lock busy, retrying soon");
         interval_seconds = 60;
         return;
     }
@@ -393,7 +398,7 @@ void GitHubDownloaderWorker::execute() {
     lock.unlock();
 
     if (configs.empty()) {
-        std::cout << "[GitHubBG] No configs fetched" << std::endl;
+        utils::LogRingBuffer::instance().push("[GitHubBG] No configs fetched");
         updateExtra("last_count", "0");
         updateExtra("reason", "no_configs");
         interval_seconds = 300;
@@ -428,8 +433,9 @@ void GitHubDownloaderWorker::execute() {
     updateExtra("github_needs_retest", std::to_string(tag_stats.needs_retest));
     updateExtra("downloads", std::to_string(download_count_));
 
-    std::cout << "[GitHubBG] Got " << configs_list.size() << " configs, appended "
-              << appended << ", db+" << added << std::endl;
+    { std::ostringstream _ls; _ls << "[GitHubBG] Got " << configs_list.size() << " configs, appended "
+              << appended << ", db+" << added;
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // In continuous mode, check GitHub sources more frequently (still can be overridden by env)
     const int env_interval = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_INTERVAL_S", -1);
@@ -452,14 +458,15 @@ ValidatorWorker::ValidatorWorker(HunterOrchestrator* orch, std::atomic<bool>& st
 void ValidatorWorker::execute() {
     auto* db = orch_->configDb();
     if (!db) {
-        std::cout << "[Validator] WARNING: ConfigDB is null, skipping validation" << std::endl;
+        utils::LogRingBuffer::instance().push("[Validator] WARNING: ConfigDB is null");
         return;
     }
 
     network::ContinuousValidator validator(*db, 80);
     auto [tested, passed] = validator.validateBatch();
 
-    std::cout << "[Validator] Batch complete: tested=" << tested << " passed=" << passed << std::endl;
+    { std::ostringstream _ls; _ls << "[Validator] Batch: tested=" << tested << " passed=" << passed;
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     updateExtra("last_tested", std::to_string(tested));
     updateExtra("last_passed", std::to_string(passed));
@@ -520,8 +527,7 @@ void ValidatorWorker::execute() {
     // Debug logging for status file path
     static bool first_status_write = true;
     if (first_status_write) {
-        std::cout << "[Validator] Writing status to: " << status_path << std::endl;
-        std::cout << "[Validator] State file config: " << orch_->config().stateFile() << std::endl;
+        utils::LogRingBuffer::instance().push("[Validator] Status path: " + status_path);
         first_status_write = false;
     }
 
@@ -560,8 +566,9 @@ void ValidatorWorker::execute() {
         .addRaw("history", hist.str());
 
     bool write_ok = utils::saveJsonFile(status_path, root.build());
-    std::cout << "[Validator] Status file write: " << (write_ok ? "SUCCESS" : "FAILED") 
-              << " - db_total=" << stats.db.total << " alive=" << stats.db.alive << std::endl;
+    { std::ostringstream _ls; _ls << "[Validator] Status: " << (write_ok ? "OK" : "FAIL")
+              << " db=" << stats.db.total << " alive=" << stats.db.alive;
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // In continuous mode, validate more frequently (still can be overridden by env)
     const int env_interval = HunterConfig::getEnvInt("HUNTER_VALIDATOR_INTERVAL_S", -1);
@@ -697,11 +704,11 @@ void ImportWatcherWorker::execute() {
 
     for (const auto& file_path : files_to_process) {
         std::string filename = fs::path(file_path).filename().string();
-        std::cout << "[Import] Processing: " << filename << std::endl;
+        utils::LogRingBuffer::instance().push("[Import] Processing: " + filename);
 
         auto lines = utils::readLines(file_path);
         if (lines.empty()) {
-            std::cout << "[Import] " << filename << " is empty, skipping" << std::endl;
+            utils::LogRingBuffer::instance().push("[Import] " + filename + " is empty, skipping");
             // Move empty file to processed
             try {
                 fs::rename(file_path, import_dir + "/processed/" + filename);
@@ -787,14 +794,13 @@ void ImportWatcherWorker::execute() {
         total_invalid_ += batch_invalid;
         total_duplicate_ += batch_duplicate;
 
-        std::cout << "[Import] Processed " << files_to_process.size() << " files: "
-                  << batch_valid << " valid, " << batch_invalid << " invalid, "
-                  << batch_duplicate << " duplicate -> " << added << " new to DB"
-                  << " (total imported: " << total_imported_ << ")" << std::endl;
+        { std::ostringstream _ls; _ls << "[Import] " << files_to_process.size() << " files: "
+                  << batch_valid << " valid, " << batch_invalid << " invalid -> " << added << " new";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
     } else if (batch_invalid > 0 || batch_duplicate > 0) {
-        std::cout << "[Import] Processed " << files_to_process.size() << " files: "
-                  << "0 valid, " << batch_invalid << " invalid, "
-                  << batch_duplicate << " duplicate" << std::endl;
+        { std::ostringstream _ls; _ls << "[Import] " << files_to_process.size() << " files: "
+                  << "0 valid, " << batch_invalid << " invalid, " << batch_duplicate << " dup";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
     }
 
     updateExtra("total_imported", std::to_string(total_imported_));

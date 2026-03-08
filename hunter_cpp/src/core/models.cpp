@@ -198,4 +198,213 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
     return jb.build();
 }
 
+// ─── ParsedConfig::toSingBoxConfigJson ───
+
+std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
+    // sing-box outbound JSON format
+    // Supports: vmess, vless, trojan, shadowsocks, hysteria2, tuic
+    
+    std::string proto = protocol;
+    if (proto == "shadowsocks") proto = "shadowsocks";
+    
+    // Reject unsupported protocols
+    if (proto != "vmess" && proto != "vless" && proto != "trojan" && 
+        proto != "shadowsocks" && proto != "hysteria2" && proto != "tuic") {
+        return "";
+    }
+    
+    std::string net = network.empty() ? "tcp" : network;
+    // sing-box uses different transport names
+    if (net == "raw") net = "tcp";
+    
+    std::ostringstream ob;
+    ob << "{\"type\":\"" << proto << "\",\"tag\":\"proxy\"";
+    ob << ",\"server\":\"" << address << "\",\"server_port\":" << port;
+    
+    if (proto == "vmess") {
+        ob << ",\"uuid\":\"" << uuid << "\",\"security\":\"" 
+           << (encryption.empty() ? "auto" : encryption) << "\",\"alter_id\":0";
+    } else if (proto == "vless") {
+        ob << ",\"uuid\":\"" << uuid << "\"";
+        if (!flow.empty()) ob << ",\"flow\":\"" << flow << "\"";
+    } else if (proto == "trojan") {
+        ob << ",\"password\":\"" << uuid << "\"";
+    } else if (proto == "shadowsocks") {
+        ob << ",\"method\":\"" << encryption << "\",\"password\":\"" << uuid << "\"";
+    } else if (proto == "hysteria2") {
+        ob << ",\"password\":\"" << uuid << "\"";
+        if (extra.count("up_mbps")) ob << ",\"up_mbps\":" << extra.at("up_mbps");
+        if (extra.count("down_mbps")) ob << ",\"down_mbps\":" << extra.at("down_mbps");
+    } else if (proto == "tuic") {
+        ob << ",\"uuid\":\"" << uuid << "\"";
+        if (extra.count("password")) ob << ",\"password\":\"" << extra.at("password") << "\"";
+        ob << ",\"congestion_control\":\"bbr\"";
+    }
+    
+    // TLS settings
+    if (security == "tls" || security == "reality") {
+        ob << ",\"tls\":{\"enabled\":true";
+        if (!sni.empty()) ob << ",\"server_name\":\"" << sni << "\"";
+        else if (!host.empty()) ob << ",\"server_name\":\"" << host << "\"";
+        else ob << ",\"server_name\":\"" << address << "\"";
+        
+        if (security == "reality") {
+            ob << ",\"reality\":{\"enabled\":true";
+            if (!public_key.empty()) ob << ",\"public_key\":\"" << public_key << "\"";
+            if (!short_id.empty()) ob << ",\"short_id\":\"" << short_id << "\"";
+            ob << "}";
+        }
+        if (!fingerprint.empty()) {
+            ob << ",\"utls\":{\"enabled\":true,\"fingerprint\":\"" << fingerprint << "\"}";
+        } else {
+            ob << ",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}";
+        }
+        ob << ",\"insecure\":true}";
+    }
+    
+    // Transport settings
+    if (net == "ws") {
+        ob << ",\"transport\":{\"type\":\"ws\"";
+        if (!path.empty()) ob << ",\"path\":\"" << path << "\"";
+        if (!host.empty()) ob << ",\"headers\":{\"Host\":\"" << host << "\"}";
+        ob << "}";
+    } else if (net == "grpc") {
+        std::string sn = path.empty() ? (extra.count("serviceName") ? extra.at("serviceName") : "") : path;
+        ob << ",\"transport\":{\"type\":\"grpc\",\"service_name\":\"" << sn << "\"}";
+    } else if (net == "h2" || net == "http") {
+        ob << ",\"transport\":{\"type\":\"http\"";
+        if (!path.empty()) ob << ",\"path\":\"" << path << "\"";
+        if (!host.empty()) ob << ",\"host\":[\"" << host << "\"]";
+        ob << "}";
+    } else if (net == "httpupgrade") {
+        ob << ",\"transport\":{\"type\":\"httpupgrade\"";
+        if (!path.empty()) ob << ",\"path\":\"" << path << "\"";
+        if (!host.empty()) ob << ",\"host\":\"" << host << "\"";
+        ob << "}";
+    }
+    
+    ob << "}";
+    
+    // Full sing-box config
+    std::ostringstream ss;
+    ss << "{"
+       << "\"log\":{\"level\":\"warn\"},"
+       << "\"dns\":{\"servers\":[{\"tag\":\"dns-direct\",\"address\":\"1.1.1.1\"},{\"tag\":\"dns-google\",\"address\":\"8.8.8.8\"}]},"
+       << "\"inbounds\":[{\"type\":\"socks\",\"tag\":\"socks-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << "}],"
+       << "\"outbounds\":[" << ob.str() << ",{\"type\":\"direct\",\"tag\":\"direct\"}],"
+       << "\"route\":{\"rules\":[{\"protocol\":\"dns\",\"outbound\":\"direct\"},{\"ip_is_private\":true,\"outbound\":\"direct\"}],\"final\":\"proxy\"}"
+       << "}";
+    return ss.str();
+}
+
+// ─── ParsedConfig::toMihomoConfigYaml ───
+
+std::string ParsedConfig::toMihomoConfigYaml(int socks_port) const {
+    // mihomo (Clash Meta) YAML format
+    // Supports: vmess, vless, trojan, ss, hysteria2, tuic
+    
+    if (protocol != "vmess" && protocol != "vless" && protocol != "trojan" && 
+        protocol != "shadowsocks" && protocol != "hysteria2" && protocol != "tuic") {
+        return "";
+    }
+    
+    std::string net = network.empty() ? "tcp" : network;
+    if (net == "raw") net = "tcp";
+    
+    std::ostringstream ss;
+    ss << "mixed-port: " << socks_port << "\n"
+       << "mode: global\n"
+       << "log-level: warning\n"
+       << "allow-lan: false\n"
+       << "dns:\n"
+       << "  enable: true\n"
+       << "  nameserver:\n"
+       << "    - 1.1.1.1\n"
+       << "    - 8.8.8.8\n"
+       << "proxies:\n";
+    
+    std::string type_str;
+    if (protocol == "vmess") type_str = "vmess";
+    else if (protocol == "vless") type_str = "vless";
+    else if (protocol == "trojan") type_str = "trojan";
+    else if (protocol == "shadowsocks") type_str = "ss";
+    else if (protocol == "hysteria2") type_str = "hysteria2";
+    else if (protocol == "tuic") type_str = "tuic";
+    
+    ss << "  - name: proxy\n"
+       << "    type: " << type_str << "\n"
+       << "    server: " << address << "\n"
+       << "    port: " << port << "\n";
+    
+    if (protocol == "vmess") {
+        ss << "    uuid: " << uuid << "\n"
+           << "    alterId: 0\n"
+           << "    cipher: " << (encryption.empty() ? "auto" : encryption) << "\n";
+    } else if (protocol == "vless") {
+        ss << "    uuid: " << uuid << "\n";
+        if (!flow.empty()) ss << "    flow: " << flow << "\n";
+    } else if (protocol == "trojan") {
+        ss << "    password: " << uuid << "\n";
+    } else if (protocol == "shadowsocks") {
+        ss << "    cipher: " << encryption << "\n"
+           << "    password: " << uuid << "\n";
+    } else if (protocol == "hysteria2") {
+        ss << "    password: " << uuid << "\n";
+    } else if (protocol == "tuic") {
+        ss << "    uuid: " << uuid << "\n";
+        if (extra.count("password")) ss << "    password: " << extra.at("password") << "\n";
+        ss << "    congestion-controller: bbr\n";
+    }
+    
+    // Network/transport
+    if (net != "tcp") {
+        ss << "    network: " << net << "\n";
+    }
+    
+    // TLS
+    if (security == "tls") {
+        ss << "    tls: true\n"
+           << "    skip-cert-verify: true\n";
+        if (!sni.empty()) ss << "    servername: " << sni << "\n";
+        else if (!host.empty()) ss << "    servername: " << host << "\n";
+        if (!fingerprint.empty()) ss << "    client-fingerprint: " << fingerprint << "\n";
+        else ss << "    client-fingerprint: chrome\n";
+    } else if (security == "reality") {
+        ss << "    tls: true\n"
+           << "    skip-cert-verify: true\n";
+        if (!sni.empty()) ss << "    servername: " << sni << "\n";
+        ss << "    reality-opts:\n";
+        if (!public_key.empty()) ss << "      public-key: " << public_key << "\n";
+        if (!short_id.empty()) ss << "      short-id: " << short_id << "\n";
+        if (!fingerprint.empty()) ss << "    client-fingerprint: " << fingerprint << "\n";
+        else ss << "    client-fingerprint: chrome\n";
+    }
+    
+    // Transport options
+    if (net == "ws") {
+        ss << "    ws-opts:\n";
+        if (!path.empty()) ss << "      path: " << path << "\n";
+        if (!host.empty()) ss << "      headers:\n        Host: " << host << "\n";
+    } else if (net == "grpc") {
+        ss << "    grpc-opts:\n";
+        std::string sn = path.empty() ? (extra.count("serviceName") ? extra.at("serviceName") : "") : path;
+        if (!sn.empty()) ss << "      grpc-service-name: " << sn << "\n";
+    } else if (net == "h2" || net == "http") {
+        ss << "    h2-opts:\n";
+        if (!path.empty()) ss << "      path: " << path << "\n";
+        if (!host.empty()) ss << "      host:\n        - " << host << "\n";
+    }
+    
+    // Proxy groups and rules
+    ss << "proxy-groups:\n"
+       << "  - name: GLOBAL\n"
+       << "    type: select\n"
+       << "    proxies:\n"
+       << "      - proxy\n"
+       << "rules:\n"
+       << "  - MATCH,proxy\n";
+    
+    return ss.str();
+}
+
 } // namespace hunter

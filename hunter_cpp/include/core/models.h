@@ -74,6 +74,12 @@ struct ParsedConfig {
 
     // Generate XRay-compatible JSON outbound
     std::string toXrayOutboundJson(int socks_port) const;
+    
+    // Generate full sing-box config JSON with SOCKS inbound
+    std::string toSingBoxConfigJson(int socks_port) const;
+    
+    // Generate full mihomo (Clash Meta) config YAML with SOCKS inbound
+    std::string toMihomoConfigYaml(int socks_port) const;
 };
 
 /**

@@ -255,7 +255,8 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
     auto batch = db_.getUntestedBatch(effective_batch);
     if (batch.empty()) return {0, 0};
 
-    std::cout << "[Validator] Testing batch of " << batch.size() << " configs..." << std::endl;
+    { std::ostringstream _ls; _ls << "[Validator] Testing batch of " << batch.size() << " configs...";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     int tested = 0, passed = 0;
     auto& mgr = HunterTaskManager::instance();
@@ -274,7 +275,9 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
                 local_tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
                 
                 ProxyTestResult result = local_tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", 15);
-                return {uri, result.success, result.download_speed_kbps};
+                // Only count as alive if actual HTTP download succeeded (not telegram-only)
+                bool real_success = result.success && !result.telegram_only;
+                return {uri, real_success, result.download_speed_kbps};
             }));
         }
 
