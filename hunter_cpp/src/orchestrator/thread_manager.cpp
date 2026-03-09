@@ -3,6 +3,7 @@
 #include "core/utils.h"
 #include "core/constants.h"
 #include "core/task_manager.h"
+#include "network/uri_parser.h"
 
 #include <chrono>
 #include <deque>
@@ -13,6 +14,167 @@
 
 namespace hunter {
 namespace orchestrator {
+
+namespace {
+
+struct GitHubRefreshResult {
+    int fetched_total = 0;
+    int valid_total = 0;
+    int invalid_total = 0;
+    int appended = 0;
+    int added = 0;
+    std::string reason = "ok";
+};
+
+std::set<std::string>& githubSeenStore() {
+    static std::set<std::string> seen;
+    return seen;
+}
+
+std::mutex& githubSeenMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+bool& githubSeenLoaded() {
+    static bool loaded = false;
+    return loaded;
+}
+
+std::string githubCachePathFor(HunterOrchestrator* orch) {
+    std::string base = utils::dirName(orch->config().stateFile());
+    if (base.empty()) base = "runtime";
+    utils::mkdirRecursive(base);
+    return base + "/HUNTER_github_configs_cache.txt";
+}
+
+void ensureGitHubSeenLoaded(const std::string& cache_path) {
+    std::lock_guard<std::mutex> lock(githubSeenMutex());
+    if (githubSeenLoaded()) return;
+    auto lines = utils::readLines(cache_path);
+    auto& seen = githubSeenStore();
+    seen.insert(lines.begin(), lines.end());
+    githubSeenLoaded() = true;
+}
+
+int appendGitHubCacheLines(const std::string& cache_path, const std::vector<std::string>& configs) {
+    std::lock_guard<std::mutex> lock(githubSeenMutex());
+    auto& loaded = githubSeenLoaded();
+    auto& seen = githubSeenStore();
+    if (!loaded) {
+        auto lines = utils::readLines(cache_path);
+        seen.insert(lines.begin(), lines.end());
+        loaded = true;
+    }
+    std::vector<std::string> new_lines;
+    for (const auto& raw : configs) {
+        std::string config = utils::trim(raw);
+        if (!config.empty() && seen.insert(config).second) {
+            new_lines.push_back(config);
+        }
+    }
+    if (new_lines.empty()) return 0;
+    std::ofstream f(cache_path, std::ios::app);
+    if (!f) return 0;
+    for (const auto& c : new_lines) f << c << "\n";
+    return (int)new_lines.size();
+}
+
+std::set<std::string> filterValidGithubConfigs(const std::set<std::string>& configs, int* invalid_count) {
+    std::set<std::string> valid;
+    int invalid = 0;
+    for (const auto& raw : configs) {
+        std::string uri = utils::trim(raw);
+        if (uri.empty()) continue;
+        auto parsed = network::UriParser::parse(uri);
+        if (!parsed.has_value() || !parsed->isValid()) {
+            invalid++;
+            continue;
+        }
+        valid.insert(uri);
+    }
+    if (invalid_count) *invalid_count = invalid;
+    return valid;
+}
+
+std::vector<int> githubProxyPorts(HunterOrchestrator* orch) {
+    std::set<int> seen_ports;
+    std::vector<int> ports;
+    auto add_port = [&](int port) {
+        if (port > 0 && seen_ports.insert(port).second) {
+            ports.push_back(port);
+        }
+    };
+
+    add_port(orch->config().multiproxyPort());
+    add_port(orch->config().geminiPort());
+
+    for (const auto& slot : orch->getProvisionedPorts()) {
+        if ((slot.alive || slot.pid > 0) && slot.port > 0) {
+            add_port(slot.port);
+        }
+    }
+
+    return ports;
+}
+
+GitHubRefreshResult refreshGithubConfigs(HunterOrchestrator* orch, int cap,
+                                         int timeout_per, float overall_timeout,
+                                         const std::string& tag,
+                                         const std::string& log_prefix) {
+    GitHubRefreshResult result;
+    auto log_result = [&]() {
+        std::ostringstream _ls;
+        _ls << log_prefix << " reason=" << result.reason
+            << " fetched=" << result.fetched_total
+            << " valid=" << result.valid_total
+            << " invalid=" << result.invalid_total
+            << " appended=" << result.appended
+            << " db+" << result.added;
+        utils::LogRingBuffer::instance().push(_ls.str());
+    };
+
+    auto& mgr = HunterTaskManager::instance();
+    std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::seconds(10))) {
+        result.reason = "scrape_lock_busy";
+        log_result();
+        return result;
+    }
+
+    auto proxy_ports = githubProxyPorts(orch);
+    auto fetched = orch->configFetcher().fetchGithubConfigs(proxy_ports, cap, timeout_per, overall_timeout);
+    lock.unlock();
+
+    result.fetched_total = (int)fetched.size();
+    if (fetched.empty()) {
+        result.reason = "no_configs";
+        log_result();
+        return result;
+    }
+
+    auto valid = filterValidGithubConfigs(fetched, &result.invalid_total);
+    result.valid_total = (int)valid.size();
+    if (valid.empty()) {
+        result.reason = "no_valid_configs";
+        log_result();
+        return result;
+    }
+
+    std::vector<std::string> valid_list(valid.begin(), valid.end());
+    result.appended = appendGitHubCacheLines(githubCachePathFor(orch), valid_list);
+
+    auto* cache = orch->cache();
+    if (cache) cache->saveConfigs(valid_list, false);
+
+    auto* db = orch->configDb();
+    if (db) result.added = db->addConfigs(valid, tag);
+
+    log_result();
+    return result;
+}
+
+}
 
 // ═══════════════════════════════════════════════════════════════════
 // BaseWorker
@@ -318,32 +480,17 @@ GitHubDownloaderWorker::GitHubDownloaderWorker(HunterOrchestrator* orch, std::at
 
 std::string GitHubDownloaderWorker::cacheFile() {
     if (!cache_path_.empty()) return cache_path_;
-    std::string base = utils::dirName(orch_->config().stateFile());
-    if (base.empty()) base = "runtime";
-    utils::mkdirRecursive(base);
-    cache_path_ = base + "/HUNTER_github_configs_cache.txt";
+    cache_path_ = githubCachePathFor(orch_);
     return cache_path_;
 }
 
 void GitHubDownloaderWorker::loadSeen() {
-    if (!seen_.empty()) return;
-    auto lines = utils::readLines(cacheFile());
-    seen_.insert(lines.begin(), lines.end());
+    ensureGitHubSeenLoaded(cacheFile());
 }
 
 int GitHubDownloaderWorker::appendNew(const std::vector<std::string>& configs) {
     loadSeen();
-    std::vector<std::string> new_lines;
-    for (const auto& c : configs) {
-        if (!c.empty() && seen_.find(c) == seen_.end()) {
-            new_lines.push_back(c);
-            seen_.insert(c);
-        }
-    }
-    if (new_lines.empty()) return 0;
-    std::ofstream f(cacheFile(), std::ios::app);
-    for (const auto& c : new_lines) f << c << "\n";
-    return (int)new_lines.size();
+    return appendGitHubCacheLines(cacheFile(), configs);
 }
 
 void GitHubDownloaderWorker::execute() {
@@ -380,51 +527,39 @@ void GitHubDownloaderWorker::execute() {
     { std::ostringstream _ls; _ls << "[GitHubBG] Fetching (cap=" << cap << ")";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
-    auto& mgr = HunterTaskManager::instance();
-    std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
-    if (!lock.try_lock_for(std::chrono::seconds(10))) {
-        updateExtra("reason", "scrape_lock_busy");
-        utils::LogRingBuffer::instance().push("[GitHubBG] Fetch lock busy, retrying soon");
+    auto refresh = refreshGithubConfigs(orch_, cap, 9, 40.0f, "github_bg", "[GitHubBG]");
+    if (refresh.reason == "scrape_lock_busy") {
+        updateExtra("last_count", "0");
+        updateExtra("valid_count", "0");
+        updateExtra("invalid_filtered", "0");
+        updateExtra("reason", refresh.reason);
         interval_seconds = 60;
         return;
     }
 
-    std::vector<int> proxy_ports = {
-        orch_->config().multiproxyPort(),
-        orch_->config().geminiPort()
-    };
-
-    auto configs = orch_->configFetcher().fetchGithubConfigs(proxy_ports, cap);
-    lock.unlock();
-
-    if (configs.empty()) {
-        utils::LogRingBuffer::instance().push("[GitHubBG] No configs fetched");
-        updateExtra("last_count", "0");
-        updateExtra("reason", "no_configs");
+    if (refresh.fetched_total == 0 || refresh.valid_total == 0) {
+        updateExtra("last_count", std::to_string(refresh.fetched_total));
+        updateExtra("valid_count", std::to_string(refresh.valid_total));
+        updateExtra("invalid_filtered", std::to_string(refresh.invalid_total));
+        updateExtra("new_appended", std::to_string(refresh.appended));
+        updateExtra("new_added_db", std::to_string(refresh.added));
+        updateExtra("reason", refresh.reason);
         interval_seconds = 300;
         return;
     }
 
-    std::vector<std::string> configs_list(configs.begin(), configs.end());
-    int appended = appendNew(configs_list);
-
-    // Save to cache
-    auto* cache = orch_->cache();
-    if (cache) cache->saveConfigs(configs_list, false);
-
-    // Add to ConfigDB
-    int added = 0;
     auto* db = orch_->configDb();
-    if (db) added = db->addConfigs(configs, "github_bg");
 
     // Get tag stats
     network::ConfigDatabase::TagStats tag_stats;
     if (db) tag_stats = db->getTagStats("github_bg");
 
     download_count_++;
-    updateExtra("last_count", std::to_string(configs_list.size()));
-    updateExtra("new_appended", std::to_string(appended));
-    updateExtra("new_added_db", std::to_string(added));
+    updateExtra("last_count", std::to_string(refresh.fetched_total));
+    updateExtra("valid_count", std::to_string(refresh.valid_total));
+    updateExtra("invalid_filtered", std::to_string(refresh.invalid_total));
+    updateExtra("new_appended", std::to_string(refresh.appended));
+    updateExtra("new_added_db", std::to_string(refresh.added));
     updateExtra("db_size", std::to_string(db ? db->size() : 0));
     updateExtra("github_total", std::to_string(tag_stats.total));
     updateExtra("github_alive", std::to_string(tag_stats.alive));
@@ -433,8 +568,8 @@ void GitHubDownloaderWorker::execute() {
     updateExtra("github_needs_retest", std::to_string(tag_stats.needs_retest));
     updateExtra("downloads", std::to_string(download_count_));
 
-    { std::ostringstream _ls; _ls << "[GitHubBG] Got " << configs_list.size() << " configs, appended "
-              << appended << ", db+" << added;
+    { std::ostringstream _ls; _ls << "[GitHubBG] Accepted " << refresh.valid_total << " valid configs from "
+              << refresh.fetched_total << " fetched, appended " << refresh.appended << ", db+" << refresh.added;
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // In continuous mode, check GitHub sources more frequently (still can be overridden by env)
@@ -541,6 +676,23 @@ void ValidatorWorker::execute() {
     }
     hist << "]";
 
+    auto healthy_configs = db->getHealthyConfigs(200);
+    static bool had_alive_configs = false;
+    static uint64_t last_live_refresh_attempt_ms = 0;
+    static uint64_t last_live_refresh_success_ms = 0;
+    std::ostringstream alive_json;
+    alive_json << "[";
+    bool alive_first = true;
+    for (auto& [uri, lat] : healthy_configs) {
+        if (!alive_first) alive_json << ",";
+        alive_first = false;
+        utils::JsonBuilder item;
+        item.add("uri", uri)
+            .add("latency_ms", lat);
+        alive_json << item.build();
+    }
+    alive_json << "]";
+
     utils::JsonBuilder dbj;
     dbj.add("total", stats.db.total)
        .add("alive", stats.db.alive)
@@ -563,11 +715,13 @@ void ValidatorWorker::execute() {
         .addRaw("validator", valj.build())
         .add("pending_unique", pending_unique)
         .add("eta_seconds", eta_s)
+        .addRaw("alive_configs", alive_json.str())
         .addRaw("history", hist.str());
 
     bool write_ok = utils::saveJsonFile(status_path, root.build());
     { std::ostringstream _ls; _ls << "[Validator] Status: " << (write_ok ? "OK" : "FAIL")
-              << " db=" << stats.db.total << " alive=" << stats.db.alive;
+              << " db=" << stats.db.total << " alive=" << stats.db.alive
+              << " ready=" << healthy_configs.size();
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // In continuous mode, validate more frequently (still can be overridden by env)
@@ -577,13 +731,78 @@ void ValidatorWorker::execute() {
         interval_seconds = std::min(interval_seconds, 2);
     }
 
-    // Feed healthy configs to balancer
-    if (passed > 0 && orch_->balancer()) {
-        auto healthy = db->getHealthyConfigs(50);
+    const bool has_live_now = !healthy_configs.empty();
+    const bool should_refresh_after_live = has_live_now && (!had_alive_configs ||
+        (last_live_refresh_success_ms == 0 && (last_live_refresh_attempt_ms == 0 || (now_ms - last_live_refresh_attempt_ms) > 120000)));
+
+    // Write files FIRST so Flutter sees them immediately, then update balancers
+    if (stats.db.alive > 0) {
+        const auto& healthy = healthy_configs;
+        std::cout << "[Validator] Alive=" << stats.db.alive << " healthy_from_db=" << healthy.size() << std::endl;
+        std::cout.flush();
         if (!healthy.empty()) {
-            orch_->balancer()->updateAvailableConfigs(healthy, true);
+            // ── 1. Write gold/silver files immediately ──
+            std::string gold_file = orch_->config().goldFile();
+            std::string silver_file = orch_->config().silverFile();
+            std::cout << "[Validator] Writing gold=" << gold_file << " silver=" << silver_file << std::endl;
+            std::cout.flush();
+            std::vector<std::string> gold_uris;
+            for (auto& [uri, lat] : healthy) {
+                gold_uris.push_back(uri);
+            }
+            if (!gold_uris.empty()) {
+                int added = utils::appendUniqueLines(gold_file, gold_uris);
+                std::cout << "[Validator] Gold: wrote " << added << " new (total " << gold_uris.size() << ") to " << gold_file << std::endl;
+                std::cout.flush();
+            }
+
+            // ── 2. Write balancer cache JSON ──
+            std::ostringstream bcj;
+            bcj << "{\"configs\":[";
+            bool bfirst = true;
+            for (auto& [uri, lat] : healthy) {
+                if (!bfirst) bcj << ",";
+                bfirst = false;
+                bcj << "{\"uri\":\"" << uri << "\",\"latency_ms\":" << lat << "}";
+            }
+            bcj << "]}";
+            bool bc_ok = utils::saveJsonFile(base + "/HUNTER_balancer_cache.json", bcj.str());
+            std::cout << "[Validator] Balancer cache: " << (bc_ok ? "OK" : "FAIL") << " (" << healthy.size() << " configs)" << std::endl;
+            std::cout.flush();
+
+            // ── 3. Update balancers (may be slow, do AFTER file writes) ──
+            if (orch_->balancer()) {
+                orch_->balancer()->updateAvailableConfigs(healthy, true);
+            }
+            if (orch_->geminiBalancer() && healthy.size() > 1) {
+                int half = std::max(1, (int)healthy.size() / 2);
+                std::vector<std::pair<std::string, float>> gemini_configs(
+                    healthy.begin() + half, healthy.end());
+                orch_->geminiBalancer()->updateAvailableConfigs(gemini_configs, true);
+            }
+
+            if (should_refresh_after_live) {
+                last_live_refresh_attempt_ms = now_ms;
+                int github_cap = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_CAP", constants::DEFAULT_GITHUB_BG_CAP);
+                github_cap = std::max(200, std::min(150000, github_cap));
+                auto refresh = refreshGithubConfigs(orch_, github_cap, 6, 20.0f, "github_bg", "[Validator->GitHub]");
+                updateExtra("live_github_reason", refresh.reason);
+                updateExtra("live_github_fetched", std::to_string(refresh.fetched_total));
+                updateExtra("live_github_valid", std::to_string(refresh.valid_total));
+                updateExtra("live_github_invalid", std::to_string(refresh.invalid_total));
+                updateExtra("live_github_appended", std::to_string(refresh.appended));
+                updateExtra("live_github_added_db", std::to_string(refresh.added));
+                if (refresh.valid_total > 0) {
+                    last_live_refresh_success_ms = now_ms;
+                }
+            }
+        } else {
+            std::cout << "[Validator] WARNING: alive=" << stats.db.alive << " but getHealthyConfigs returned empty!" << std::endl;
+            std::cout.flush();
         }
     }
+
+    had_alive_configs = has_live_now;
 }
 
 // ═══════════════════════════════════════════════════════════════════

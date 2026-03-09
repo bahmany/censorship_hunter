@@ -267,11 +267,18 @@ bool HunterOrchestrator::runCycle() {
     { std::ostringstream _ls; _ls << "Starting hunter cycle #" << cycle_count_.load();
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
+  try {
+
     // Memory status
     auto hw = HunterTaskManager::instance().getHardware();
     { std::ostringstream _ls; _ls << "Memory status: " << hw.ram_percent << "% used ("
               << hw.ram_used_gb << "GB / " << hw.ram_total_gb << "GB)";
       utils::LogRingBuffer::instance().push(_ls.str()); }
+
+    if (hw.ram_percent >= 90.0f) {
+        utils::LogRingBuffer::instance().push("[RunCycle] High RAM pressure, skipping full scrape/benchmark cycle");
+        return false;
+    }
 
     // Scrape configs
     auto scraped = scrapeConfigs();
@@ -411,6 +418,15 @@ bool HunterOrchestrator::runCycle() {
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     return true;
+
+  } catch (const std::exception& e) {
+    { std::ostringstream _ls; _ls << "[RunCycle] EXCEPTION: " << e.what();
+      utils::LogRingBuffer::instance().push(_ls.str()); }
+    return false;
+  } catch (...) {
+    utils::LogRingBuffer::instance().push("[RunCycle] UNKNOWN EXCEPTION caught — cycle aborted");
+    return false;
+  }
 }
 
 HunterOrchestrator::ScrapeResult HunterOrchestrator::scrapeConfigs() {
@@ -566,6 +582,13 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
         deduped = network::prioritizeConfigs(deduped);
     }
 
+    auto hw = HunterTaskManager::instance().getHardware();
+    if (hw.ram_percent >= 90.0f && deduped.size() > 40) {
+        deduped.resize(40);
+        { std::ostringstream _ls; _ls << "[Bench-" << label << "] High RAM pressure: capped to " << deduped.size() << " configs";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
+    }
+
     { std::ostringstream _ls; _ls << "[Bench-" << label << "] Testing " << deduped.size() << " configs";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
@@ -573,7 +596,7 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
     // Each chunk submits up to CHUNK_SIZE tasks, waits for completion,
     // then submits the next chunk. This prevents 500+ queued tasks from
     // starving other workers and causing resource exhaustion crashes.
-    constexpr size_t CHUNK_SIZE = 15;
+    const size_t CHUNK_SIZE = (hw.ram_percent >= 90.0f) ? 4 : (hw.ram_percent >= 80.0f ? 8 : 15);
     auto& mgr = HunterTaskManager::instance();
     std::vector<BenchResult> results;
 
@@ -1431,15 +1454,19 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
     int db_total = 0, db_alive = 0, db_tested = 0, db_untested = 0;
     float db_avg_lat = 0.0f;
     int db_total_tests = 0, db_total_passes = 0;
+    int db_stale = 0;
+    std::vector<std::pair<std::string, float>> healthy_configs;
     if (config_db_) {
         auto s = config_db_->getStats();
         db_total = s.total;
         db_alive = s.alive;
         db_tested = s.tested_unique;
         db_untested = s.untested_unique;
+        db_stale = s.stale_unique;
         db_avg_lat = s.avg_latency_ms;
         db_total_tests = s.total_tested;
         db_total_passes = s.total_passed;
+        healthy_configs = config_db_->getHealthyConfigs(200);
     }
 
     int bal_backends = 0;
@@ -1449,12 +1476,27 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
     }
 
     double uptime = utils::nowTimestamp() - start_time_;
+    int pending_unique = db_untested + db_stale;
+
+    std::ostringstream alive_json;
+    alive_json << "[";
+    bool alive_first = true;
+    for (auto& [uri, lat] : healthy_configs) {
+        if (!alive_first) alive_json << ",";
+        alive_first = false;
+        utils::JsonBuilder item;
+        item.add("uri", uri)
+            .add("latency_ms", lat);
+        alive_json << item.build();
+    }
+    alive_json << "]";
 
     utils::JsonBuilder dbj;
     dbj.add("total", db_total)
        .add("alive", db_alive)
        .add("tested_unique", db_tested)
        .add("untested_unique", db_untested)
+       .add("stale_unique", db_stale)
        .add("avg_latency_ms", db_avg_lat)
        .add("total_tests", db_total_tests)
        .add("total_passes", db_total_passes);
@@ -1469,8 +1511,11 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
         .add("phase", phase)
         .add("uptime_s", uptime)
         .add("balancer_backends", bal_backends)
+        .add("pending_unique", pending_unique)
+        .add("eta_seconds", 0.0)
         .addRaw("db", dbj.build())
-        .addRaw("validator", valj.build());
+        .addRaw("validator", valj.build())
+        .addRaw("alive_configs", alive_json.str());
 
     utils::saveJsonFile(status_path, root.build());
 }

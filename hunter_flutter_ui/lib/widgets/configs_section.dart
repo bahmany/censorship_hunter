@@ -63,10 +63,10 @@ class ConfigsSection extends StatelessWidget {
 
   String _kindLabel(HunterConfigListKind k) {
     return switch (k) {
-      HunterConfigListKind.alive => 'Alive (${_aliveConfigs.length})',
+      HunterConfigListKind.alive => 'Found (${_aliveConfigs.length})',
       HunterConfigListKind.silver => 'Silver (${silverConfigs.length})',
-      HunterConfigListKind.balancer => 'Balancer (${balancerConfigs.length})',
-      HunterConfigListKind.gemini => 'Gemini (${geminiConfigs.length})',
+      HunterConfigListKind.balancer => 'Live Xray (${balancerConfigs.length})',
+      HunterConfigListKind.gemini => 'Live Gemini (${geminiConfigs.length})',
       HunterConfigListKind.allCache => 'All Cache (${fmtNumber(allCacheConfigs.length)})',
       HunterConfigListKind.githubCache => 'GitHub (${fmtNumber(githubCacheConfigs.length)})',
     };

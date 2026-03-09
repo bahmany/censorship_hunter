@@ -65,7 +65,19 @@ struct ParsedConfig {
     std::string type;             // Header type (http, none)
     std::map<std::string, std::string> extra;  // Extra params
 
-    bool isValid() const { return !protocol.empty() && !address.empty() && port > 0; }
+    static bool hasBadChars_(const std::string& s) {
+        for (unsigned char c : s) {
+            if (c < 0x20 || c == '"' || c == '\\' || c == 0x7f) return true;
+        }
+        return false;
+    }
+    bool isValid() const {
+        if (protocol.empty() || address.empty() || port < 1 || port > 65535) return false;
+        if (hasBadChars_(address) || hasBadChars_(uuid) || hasBadChars_(sni) ||
+            hasBadChars_(host) || hasBadChars_(encryption)) return false;
+        if (address.size() > 253 || uuid.size() > 512) return false;
+        return true;
+    }
     bool isReality() const { return security == "reality"; }
     bool isTLS() const { return security == "tls"; }
     bool isCDN() const {

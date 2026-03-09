@@ -1,5 +1,5 @@
 enum HunterRunState { stopped, starting, running, stopping }
-enum HunterNavSection { dashboard, configs, logs, advanced, about }
+enum HunterNavSection { dashboard, configs, logs, docs, advanced, about }
 enum HunterConfigListKind { alive, silver, balancer, gemini, allCache, githubCache }
 
 class HunterLogLine {

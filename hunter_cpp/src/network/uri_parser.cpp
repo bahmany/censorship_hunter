@@ -100,6 +100,7 @@ std::optional<ParsedConfig> UriParser::parseVmess(const std::string& uri) {
     cfg.address = extractField("add");
     std::string port_str = extractField("port");
     try { cfg.port = std::stoi(port_str); } catch (...) { return std::nullopt; }
+    if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     cfg.uuid = extractField("id");
     cfg.encryption = extractField("scy");
     if (cfg.encryption.empty()) cfg.encryption = "auto";
@@ -113,7 +114,7 @@ std::optional<ParsedConfig> UriParser::parseVmess(const std::string& uri) {
     cfg.fingerprint = extractField("fp");
     if (cfg.ps.empty()) cfg.ps = extractField("ps");
 
-    if (cfg.address.empty() || cfg.port <= 0 || cfg.uuid.empty()) return std::nullopt;
+    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535 || cfg.uuid.empty()) return std::nullopt;
     return cfg;
 }
 
@@ -146,6 +147,7 @@ std::optional<ParsedConfig> UriParser::parseVless(const std::string& uri) {
     if (at_pos == std::string::npos) return std::nullopt;
     cfg.uuid = rest.substr(0, at_pos);
     std::string hostport = rest.substr(at_pos + 1);
+    if (hostport.empty()) return std::nullopt;
 
     // Handle IPv6 [host]:port
     if (hostport.front() == '[') {
@@ -157,6 +159,7 @@ std::optional<ParsedConfig> UriParser::parseVless(const std::string& uri) {
             // Remove trailing non-digits
             p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
             try { cfg.port = std::stoi(p); } catch (...) { return std::nullopt; }
+            if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
         }
     } else {
         auto colon = hostport.rfind(':');
@@ -165,6 +168,7 @@ std::optional<ParsedConfig> UriParser::parseVless(const std::string& uri) {
         std::string p = hostport.substr(colon + 1);
         p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
         try { cfg.port = std::stoi(p); } catch (...) { return std::nullopt; }
+        if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     }
 
     // Apply params
@@ -179,7 +183,7 @@ std::optional<ParsedConfig> UriParser::parseVless(const std::string& uri) {
     cfg.short_id = params.count("sid") ? params["sid"] : "";
     cfg.flow = params.count("flow") ? params["flow"] : "";
 
-    if (cfg.address.empty() || cfg.port <= 0) return std::nullopt;
+    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     return cfg;
 }
 
@@ -209,6 +213,7 @@ std::optional<ParsedConfig> UriParser::parseTrojan(const std::string& uri) {
     if (at_pos == std::string::npos) return std::nullopt;
     cfg.uuid = rest.substr(0, at_pos);
     std::string hostport = rest.substr(at_pos + 1);
+    if (hostport.empty()) return std::nullopt;
 
     auto colon = hostport.rfind(':');
     if (colon == std::string::npos) return std::nullopt;
@@ -216,6 +221,7 @@ std::optional<ParsedConfig> UriParser::parseTrojan(const std::string& uri) {
     std::string p = hostport.substr(colon + 1);
     p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
     try { cfg.port = std::stoi(p); } catch (...) { return std::nullopt; }
+    if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
 
     cfg.security = params.count("security") ? params["security"] : "tls";
     cfg.network = params.count("type") ? params["type"] : "tcp";
@@ -224,7 +230,7 @@ std::optional<ParsedConfig> UriParser::parseTrojan(const std::string& uri) {
     cfg.path = params.count("path") ? params["path"] : "";
     cfg.fingerprint = params.count("fp") ? params["fp"] : "";
 
-    if (cfg.address.empty() || cfg.port <= 0) return std::nullopt;
+    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     return cfg;
 }
 
@@ -249,6 +255,7 @@ std::optional<ParsedConfig> UriParser::parseShadowsocks(const std::string& uri) 
         // Format: base64(method:password)@host:port
         std::string userinfo = utils::base64Decode(rest.substr(0, at_pos));
         std::string hostport = rest.substr(at_pos + 1);
+        if (hostport.empty()) return std::nullopt;
 
         auto colon = userinfo.find(':');
         if (colon != std::string::npos) {
@@ -282,7 +289,7 @@ std::optional<ParsedConfig> UriParser::parseShadowsocks(const std::string& uri) 
         }
     }
 
-    if (cfg.address.empty() || cfg.port <= 0) return std::nullopt;
+    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     return cfg;
 }
 
@@ -323,6 +330,7 @@ std::optional<ParsedConfig> UriParser::parseHysteria2(const std::string& uri) {
         std::string p = rest.substr(colon + 1);
         p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
         try { cfg.port = std::stoi(p); } catch (...) {}
+        if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     } else {
         cfg.address = rest;
         cfg.port = 443;
@@ -331,7 +339,7 @@ std::optional<ParsedConfig> UriParser::parseHysteria2(const std::string& uri) {
     cfg.sni = params.count("sni") ? params["sni"] : "";
     cfg.security = "tls";
 
-    if (cfg.address.empty() || cfg.port <= 0) return std::nullopt;
+    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     return cfg;
 }
 
@@ -376,12 +384,13 @@ std::optional<ParsedConfig> UriParser::parseTuic(const std::string& uri) {
         std::string p = rest.substr(colon + 1);
         p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
         try { cfg.port = std::stoi(p); } catch (...) {}
+        if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     }
 
     cfg.sni = params.count("sni") ? params["sni"] : "";
     cfg.security = "tls";
 
-    if (cfg.address.empty() || cfg.port <= 0) return std::nullopt;
+    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
     return cfg;
 }
 

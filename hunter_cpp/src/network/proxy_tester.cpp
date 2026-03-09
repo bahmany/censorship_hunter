@@ -33,7 +33,7 @@ namespace network {
 
 // Limit concurrent XRay processes to prevent resource exhaustion
 static std::atomic<int> s_active_tests{0};
-static const int MAX_CONCURRENT_TESTS = 10;
+static const int MAX_CONCURRENT_TESTS = 20;
 static std::mutex s_port_mutex;
 
 ProxyTester::ProxyTester() {
@@ -204,6 +204,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     si.hStdInput = NULL;
     
     std::string cmd = xray_path_ + " run -c " + temp_config;
+    TLOG("  [Test:" << test_port << "] Starting xray: " << cmd);
     char cmd_buf[4096];
     strncpy(cmd_buf, cmd.c_str(), sizeof(cmd_buf) - 1);
     cmd_buf[sizeof(cmd_buf) - 1] = 0;
@@ -265,12 +266,14 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     // Tier 1: HTTP 204 tests (fast, no TLS overhead, hard to DPI-block)
     float speed = -1.0f;
     for (int t = 0; t < 3 && speed <= 0.0f; t++) {
-        speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", test_port, 10);
+        TLOG("  [Test:" << test_port << "] curl --socks5-hostname 127.0.0.1:" << test_port << " --max-time 3 " << TEST_URLS[t]);
+        speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", test_port, 3);
     }
     
     // Tier 2: HTTPS download test (slower but measures real speed)
     if (speed <= 0.0f) {
-        speed = utils::downloadSpeedViaSocks5(TEST_URLS[3], "127.0.0.1", test_port, timeout_seconds);
+        TLOG("  [Test:" << test_port << "] curl --socks5-hostname 127.0.0.1:" << test_port << " --max-time 5 " << TEST_URLS[3]);
+        speed = utils::downloadSpeedViaSocks5(TEST_URLS[3], "127.0.0.1", test_port, 5);
     }
     
     // Tier 3: Telegram DC connectivity test (proves proxy works even if HTTP is DPI-blocked)

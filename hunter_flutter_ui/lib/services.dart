@@ -90,6 +90,66 @@ Future<int> loadBundledConfigsCount() async {
   return count;
 }
 
+class ProjectDocFile {
+  const ProjectDocFile({
+    required this.name,
+    required this.absPath,
+    required this.sizeBytes,
+    required this.modifiedAt,
+  });
+
+  final String name;
+  final String absPath;
+  final int sizeBytes;
+  final DateTime modifiedAt;
+}
+
+Future<List<ProjectDocFile>> listProjectDocs(String docsDir) async {
+  final Directory dir = Directory(docsDir);
+  if (!dir.existsSync()) return const <ProjectDocFile>[];
+  final List<ProjectDocFile> out = <ProjectDocFile>[];
+  try {
+    await for (final FileSystemEntity entity in dir.list(followLinks: false)) {
+      if (entity is! File) continue;
+      final String lower = entity.path.toLowerCase();
+      if (!lower.endsWith('.md') && !lower.endsWith('.txt')) continue;
+      final FileStat stat = await entity.stat();
+      out.add(ProjectDocFile(
+        name: entity.uri.pathSegments.isNotEmpty ? entity.uri.pathSegments.last : entity.path.split('\\').last,
+        absPath: entity.path,
+        sizeBytes: stat.size,
+        modifiedAt: stat.modified,
+      ));
+    }
+    out.sort((ProjectDocFile a, ProjectDocFile b) {
+      int rank(String name) {
+        final String lower = name.toLowerCase();
+        if (lower.contains('architecture')) return 0;
+        if (lower.contains('guide') || lower.contains('setup')) return 1;
+        if (lower.contains('report') || lower.contains('summary')) return 2;
+        return 3;
+      }
+
+      final int byRank = rank(a.name).compareTo(rank(b.name));
+      if (byRank != 0) return byRank;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+  } catch (_) {
+    return const <ProjectDocFile>[];
+  }
+  return out;
+}
+
+Future<String> readProjectDoc(String absPath) async {
+  final File file = File(absPath);
+  if (!file.existsSync()) return '';
+  try {
+    return stripAnsi(await file.readAsString()).replaceFirst('\uFEFF', '');
+  } catch (_) {
+    return '';
+  }
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Working dir resolution
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -218,6 +278,35 @@ Future<RuntimeSnapshot> loadRuntimeSnapshot(String runtimeDir) async {
         final dynamic h = decoded['history'];
         if (h is List) {
           s.history = h.whereType<Map<String, dynamic>>().toList();
+        }
+        final dynamic aliveRaw = decoded['alive_configs'];
+        if (aliveRaw is List) {
+          final List<String> fallbackUris = <String>[];
+          final List<HunterLatencyConfig> fallbackLatency = <HunterLatencyConfig>[];
+          final Set<String> seen = <String>{};
+          for (final dynamic row in aliveRaw) {
+            if (row is! Map) continue;
+            final dynamic uriRaw = row['uri'];
+            if (uriRaw is! String) continue;
+            final String uri = uriRaw.trim();
+            if (uri.isEmpty || !seen.add(uri)) continue;
+            final dynamic latencyRaw = row['latency_ms'];
+            final double? latency = switch (latencyRaw) {
+              num v => v.toDouble(),
+              String s => double.tryParse(s),
+              _ => null,
+            };
+            fallbackUris.add(uri);
+            fallbackLatency.add(HunterLatencyConfig(uri: uri, latencyMs: latency));
+          }
+          if (fallbackUris.isNotEmpty) {
+            if (s.goldConfigs.isEmpty && s.silverConfigs.isEmpty) {
+              s.goldConfigs = fallbackUris;
+            }
+            if (s.balancerConfigs.isEmpty) {
+              s.balancerConfigs = fallbackLatency;
+            }
+          }
         }
       }
     }

@@ -23,8 +23,8 @@ void HunterConfig::setDefaults() {
     data_["sleep_seconds"] = "300";
     data_["telegram_limit"] = "50";
     data_["state_file"] = "runtime/hunter_state.json";
-    data_["gold_file"] = "runtime/gold.txt";
-    data_["silver_file"] = "runtime/silver.txt";
+    data_["gold_file"] = "runtime/HUNTER_gold.txt";
+    data_["silver_file"] = "runtime/HUNTER_silver.txt";
     data_["xray_path"] = "xray.exe";
 }
 

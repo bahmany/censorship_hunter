@@ -131,6 +131,7 @@ private:
     void serverLoop();
     void healthMonitorLoop();
     void refreshBackends();
+    void refreshBackends_unlocked();
     bool startXRayProcess(const std::string& uri, int socks_port);
     void stopXRayProcess(int pid);
     std::string generateXRayConfig(const std::string& uri, int socks_port) const;

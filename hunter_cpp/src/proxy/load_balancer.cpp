@@ -138,7 +138,10 @@ std::vector<Backend> MultiProxyServer::getWorkingBackends() const {
 
 void MultiProxyServer::refreshBackends() {
     std::lock_guard<std::mutex> lock(backends_mutex_);
+    refreshBackends_unlocked();
+}
 
+void MultiProxyServer::refreshBackends_unlocked() {
     // Sort available configs by latency
     auto sorted = available_configs_;
     std::sort(sorted.begin(), sorted.end(),
@@ -162,15 +165,26 @@ void MultiProxyServer::healthMonitorLoop() {
         std::this_thread::sleep_for(std::chrono::seconds(60));
         if (!running_.load()) break;
 
+        // Check port OUTSIDE the lock (isPortAlive blocks up to 2s)
+        bool port_ok = utils::isPortAlive(port_, 2000);
+
         std::lock_guard<std::mutex> lock(backends_mutex_);
-        // Simple health check: verify SOCKS port responds
-        if (!utils::isPortAlive(port_, 2000)) {
-            // Port not responding — try to refresh
-            refreshBackends();
+        if (!port_ok) {
+            // Port not responding — try to refresh (unlocked version since we hold the lock)
+            refreshBackends_unlocked();
         }
 
         if (status_callback_) {
-            status_callback_(getStatus());
+            BalancerStatus s;
+            s.port = port_;
+            s.running = running_.load();
+            s.backend_count = (int)backends_.size();
+            s.forced_uri = forced_uri_;
+            s.backends = backends_;
+            for (auto& b : s.backends) {
+                if (b.state == BackendState::HEALTHY) s.healthy_count++;
+            }
+            status_callback_(s);
         }
     }
 }
