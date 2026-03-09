@@ -1,0 +1,172 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="*" 
+           Name="Hunter Anti-Censorship Dashboard" 
+           Language="1033" 
+           Version="1.0.0.0" 
+           Manufacturer="Hunter Project" 
+           UpgradeCode="12345678-1234-5678-9ABC-123456789012">
+    
+    <Package InstallerVersion="200" 
+             Compressed="yes" 
+             InstallScope="perMachine" 
+             Description="Hunter Anti-Censorship Dashboard with built-in proxy testing" />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- Major upgrade to handle version changes -->
+    <MajorUpgrade DowngradeErrorMessage="A newer version of Hunter is already installed." />
+
+    <!-- Features -->
+    <Feature Id="ProductFeature" Title="Hunter Dashboard" Level="1">
+      <ComponentGroupRef Id="DashboardComponents" />
+      <ComponentGroupRef Id="CLIComponents" />
+      <ComponentGroupRef Id="ProxyEngines" />
+      <ComponentGroupRef Id="ConfigFiles" />
+      <ComponentRef Id="VCRedist" />
+      <ComponentRef Id="Shortcuts" />
+    </Feature>
+
+    <!-- Directory structure -->
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="ProgramFilesFolder">
+        <Directory Id="INSTALLFOLDER" Name="Hunter">
+          
+          <!-- Dashboard executable -->
+          <Component Id="DashboardComponents" Guid="*">
+            <File Id="HunterDashboardExe" 
+                  Source="..\hunter_flutter_ui\build\windows\x64\runner\Release\hunter_dashboard.exe" 
+                  KeyPath="yes" />
+            <File Id="DashboardData" 
+                  Source="..\hunter_flutter_ui\build\windows\x64\runner\Release\data" />
+          </Component>
+
+          <!-- CLI and dependencies -->
+          <Component Id="CLIComponents" Guid="*">
+            <File Id="HunterCliExe" 
+                  Source="..\bin\hunter_cli.exe" />
+            <File Id="LibCrypto" 
+                  Source="..\bin\libcrypto-3-x64.dll" />
+            <File Id="LibSSL" 
+                  Source="..\bin\libssl-3-x64.dll" />
+            <File Id="LibCurl" 
+                  Source="..\bin\libcurl-4.dll" />
+            <File Id="LibZstd" 
+                  Source="..\bin\libzstd.dll" />
+            <File Id="Zlib1" 
+                  Source="..\bin\zlib1.dll" />
+            <File Id="LibSSH2" 
+                  Source="..\bin\libssh2-1.dll" />
+            <File Id="LibNgHTTP2" 
+                  Source="..\bin\libnghttp2-14.dll" />
+            <File Id="LibNgHTTP3" 
+                  Source="..\bin\libnghttp3-9.dll" />
+            <File Id="LibPSL" 
+                  Source="..\bin\libpsl-5.dll" />
+            <File Id="LibIDN2" 
+                  Source="..\bin\libidn2-0.dll" />
+            <File Id="LibBrotliDec" 
+                  Source="..\bin\libbrotlidec.dll" />
+          </Component>
+
+          <!-- Proxy engines -->
+          <Component Id="ProxyEngines" Guid="*">
+            <File Id="XRayExe" 
+                  Source="..\bin\xray.exe" />
+            <File Id="SingBoxExe" 
+                  Source="..\bin\sing-box.exe" />
+            <File Id="MihomoExe" 
+                  Source="..\bin\mihomo-windows-amd64-compatible.exe" />
+            <File Id="TorExe" 
+                  Source="..\bin\tor.exe" />
+          </Component>
+
+          <!-- Configuration files -->
+          <Component Id="ConfigFiles" Guid="*">
+            <File Id="AllConfigsSub" 
+                  Source="..\config\All_Configs_Sub.txt" />
+            <File Id="AllExtractedConfigs" 
+                  Source="..\config\all_extracted_configs.txt" />
+            <File Id="SubConfigs" 
+                  Source="..\config\sub.txt" />
+          </Component>
+
+          <!-- Runtime directory -->
+          <Directory Id="RUNTIMEFOLDER" Name="runtime" />
+        </Directory>
+      </Directory>
+
+      <!-- Start Menu shortcuts -->
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="ApplicationProgramsFolder" Name="Hunter"/>
+      </Directory>
+    </Directory>
+
+    <!-- Visual C++ Redistributable -->
+    <Component Id="VCRedist" Guid="*">
+      <Condition>NOT VCREDIST_INSTALLED</Condition>
+      <File Id="VCRedistExe" 
+            Source="vc_redist.x64.exe" 
+            KeyPath="yes" />
+      <CustomAction Id="InstallVCRedist" 
+                  FileKey="VCRedistExe" 
+                  ExeCommand="/quiet" 
+                  Return="ignore" />
+      <InstallExecuteSequence>
+        <Custom Action="InstallVCRedist" 
+                 Before="InstallFinalize">NOT Installed</Custom>
+      </InstallExecuteSequence>
+      <Property Id="VCREDIST_INSTALLED">
+        <RegistrySearch Id="VCRedistSearch" 
+                      Root="HKLM" 
+                      Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{DA5E371C-6333-3D8A-A1CE-1C3B849911EF}" 
+                      Name="Version" 
+                      Type="raw" />
+      </Property>
+    </Component>
+
+    <!-- Desktop and Start Menu shortcuts -->
+    <Component Id="Shortcuts" Guid="*">
+      <Shortcut Id="DesktopShortcut" 
+                Directory="DesktopFolder" 
+                Name="Hunter Dashboard" 
+                Target="[#HunterDashboardExe]" 
+                WorkingDirectory="INSTALLFOLDER" 
+                Icon="HunterIcon.ico" />
+      
+      <Shortcut Id="StartMenuShortcut" 
+                Directory="ApplicationProgramsFolder" 
+                Name="Hunter Dashboard" 
+                Target="[#HunterDashboardExe]" 
+                WorkingDirectory="INSTALLFOLDER" 
+                Icon="HunterIcon.ico" />
+      
+      <RemoveFolder Id="ApplicationProgramsFolder" 
+                    On="uninstall" />
+      <RegistryValue Root="HKCU" 
+                     Key="Software\Microsoft\HunterDashboard" 
+                     Name="installed" 
+                     Type="integer" 
+                     Value="1" 
+                     KeyPath="yes" />
+    </Component>
+
+    <!-- Icon -->
+    <Icon Id="HunterIcon.ico" SourceFile="hunter_icon.ico" />
+
+    <!-- Properties -->
+    <Property Id="WIXUI_INSTALLDIR" Value="INSTALLFOLDER" />
+    <Property Id="ARPPRODUCTICON" Value="HunterIcon.ico" />
+    
+    <!-- UI Configuration -->
+    <UIRef Id="WixUI_InstallDir" />
+    
+    <!-- License agreement -->
+    <WixVariable Id="WixUILicenseRtf" Value="license.rtf" />
+    
+    <!-- Banner images -->
+    <WixVariable Id="WixUIBannerBmp" Value="banner.bmp" />
+    <WixVariable Id="WixUIDialogBmp" Value="dialog.bmp" />
+
+  </Product>
+</Wix>
