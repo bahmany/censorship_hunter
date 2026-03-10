@@ -1,13 +1,15 @@
 <div align="center">
 
-# 🏹 Hunter — Autonomous Proxy Hunting System
+# 🏹 Hunter — Complete Anti-Censorship Solution
 
-**Advanced V2Ray proxy discovery, testing, and load balancing for bypassing internet censorship**
+**v1.0.0 Released! Modern Flutter UI + High-Performance C++ Backend**
 
-[![Python](https://img.shields.io/badge/Python-3.8+-blue.svg?logo=python&logoColor=white)](https://www.python.org/)
+[![Release](https://img.shields.io/badge/Release-v1.0.0-blue.svg)](https://github.com/bahmany/censorship_hunter/releases/tag/v1.0.0)
+[![Download](https://img.shields.io/badge/Download-64.55%20MB-green.svg)](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-lightgrey.svg)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux%20%7C%20macOS%20%7C%20Android-lightgrey.svg)](https://github.com/yourusername/hunter)
-[![Telegram](https://img.shields.io/badge/Telegram-Channel-blue.svg?logo=telegram)](https://t.me/your_channel)
+
+**📦 [Download Hunter v1.0.0](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (64.55 MB, Self-Contained, No Dependencies)**
 
 **[English](#english) | [فارسی](#persian-farsi)**
 
@@ -15,10 +17,44 @@
 
 ---
 
+## 🎯 What's New in v1.0.0
+
+### 🖥️ Modern Flutter UI
+- **Dark Racing Neon Theme** - Professional interface with stunning visual design
+- **Real-time Dashboard** - Live monitoring of configs, speeds, and system status  
+- **QR Code Generation** - Seamless mobile device integration
+- **System Tray Integration** - Minimize to tray with context menu
+- **Single Instance Lock** - Prevents multiple instances
+
+### ⚡ High-Performance C++ Backend
+- **Multi-threaded Architecture** - Optimized for concurrent operations
+- **Smart Caching System** - Intelligent configuration prioritization
+- **Continuous Validation** - Background testing with automatic failover
+- **Memory Efficient** - Handles 150K+ configurations with automatic cleanup
+
+### 📦 Self-Contained Package
+- **Zero Dependencies** - Everything bundled, no installation required
+- **Portable** - Works from any directory, just extract and run
+- **Complete** - Includes all proxy engines, libraries, and documentation
+- **Tested** - Verified in multiple isolated environments
+
+---
+
 <a name="english"></a>
 ## 🇬🇧 English
 
-### 🌟 What is Hunter?
+### 🚀 Quick Start (Windows)
+
+#### Option 1: Download Pre-built Executable (Recommended)
+
+1. **Download**: [Hunter-v1.0.0-Final.zip](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (64.55 MB)
+2. **Extract** to any folder (e.g., `C:\Hunter\`)
+3. **Run** `hunter_dashboard.exe`
+4. **Click START** to begin config discovery
+
+**System Requirements**: Windows 10/11 x64, 4GB+ RAM recommended
+
+#### Option 2: Python Version (Advanced Users)
 
 Hunter is an **autonomous, production-grade proxy hunting system** designed for users in heavily censored regions (Iran, China, Russia, etc.). It continuously:
 
@@ -39,9 +75,29 @@ Hunter is an **autonomous, production-grade proxy hunting system** designed for 
 | **📊 Web Dashboard** | Real-time monitoring at `http://localhost:8585` |
 | **📱 Android App** | Native VPN app with full feature parity |
 | **🧠 Adaptive Intelligence** | DPI-aware config prioritization, memory-safe chunking, circuit breakers |
+| **🎨 Modern UI** | Flutter-based dashboard with Racing Neon theme |
 
 ### 🏗️ Architecture Overview
 
+#### v1.0.0 Windows Package Structure
+```
+Hunter/
+├── hunter_dashboard.exe     # Flutter UI - Main application entry point
+├── hunter_cli.exe           # C++ Backend - Core engine (in bin/)
+├── bin/                     # Proxy engines and backend
+│   ├── hunter_cli.exe       # C++ orchestrator
+│   ├── xray.exe             # XRay Core proxy engine
+│   ├── sing-box.exe         # Sing-box universal proxy
+│   ├── mihomo-windows-amd64-compatible.exe  # Mihomo/Clash core
+│   └── tor.exe              # Tor network support
+├── data/                    # Flutter AOT compiled assets
+├── config/                  # Configuration files and seed configs
+├── docs/                    # Comprehensive documentation (27 files)
+├── runtime/                 # Runtime cache and temporary files
+└── [All DLLs bundled]       # Complete dependencies included
+```
+
+#### System Architecture
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         Hunter System                          │
@@ -80,26 +136,33 @@ Hunter is an **autonomous, production-grade proxy hunting system** designed for 
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 📦 Quick Start
+### 📦 Installation
 
-#### Prerequisites
-- Python 3.8+
-- At least one proxy engine binary in `bin/`:
-  - [XRay Core](https://github.com/XTLS/Xray-core/releases)
-  - [Sing-box](https://github.com/SagerNet/sing-box/releases)
-  - [Mihomo (Clash Meta)](https://github.com/MetaCubeX/mihomo/releases)
+#### Option 1: Windows Executable (Recommended for v1.0.0)
 
-#### Installation
+**Prerequisites**: Windows 10/11 x64, 4GB+ RAM
+
+1. **Download**: [Hunter-v1.0.0-Final.zip](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (64.55 MB)
+2. **Extract** to any folder (e.g., `C:\Hunter\` or `D:\Tools\Hunter\`)
+3. **Run** `hunter_dashboard.exe`
+4. **Configure** Telegram settings in the UI (optional)
+5. **Click START** to begin config discovery
+
+**That's it!** No Python, no dependencies, no installation. Fully portable.
+
+#### Option 2: Python Version (Advanced Users / Developers)
+
+**Prerequisites**: Python 3.8+
 
 ```bash
 # 1. Clone repository
-git clone https://github.com/yourusername/hunter.git
+git clone https://github.com/bahmany/censorship_hunter.git
 cd hunter
 
 # 2. Create virtual environment
 python -m venv .venv
-source .venv/bin/activate  # Linux/macOS
-# .venv\Scripts\activate   # Windows
+# Windows: .venv\Scripts\activate
+# Linux/macOS: source .venv/bin/activate
 
 # 3. Install dependencies
 pip install -r requirements.txt
@@ -107,21 +170,14 @@ pip install -r requirements.txt
 # 4. Configure environment
 cp .env.example .env
 # Edit .env with your Telegram API credentials
-```
 
-#### Run
-
-```bash
-# Windows
-run.bat
-
-# Any platform
+# 5. Run
 python main.py
 ```
 
 The load balancer starts on `127.0.0.1:10808` (SOCKS5).
 
-### ⚙️ Configuration
+### ⚙️ Configuration (Python Version)
 
 #### Required Variables
 
@@ -445,51 +501,50 @@ The dashboard prints every 15 seconds in the console showing uptime, DB size, al
 | **📊 داشبورد وب** | مانیتورینگ لحظه‌ای در `http://localhost:8585` |
 | **📱 اپلیکیشن اندروید** | VPN-native با تمام قابلیت‌ها |
 | **🧠 هوش تطبیقی** | اولویت‌بندی بر اساس DPI، chunking حافظه‌ایمن، circuit breaker |
+| **🎨 رابط کاربری مدرن** | داشبورد مبتنی بر Flutter با تم Racing Neon |
 
 ### 📦 راه‌اندازی سریع
 
-#### پیش‌نیازها
-- Python 3.8+
-- حداقل یکی از باینری‌های موتور پروکسی در `bin/`:
-  - [XRay Core](https://github.com/XTLS/Xray-core/releases)
-  - [Sing-box](https://github.com/SagerNet/sing-box/releases)
-  - [Mihomo (Clash Meta)](https://github.com/MetaCubeX/mihomo/releases)
+#### گزینه ۱: نسخه اجرایی ویندوز (توصیه شده برای v1.0.0)
 
-#### نصب
+**پیش‌نیازها**: ویندوز ۱۰/۱۱ x64، ۴ گیگابایت رم یا بیشتر
+
+۱. **دانلود**: [Hunter-v1.0.0-Final.zip](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (۶۴.۵۵ مگابایت)
+۲. **استخراج** در هر پوشه‌ای (مثلاً `C:\Hunter\` یا `D:\Tools\Hunter\`)
+۳. **اجرا**ی `hunter_dashboard.exe`
+۴. **تنظیم** تلگرام در رابط کاربری (اختیاری)
+۵. **کلیک** روی START برای شروع کشف کانفیگ
+
+**تمام!** بدون پایتون، بدون وابستگی، بدون نصب. کاملاً portable.
+
+#### گزینه ۲: نسخه پایتون (کاربران پیشرفته / توسعه‌دهندگان)
+
+**پیش‌نیازها**: پایتون ۳.۸+
 
 ```bash
-# 1. کلون کردن مخزن
-git clone https://github.com/yourusername/hunter.git
+# ۱. کلون کردن مخزن
+git clone https://github.com/bahmany/censorship_hunter.git
 cd hunter
 
-# 2. ساخت محیط مجازی
+# ۲. ساخت محیط مجازی
 python -m venv .venv
-# ویندوز:
-.venv\Scripts\activate
-# لینوکس/مک:
-source .venv/bin/activate
+# ویندوز: .venv\Scripts\activate
+# لینوکس/مک: source .venv/bin/activate
 
-# 3. نصب وابستگی‌ها
+# ۳. نصب وابستگی‌ها
 pip install -r requirements.txt
 
-# 4. پیکربندی
+# ۴. پیکربندی
 # فایل .env.example را به .env کپی کنید
 # مقادیر API تلگرام را از my.telegram.org دریافت کنید
-```
 
-#### اجرا
-
-```bash
-# ویندوز
-run.bat
-
-# همه پلتفرم‌ها
+# ۵. اجرا
 python main.py
 ```
 
-بالانسر روی `127.0.0.1:10808` (SOCKS5) راه‌اندازی می‌شود.
+بالانسر روی `۱۲۷.۰.۰.۱:۱۰۸۰۸` (SOCKS5) راه‌اندازی می‌شود.
 
-### ⚙️ پیکربندی
+### ⚙️ پیکربندی (نسخه پایتون)
 
 #### متغیرهای ضروری
 
