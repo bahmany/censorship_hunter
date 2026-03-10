@@ -24,6 +24,31 @@ class DashboardSection extends StatelessWidget {
     required this.onNavigate,
     required this.onCopyText,
     required this.onCopyLines,
+    this.provisionedPorts = const <Map<String, dynamic>>[],
+    this.balancers = const <Map<String, dynamic>>[],
+    this.activeSystemProxyPort,
+    this.onSetSystemProxy,
+    this.onClearSystemProxy,
+    this.isPaused = false,
+    this.onTogglePause,
+    this.speedProfile = 'medium',
+    this.speedThreads = 10,
+    this.speedTimeout = 5,
+    this.draftSpeedProfile = 'medium',
+    this.draftSpeedThreads = 10,
+    this.draftSpeedTimeout = 5,
+    this.hasPendingSpeedChanges = false,
+    this.speedApplyInFlight = false,
+    this.projectedScanDuration,
+    this.onSpeedProfile,
+    this.onThreadsChanged,
+    this.onTimeoutChanged,
+    this.onApplySpeedChanges,
+    this.clearAgeHours = 168,
+    this.onClearAgeChanged,
+    this.onClearOldConfigs,
+    this.manualConfigCtl,
+    this.onAddManualConfigs,
   });
 
   final Map<String, dynamic>? status;
@@ -44,6 +69,31 @@ class DashboardSection extends StatelessWidget {
   final void Function(HunterNavSection, {HunterConfigListKind? kind}) onNavigate;
   final Future<void> Function(String text, {String? label}) onCopyText;
   final Future<void> Function(List<String> lines, {String? label}) onCopyLines;
+  final List<Map<String, dynamic>> provisionedPorts;
+  final List<Map<String, dynamic>> balancers;
+  final int? activeSystemProxyPort;
+  final Future<void> Function(int port)? onSetSystemProxy;
+  final VoidCallback? onClearSystemProxy;
+  final bool isPaused;
+  final VoidCallback? onTogglePause;
+  final String speedProfile;
+  final int speedThreads;
+  final int speedTimeout;
+  final String draftSpeedProfile;
+  final int draftSpeedThreads;
+  final int draftSpeedTimeout;
+  final bool hasPendingSpeedChanges;
+  final bool speedApplyInFlight;
+  final Duration? projectedScanDuration;
+  final void Function(String)? onSpeedProfile;
+  final void Function(int)? onThreadsChanged;
+  final void Function(int)? onTimeoutChanged;
+  final VoidCallback? onApplySpeedChanges;
+  final int clearAgeHours;
+  final void Function(int)? onClearAgeChanged;
+  final VoidCallback? onClearOldConfigs;
+  final TextEditingController? manualConfigCtl;
+  final VoidCallback? onAddManualConfigs;
 
   @override
   Widget build(BuildContext context) {
@@ -83,6 +133,17 @@ class DashboardSection extends StatelessWidget {
           // ── Progress ──
           _buildProgress(context, dbTotal, dbTested, eta, isRunning, isLive),
           const SizedBox(height: 16),
+          // ── Pause + Speed Controls ──
+          _buildControlsSection(context, isRunning),
+          const SizedBox(height: 16),
+          // ── Maintenance: clear old + manual add ──
+          _buildMaintenanceSection(context, isRunning),
+          const SizedBox(height: 16),
+          // ── Active Proxy Ports (balancers + provisioned) ──
+          if (provisionedPorts.isNotEmpty || balancers.isNotEmpty)
+            _buildProvisionedPorts(context),
+          if (provisionedPorts.isNotEmpty || balancers.isNotEmpty)
+            const SizedBox(height: 16),
           // ── Live configs preview ──
           if (allAlive.isNotEmpty || balancerConfigs.isNotEmpty)
             _buildConfigPreview(context, allAlive, isRunning),
@@ -378,6 +439,211 @@ class DashboardSection extends StatelessWidget {
   }
 
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // ACTIVE PROXY PORTS — balancers + provisioned with system proxy
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Widget _buildProvisionedPorts(BuildContext context) {
+    final int aliveCount = provisionedPorts.where((Map<String, dynamic> p) => p['alive'] == true).length;
+    final int balAlive = balancers.where((Map<String, dynamic> b) => b['running'] == true).length;
+    final bool hasProxy = activeSystemProxyPort != null;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: C.card,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: C.neonPurple.withValues(alpha: 0.25)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          // ── Header row ──
+          Row(
+            children: <Widget>[
+              const Icon(Icons.dns, color: C.neonPurple, size: 18),
+              const SizedBox(width: 8),
+              const Text('ACTIVE PORTS', style: TextStyle(color: C.txt3, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 1.2)),
+              const SizedBox(width: 8),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                decoration: BoxDecoration(
+                  color: (balAlive + aliveCount) > 0 ? C.neonGreen.withValues(alpha: 0.12) : C.neonRed.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(20),
+                ),
+                child: Text(
+                  '${balAlive + aliveCount} ALIVE',
+                  style: TextStyle(color: (balAlive + aliveCount) > 0 ? C.neonGreen : C.neonRed, fontSize: 9, fontWeight: FontWeight.w700),
+                ),
+              ),
+              const Spacer(),
+              if (hasProxy)
+                InkWell(
+                  onTap: onClearSystemProxy,
+                  borderRadius: BorderRadius.circular(6),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: C.neonRed.withValues(alpha: 0.12),
+                      borderRadius: BorderRadius.circular(6),
+                      border: Border.all(color: C.neonRed.withValues(alpha: 0.3)),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: <Widget>[
+                      const Icon(Icons.link_off, color: C.neonRed, size: 12),
+                      const SizedBox(width: 4),
+                      Text('CLEAR PROXY :$activeSystemProxyPort', style: const TextStyle(color: C.neonRed, fontSize: 9, fontWeight: FontWeight.w700)),
+                    ]),
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+
+          // ── Balancer ports ──
+          ...balancers.map((Map<String, dynamic> b) {
+            final int port = (b['port'] is num) ? (b['port'] as num).toInt() : 0;
+            final String type = (b['type'] is String) ? (b['type'] as String).toUpperCase() : '?';
+            final bool running = b['running'] == true;
+            final int backends = (b['backends'] is num) ? (b['backends'] as num).toInt() : 0;
+            final int healthy = (b['healthy'] is num) ? (b['healthy'] as num).toInt() : 0;
+            final bool isActive = activeSystemProxyPort == port;
+            return _buildPortRow(
+              port: port,
+              label: '$type BALANCER',
+              alive: running,
+              detail: '$healthy/$backends backends',
+              isSystemProxy: isActive,
+              onSetProxy: running && onSetSystemProxy != null ? () => onSetSystemProxy!(port) : null,
+              onCopy: () => onCopyText('socks5://127.0.0.1:$port', label: 'Copied SOCKS5 :$port'),
+              badgeColor: C.neonCyan,
+            );
+          }),
+
+          if (balancers.isNotEmpty && provisionedPorts.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(children: <Widget>[
+                Expanded(child: Divider(color: C.border.withValues(alpha: 0.5), height: 1)),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  child: Text('INDIVIDUAL PROXIES', style: TextStyle(color: C.txt3.withValues(alpha: 0.5), fontSize: 8, fontWeight: FontWeight.w600, letterSpacing: 1)),
+                ),
+                Expanded(child: Divider(color: C.border.withValues(alpha: 0.5), height: 1)),
+              ]),
+            ),
+
+          // ── Provisioned proxy ports ──
+          ...provisionedPorts.map((Map<String, dynamic> p) {
+            final int port = (p['port'] is num) ? (p['port'] as num).toInt() : 0;
+            final String uri = (p['uri'] is String) ? p['uri'] as String : '';
+            final bool alive = p['alive'] == true;
+            final double latency = (p['latency_ms'] is num) ? (p['latency_ms'] as num).toDouble() : 0.0;
+            final int failures = (p['consecutive_failures'] is num) ? (p['consecutive_failures'] as num).toInt() : 0;
+            final String proto = uri.contains('://') ? uri.split('://').first.toUpperCase() : '?';
+            final bool isActive = activeSystemProxyPort == port;
+            return _buildPortRow(
+              port: port,
+              label: proto,
+              alive: alive,
+              detail: latency > 0 ? '${latency.toStringAsFixed(0)}ms' : (failures > 0 ? '×$failures' : '--'),
+              isSystemProxy: isActive,
+              onSetProxy: alive && onSetSystemProxy != null ? () => onSetSystemProxy!(port) : null,
+              onCopy: () => onCopyText('socks5://127.0.0.1:$port', label: 'Copied SOCKS5 :$port'),
+              badgeColor: _protoColor(proto),
+              uri: uri,
+            );
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPortRow({
+    required int port,
+    required String label,
+    required bool alive,
+    required String detail,
+    required bool isSystemProxy,
+    VoidCallback? onSetProxy,
+    required VoidCallback onCopy,
+    required Color badgeColor,
+    String uri = '',
+  }) {
+    final Color statusColor = alive ? C.neonGreen : C.neonRed;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 3),
+      child: Row(
+        children: <Widget>[
+          // Status dot
+          Container(
+            width: 8, height: 8,
+            decoration: BoxDecoration(
+              color: statusColor, shape: BoxShape.circle,
+              boxShadow: alive ? <BoxShadow>[BoxShadow(color: statusColor.withValues(alpha: 0.4), blurRadius: 4)] : null,
+            ),
+          ),
+          const SizedBox(width: 8),
+          // Port
+          SizedBox(
+            width: 46,
+            child: Text(':$port', style: TextStyle(color: alive ? C.neonCyan : C.txt3, fontSize: 12, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+          ),
+          // Badge
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+            decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(3)),
+            child: Text(label, style: TextStyle(color: badgeColor, fontSize: 9, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+          ),
+          const SizedBox(width: 6),
+          // Detail (latency or backends)
+          SizedBox(
+            width: 70,
+            child: Text(detail, style: TextStyle(color: alive ? C.neonGreen : C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+          ),
+          // URI (only for provisioned)
+          if (uri.isNotEmpty)
+            Expanded(child: Text(uri, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: alive ? C.txt2 : C.txt3, fontSize: 9, fontFamily: 'Consolas')))
+          else
+            const Spacer(),
+          // System proxy indicator or button
+          if (isSystemProxy)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+              decoration: BoxDecoration(
+                color: C.neonGreen.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: C.neonGreen.withValues(alpha: 0.4)),
+              ),
+              child: const Text('✓ SYSTEM', style: TextStyle(color: C.neonGreen, fontSize: 8, fontWeight: FontWeight.w800)),
+            )
+          else if (onSetProxy != null)
+            InkWell(
+              onTap: onSetProxy,
+              borderRadius: BorderRadius.circular(4),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: C.neonCyan.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: C.neonCyan.withValues(alpha: 0.2)),
+                ),
+                child: const Text('USE', style: TextStyle(color: C.neonCyan, fontSize: 8, fontWeight: FontWeight.w700)),
+              ),
+            ),
+          const SizedBox(width: 4),
+          // Copy button
+          InkWell(
+            onTap: onCopy,
+            borderRadius: BorderRadius.circular(4),
+            child: const Padding(
+              padding: EdgeInsets.all(2),
+              child: Icon(Icons.content_copy, color: C.txt3, size: 12),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // ACTIVITY LOG — last 15 lines
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Widget _buildActivity(BuildContext context, bool isLive) {
@@ -444,6 +710,316 @@ class DashboardSection extends StatelessWidget {
                 ),
               );
             }),
+        ],
+      ),
+    );
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // CONTROLS — Pause + Speed
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Widget _buildControlsSection(BuildContext context, bool isRunning) {
+    final Color pauseColor = isPaused ? C.neonAmber : (isRunning ? C.neonGreen : C.txt3);
+    final bool canEditSpeed = isRunning && !speedApplyInFlight;
+    final String draftLabel = draftSpeedProfile == 'custom' ? 'CUSTOM' : draftSpeedProfile.toUpperCase();
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: C.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: isPaused ? C.neonAmber.withValues(alpha: 0.4) : C.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(isPaused ? Icons.pause_circle : Icons.speed, color: pauseColor, size: 18),
+              const SizedBox(width: 8),
+              Text(isPaused ? 'PAUSED' : 'SPEED CONTROLS', style: TextStyle(color: pauseColor, fontSize: 13, fontWeight: FontWeight.w800, letterSpacing: 1)),
+              const Spacer(),
+              // Pause/Resume button
+              if (!isRunning)
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                  decoration: BoxDecoration(color: C.txt3.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(6)),
+                  child: const Text('OFFLINE', style: TextStyle(color: C.txt3, fontSize: 9, fontWeight: FontWeight.w700)),
+                ),
+              SizedBox(
+                height: 32,
+                child: ElevatedButton.icon(
+                  onPressed: isRunning ? onTogglePause : null,
+                  icon: Icon(isPaused ? Icons.play_arrow : Icons.pause, size: 16),
+                  label: Text(isPaused ? 'RESUME' : 'PAUSE', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: pauseColor.withValues(alpha: 0.15),
+                    foregroundColor: pauseColor,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8), side: BorderSide(color: pauseColor.withValues(alpha: 0.4))),
+                    padding: const EdgeInsets.symmetric(horizontal: 14),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          if (!isPaused) ...<Widget>[
+            const SizedBox(height: 14),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(color: C.surface, borderRadius: BorderRadius.circular(8), border: Border.all(color: C.border)),
+                  child: Text('Applied: ${speedProfile.toUpperCase()}  |  $speedThreads threads  |  ${speedTimeout}s', style: const TextStyle(color: C.txt2, fontSize: 11, fontWeight: FontWeight.w600)),
+                ),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: hasPendingSpeedChanges ? C.neonAmber.withValues(alpha: 0.08) : C.surface,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: hasPendingSpeedChanges ? C.neonAmber.withValues(alpha: 0.35) : C.border),
+                  ),
+                  child: Text('Draft: $draftLabel  |  $draftSpeedThreads threads  |  ${draftSpeedTimeout}s', style: TextStyle(color: hasPendingSpeedChanges ? C.neonAmber : C.txt2, fontSize: 11, fontWeight: FontWeight.w700)),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            // Auto profiles
+            Row(
+              children: <Widget>[
+                const Text('Profile:', style: TextStyle(color: C.txt2, fontSize: 11)),
+                const SizedBox(width: 8),
+                for (final String p in <String>['low', 'medium', 'high'])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      label: Text(p.toUpperCase(), style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700, color: draftSpeedProfile == p ? C.bg : C.txt2)),
+                      selected: draftSpeedProfile == p,
+                      onSelected: canEditSpeed ? (_) => onSpeedProfile?.call(p) : null,
+                      selectedColor: C.neonCyan,
+                      backgroundColor: C.surface,
+                      side: BorderSide(color: draftSpeedProfile == p ? C.neonCyan : C.border),
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                    ),
+                  ),
+                if (draftSpeedProfile == 'custom')
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+                    decoration: BoxDecoration(color: C.neonPurple.withValues(alpha: 0.12), borderRadius: BorderRadius.circular(20), border: Border.all(color: C.neonPurple.withValues(alpha: 0.35))),
+                    child: const Text('CUSTOM', style: TextStyle(color: C.neonPurple, fontSize: 9, fontWeight: FontWeight.w800)),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            // Threads slider
+            Row(
+              children: <Widget>[
+                SizedBox(width: 90, child: Text('Threads: $draftSpeedThreads', style: const TextStyle(color: C.txt2, fontSize: 11))),
+                Expanded(
+                  child: SliderTheme(
+                    data: SliderThemeData(overlayShape: SliderComponentShape.noOverlay, trackHeight: 3),
+                    child: Slider(
+                      value: draftSpeedThreads.toDouble(),
+                      min: 1, max: 50,
+                      divisions: 49,
+                      activeColor: C.neonCyan,
+                      inactiveColor: C.surface,
+                      onChanged: canEditSpeed ? (double v) => onThreadsChanged?.call(v.round()) : null,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            // Timeout slider
+            Row(
+              children: <Widget>[
+                SizedBox(width: 90, child: Text('Timeout: ${draftSpeedTimeout}s', style: const TextStyle(color: C.txt2, fontSize: 11))),
+                Expanded(
+                  child: SliderTheme(
+                    data: SliderThemeData(overlayShape: SliderComponentShape.noOverlay, trackHeight: 3),
+                    child: Slider(
+                      value: draftSpeedTimeout.toDouble(),
+                      min: 1, max: 10,
+                      divisions: 9,
+                      activeColor: C.neonPurple,
+                      inactiveColor: C.surface,
+                      onChanged: canEditSpeed ? (double v) => onTimeoutChanged?.call(v.round()) : null,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              alignment: WrapAlignment.spaceBetween,
+              runSpacing: 8,
+              spacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: <Widget>[
+                if (projectedScanDuration != null)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(color: C.neonCyan.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(8), border: Border.all(color: C.neonCyan.withValues(alpha: 0.25))),
+                    child: Text('Projected scan time: ${fmtDuration(projectedScanDuration!)}', style: const TextStyle(color: C.neonCyan, fontSize: 11, fontWeight: FontWeight.w700)),
+                  ),
+                if (speedApplyInFlight)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(color: C.neonAmber.withValues(alpha: 0.1), borderRadius: BorderRadius.circular(8), border: Border.all(color: C.neonAmber.withValues(alpha: 0.35))),
+                    child: const Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.6, color: C.neonAmber)),
+                        SizedBox(width: 8),
+                        Text('PLEASE WAIT... applying speed', style: TextStyle(color: C.neonAmber, fontSize: 11, fontWeight: FontWeight.w800)),
+                      ],
+                    ),
+                  )
+                else if (hasPendingSpeedChanges)
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(color: C.neonAmber.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(8), border: Border.all(color: C.neonAmber.withValues(alpha: 0.3))),
+                    child: const Text('Speed changed. Press APPLY and wait for sync.', style: TextStyle(color: C.neonAmber, fontSize: 11, fontWeight: FontWeight.w700)),
+                  )
+                else
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                    decoration: BoxDecoration(color: C.neonGreen.withValues(alpha: 0.08), borderRadius: BorderRadius.circular(8), border: Border.all(color: C.neonGreen.withValues(alpha: 0.25))),
+                    child: const Text('Speed is synced with CLI', style: TextStyle(color: C.neonGreen, fontSize: 11, fontWeight: FontWeight.w700)),
+                  ),
+                SizedBox(
+                  height: 34,
+                  child: ElevatedButton.icon(
+                    onPressed: canEditSpeed && hasPendingSpeedChanges ? onApplySpeedChanges : null,
+                    icon: speedApplyInFlight
+                        ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 1.8, color: C.bg))
+                        : const Icon(Icons.check_circle_outline, size: 16),
+                    label: Text(speedApplyInFlight ? 'APPLYING...' : 'APPLY SPEED', style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: C.neonCyan,
+                      foregroundColor: C.bg,
+                      disabledBackgroundColor: C.surface,
+                      disabledForegroundColor: C.txt3,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      padding: const EdgeInsets.symmetric(horizontal: 14),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  // MAINTENANCE — Clear old + Manual add
+  // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+  Widget _buildMaintenanceSection(BuildContext context, bool isRunning) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: C.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: C.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Row(
+            children: <Widget>[
+              Icon(Icons.build_circle_outlined, color: C.txt3, size: 16),
+              SizedBox(width: 8),
+              Text('MAINTENANCE', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1)),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Clear old configs
+          Row(
+            children: <Widget>[
+              const Text('Clear configs offline >', style: TextStyle(color: C.txt2, fontSize: 11)),
+              const SizedBox(width: 6),
+              SizedBox(
+                width: 60,
+                height: 28,
+                child: DropdownButtonFormField<int>(
+                  initialValue: clearAgeHours,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    contentPadding: EdgeInsets.symmetric(horizontal: 6, vertical: 0),
+                    isDense: true,
+                  ),
+                  style: const TextStyle(color: C.txt1, fontSize: 11),
+                  dropdownColor: C.card,
+                  items: const <DropdownMenuItem<int>>[
+                    DropdownMenuItem<int>(value: 1, child: Text('1h')),
+                    DropdownMenuItem<int>(value: 6, child: Text('6h')),
+                    DropdownMenuItem<int>(value: 24, child: Text('1d')),
+                    DropdownMenuItem<int>(value: 72, child: Text('3d')),
+                    DropdownMenuItem<int>(value: 168, child: Text('7d')),
+                    DropdownMenuItem<int>(value: 720, child: Text('30d')),
+                  ],
+                  onChanged: (int? v) { if (v != null) onClearAgeChanged?.call(v); },
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                height: 28,
+                child: ElevatedButton(
+                  onPressed: isRunning ? onClearOldConfigs : null,
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: C.neonRed.withValues(alpha: 0.12),
+                    foregroundColor: C.neonRed,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6), side: BorderSide(color: C.neonRed.withValues(alpha: 0.3))),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                  ),
+                  child: const Text('CLEAR', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Manual config add
+          const Text('Add configs manually:', style: TextStyle(color: C.txt2, fontSize: 11)),
+          const SizedBox(height: 6),
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: SizedBox(
+                  height: 32,
+                  child: TextField(
+                    controller: manualConfigCtl,
+                    style: const TextStyle(color: C.txt1, fontSize: 11, fontFamily: 'Consolas'),
+                    decoration: InputDecoration(
+                      hintText: 'vless://... or vmess://... (one per line)',
+                      hintStyle: TextStyle(color: C.txt3.withValues(alpha: 0.5), fontSize: 11),
+                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(6)),
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 10, vertical: 0),
+                      isDense: true,
+                    ),
+                    maxLines: 1,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                height: 32,
+                child: ElevatedButton.icon(
+                  onPressed: isRunning ? onAddManualConfigs : null,
+                  icon: const Icon(Icons.add, size: 14),
+                  label: const Text('ADD', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: C.neonCyan.withValues(alpha: 0.12),
+                    foregroundColor: C.neonCyan,
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6), side: BorderSide(color: C.neonCyan.withValues(alpha: 0.3))),
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ],
       ),
     );

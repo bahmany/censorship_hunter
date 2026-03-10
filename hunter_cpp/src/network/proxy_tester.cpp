@@ -33,8 +33,18 @@ namespace network {
 
 // Limit concurrent XRay processes to prevent resource exhaustion
 static std::atomic<int> s_active_tests{0};
-static const int MAX_CONCURRENT_TESTS = 20;
 static std::mutex s_port_mutex;
+
+static int getMaxConcurrentTests() {
+    static int max_tests = 0;
+    if (max_tests == 0) {
+        int cpus = std::thread::hardware_concurrency();
+        if (cpus <= 0) cpus = 2;
+        // Scale: 2 CPU -> 4 tests, 4 CPU -> 8, 8+ CPU -> 16, cap at 20
+        max_tests = std::min(20, std::max(4, cpus * 2));
+    }
+    return max_tests;
+}
 
 ProxyTester::ProxyTester() {
     xray_path_ = "bin/xray.exe";
@@ -143,7 +153,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     
     // Wait for a slot (limit concurrent tests)
     int wait_count = 0;
-    while (s_active_tests.load() >= MAX_CONCURRENT_TESTS) {
+    while (s_active_tests.load() >= getMaxConcurrentTests()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (++wait_count > 60) { // 30 second max wait
             result.error_message = "Timeout waiting for test slot";
@@ -488,7 +498,7 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
     
     // Wait for a slot
     int wait_count = 0;
-    while (s_active_tests.load() >= MAX_CONCURRENT_TESTS) {
+    while (s_active_tests.load() >= getMaxConcurrentTests()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (++wait_count > 60) {
             result.error_message = "Timeout waiting for test slot";
@@ -544,7 +554,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     
     // Wait for a slot
     int wait_count = 0;
-    while (s_active_tests.load() >= MAX_CONCURRENT_TESTS) {
+    while (s_active_tests.load() >= getMaxConcurrentTests()) {
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
         if (++wait_count > 60) {
             result.error_message = "Timeout waiting for test slot";

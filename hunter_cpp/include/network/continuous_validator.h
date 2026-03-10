@@ -48,6 +48,11 @@ public:
     std::vector<std::pair<std::string, float>> getHealthyConfigs(int max_count = 200);
 
     /**
+     * @brief Get healthy config records with full details (timestamps, etc.)
+     */
+    std::vector<ConfigHealthRecord> getHealthyRecords(int max_count = 200);
+
+    /**
      * @brief Get all stored URIs
      */
     std::set<std::string> getAllUris();
@@ -79,6 +84,12 @@ public:
         int total_passed = 0;
     };
     Stats getStats();
+
+    /**
+     * @brief Remove configs that have not been alive for more than max_age_hours
+     * @return Number of configs removed
+     */
+    int clearOlderThan(int max_age_hours);
 
     /**
      * @brief Current database size

@@ -23,6 +23,9 @@ class AdvancedSection extends StatelessWidget {
     required this.onSaveTelegram,
     required this.onRefresh,
     required this.onCopyText,
+    required this.githubUrlsController,
+    required this.onSaveGithubUrls,
+    required this.onResetGithubUrls,
   });
 
   final TextEditingController cliPathController;
@@ -42,6 +45,9 @@ class AdvancedSection extends StatelessWidget {
   final VoidCallback onSaveTelegram;
   final VoidCallback onRefresh;
   final Future<void> Function(String text, {String? label}) onCopyText;
+  final TextEditingController githubUrlsController;
+  final VoidCallback onSaveGithubUrls;
+  final VoidCallback onResetGithubUrls;
 
   @override
   Widget build(BuildContext context) {
@@ -121,6 +127,60 @@ class AdvancedSection extends StatelessWidget {
                   ),
                 );
               }).toList(),
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          // ── GitHub Config Sources ──
+          _sectionHeader('GITHUB CONFIG SOURCES'),
+          const SizedBox(height: 10),
+          _cardWrap(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    const Icon(Icons.link, color: C.neonCyan, size: 16),
+                    const SizedBox(width: 8),
+                    const Text('Subscription URLs', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w600)),
+                    const Spacer(),
+                    TextButton.icon(
+                      onPressed: onResetGithubUrls,
+                      icon: const Icon(Icons.restore, size: 14),
+                      label: const Text('Defaults', style: TextStyle(fontSize: 11)),
+                      style: TextButton.styleFrom(foregroundColor: C.neonAmber),
+                    ),
+                    const SizedBox(width: 6),
+                    TextButton.icon(
+                      onPressed: onSaveGithubUrls,
+                      icon: const Icon(Icons.save, size: 14),
+                      label: const Text('Save', style: TextStyle(fontSize: 11)),
+                      style: TextButton.styleFrom(
+                        foregroundColor: C.neonCyan,
+                        backgroundColor: C.neonCyan.withValues(alpha: 0.08),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: BorderSide(color: C.neonCyan.withValues(alpha: 0.3)),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'One URL per line. These are fetched periodically for proxy configs.\n'
+                  'Supports raw GitHub links, subscription URLs, and base64 encoded feeds.',
+                  style: TextStyle(color: C.txt3, fontSize: 10),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: githubUrlsController,
+                  minLines: 6,
+                  maxLines: 15,
+                  style: const TextStyle(fontSize: 10, fontFamily: 'Consolas', color: C.txt1),
+                  decoration: _inputDeco('URLs', 'https://raw.githubusercontent.com/...'),
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 24),

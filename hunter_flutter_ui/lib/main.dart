@@ -27,14 +27,35 @@ Future<void> _ensureSingleInstance() async {
   try {
     final File lockFile = File('${Directory.systemTemp.path}\\hunter_dashboard_singleton.lock');
     _globalLockFile = lockFile;
-    try {
-      _globalLockHandle = await lockFile.open(mode: FileMode.write);
-      await _globalLockHandle!.lock(FileLock.exclusive);
-      await _globalLockHandle!.writeString(DateTime.now().toIso8601String());
-      await _globalLockHandle!.flush();
-    } on FileSystemException {
-      exit(0);
+
+    // Try to acquire exclusive lock
+    bool acquired = false;
+    for (int attempt = 0; attempt < 2; attempt++) {
+      try {
+        _globalLockHandle = await lockFile.open(mode: FileMode.write);
+        await _globalLockHandle!.lock(FileLock.exclusive);
+        await _globalLockHandle!.writeString(DateTime.now().toIso8601String());
+        await _globalLockHandle!.flush();
+        acquired = true;
+        break;
+      } on FileSystemException {
+        // Lock held — on first attempt, try deleting stale lock and retry
+        if (attempt == 0) {
+          try {
+            await _globalLockHandle?.close();
+          } catch (_) {}
+          _globalLockHandle = null;
+          try {
+            await lockFile.delete();
+          } catch (_) {}
+          await Future<void>.delayed(const Duration(milliseconds: 200));
+          continue;
+        }
+        // Second attempt also failed — another instance is truly running
+        exit(0);
+      }
     }
+    if (!acquired) exit(0);
   } catch (_) {}
 }
 
@@ -50,8 +71,18 @@ Future<void> _cleanupLockFile() async {
 
 Future<void> _initWindow() async {
   await windowManager.ensureInitialized();
-  const WindowOptions opts = WindowOptions(
-    size: Size(1280, 820),
+  // Auto-adapt to screen resolution: 75% width × 85% height, clamped
+  Size screenSize = const Size(1920, 1080);
+  try {
+    final screen = await windowManager.getBounds();
+    if (screen.width > 0 && screen.height > 0) {
+      screenSize = Size(screen.width, screen.height);
+    }
+  } catch (_) {}
+  final double w = (screenSize.width * 0.75).clamp(900, 1800);
+  final double h = (screenSize.height * 0.85).clamp(600, 1200);
+  final WindowOptions opts = WindowOptions(
+    size: Size(w, h),
     center: true,
     backgroundColor: Colors.transparent,
     skipTaskbar: false,
@@ -59,6 +90,7 @@ Future<void> _initWindow() async {
     title: 'HUNTER',
   );
   await windowManager.waitUntilReadyToShow(opts, () async {
+    await windowManager.setMinimumSize(const Size(900, 600));
     await windowManager.setPreventClose(true);
     await windowManager.show();
     await windowManager.focus();
@@ -118,6 +150,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   final TextEditingController _tgTargets = TextEditingController(text: 'v2rayngvpn\nmitivpn\nv2ray_configs_pool');
   final TextEditingController _tgLimit = TextEditingController(text: '50');
   final TextEditingController _tgTimeout = TextEditingController(text: '12000');
+  final TextEditingController _githubUrls = TextEditingController();
   final ScrollController _logScroll = ScrollController();
 
   // ── Animations ──
@@ -173,6 +206,20 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   String? _docsError;
   int _bundledCount = 0;
   bool _tgEnabled = false;
+  int? _activeSystemProxyPort;
+
+  // ── Pause / Speed Controls ──
+  bool _isPaused = false;
+  String _speedProfile = 'medium';
+  int _speedThreads = 10;
+  int _speedTimeout = 5;
+  int _speedChunk = 15;
+  String _draftSpeedProfile = 'medium';
+  int _draftSpeedThreads = 10;
+  int _draftSpeedTimeout = 5;
+  bool _speedApplyInFlight = false;
+  final TextEditingController _manualConfigCtl = TextEditingController();
+  int _clearAgeHours = 168; // 7 days default
 
   // ── Tray ──
   SystemTray? _systemTray;
@@ -210,6 +257,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _loadDocs();
     _initTray();
     _loadTelegramSettings();
+    _checkSystemProxy();
   }
 
   @override
@@ -224,7 +272,8 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _systemTray?.destroy();
     for (final TextEditingController c in <TextEditingController>[
       _cliPath, _configPath, _xrayPath, _searchCtl,
-      _tgApiId, _tgApiHash, _tgPhone, _tgTargets, _tgLimit, _tgTimeout,
+      _tgApiId, _tgApiHash, _tgPhone, _tgTargets, _tgLimit, _tgTimeout, _githubUrls,
+      _manualConfigCtl,
     ]) {
       c.dispose();
     }
@@ -284,6 +333,116 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       return 'err';
     }
     return fallback;
+  }
+
+  // ━━━━━ Real-time status from C++ stdout ━━━━━
+  void _handleStatusLine(String jsonStr) {
+    try {
+      final Map<String, dynamic> s = jsonDecode(jsonStr) as Map<String, dynamic>;
+      if (!mounted) return;
+      setState(() {
+        // Update pause state from C++ (ground truth)
+        _isPaused = s['paused'] == true;
+        // Update speed controls from C++ (ground truth)
+        _reconcileSpeedState(
+          profile: s['speed_profile'] is String ? s['speed_profile'] as String : _speedProfile,
+          threads: s['speed_threads'] is num ? (s['speed_threads'] as num).toInt() : _speedThreads,
+          timeout: s['speed_timeout'] is num ? (s['speed_timeout'] as num).toInt() : _speedTimeout,
+        );
+        // Update status map for dashboard gauges
+        _status ??= <String, dynamic>{};
+        _status!['phase'] = s['phase'];
+        _status!['paused'] = s['paused'];
+        _status!['uptime_s'] = s['uptime_s'];
+        _status!['db'] = <String, dynamic>{
+          'total': s['db_total'] ?? 0,
+          'alive': s['db_alive'] ?? 0,
+          'tested_unique': s['db_tested'] ?? 0,
+        };
+        _status!['speed'] = <String, dynamic>{
+          'profile': s['speed_profile'],
+          'max_threads': s['speed_threads'],
+          'test_timeout_s': s['speed_timeout'],
+        };
+        _lastActivityAt = DateTime.now();
+      });
+    } catch (_) {}
+  }
+
+  bool get _hasPendingSpeedChanges {
+    final bool presetChanged = _draftSpeedProfile != 'custom' && _draftSpeedProfile != _speedProfile;
+    final bool manualChanged = _draftSpeedThreads != _speedThreads || _draftSpeedTimeout != _speedTimeout;
+    return presetChanged || manualChanged;
+  }
+
+  int _presetThreadsFor(String profile) {
+    switch (profile) {
+      case 'low':
+        return 4;
+      case 'high':
+        return 20;
+      default:
+        return 10;
+    }
+  }
+
+  int _presetTimeoutFor(String profile) {
+    switch (profile) {
+      case 'low':
+        return 8;
+      case 'high':
+        return 3;
+      default:
+        return 5;
+    }
+  }
+
+  int _projectedChunkForDraft() {
+    if (_draftSpeedProfile == 'low') {
+      return (_draftSpeedThreads < 2 ? 2 : (_draftSpeedThreads > 8 ? 8 : _draftSpeedThreads));
+    }
+    if (_draftSpeedProfile == 'high') {
+      final int doubled = _draftSpeedThreads * 2;
+      return doubled < 8 ? 8 : (doubled > 30 ? 30 : doubled);
+    }
+    if (_draftSpeedProfile == 'medium') {
+      return _draftSpeedThreads < 4 ? 4 : (_draftSpeedThreads > 15 ? 15 : _draftSpeedThreads);
+    }
+    return _draftSpeedThreads < 1 ? 1 : (_draftSpeedThreads > 50 ? 50 : _draftSpeedThreads);
+  }
+
+  Duration? _projectedScanTimeForDraft() {
+    final int pending = ((_status?['pending_unique'] as num?)?.toInt() ?? 0) > 0
+        ? (_status?['pending_unique'] as num).toInt()
+        : (((( _status?['db'] as Map<String, dynamic>?)?['total'] as num?)?.toInt() ?? 0) - (((_status?['db'] as Map<String, dynamic>?)?['tested_unique'] as num?)?.toInt() ?? 0));
+    if (pending <= 0) return null;
+    final int concurrency = _projectedChunkForDraft();
+    final double perWaveSeconds = _draftSpeedTimeout + 0.75;
+    final double projectedSeconds = (pending / concurrency) * perWaveSeconds;
+    final int rounded = projectedSeconds.ceil();
+    return Duration(seconds: rounded < 1 ? 1 : rounded);
+  }
+
+  void _reconcileSpeedState({required String profile, required int threads, required int timeout, int? chunk}) {
+    final bool hadPendingDraft = _hasPendingSpeedChanges;
+    _speedProfile = profile;
+    _speedThreads = threads;
+    _speedTimeout = timeout;
+    if (chunk != null) _speedChunk = chunk;
+    final bool profileMatch = _draftSpeedProfile != 'custom' && _draftSpeedProfile == _speedProfile;
+    final bool manualMatch = _draftSpeedThreads == _speedThreads && _draftSpeedTimeout == _speedTimeout;
+    if (_speedApplyInFlight && (profileMatch || manualMatch)) {
+      _speedApplyInFlight = false;
+      _draftSpeedProfile = _speedProfile;
+      _draftSpeedThreads = _speedThreads;
+      _draftSpeedTimeout = _speedTimeout;
+      return;
+    }
+    if (!hadPendingDraft) {
+      _draftSpeedProfile = _speedProfile;
+      _draftSpeedThreads = _speedThreads;
+      _draftSpeedTimeout = _speedTimeout;
+    }
   }
 
   List<MapEntry<String, String>> _prepareRuntimeLogBatch(List<String> lines, String fallback) {
@@ -376,6 +535,16 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         _lastNotifiedCount = newTotal;
         _sendTrayNotification('${newTotal - oldTotal} new configs! Total: $newTotal');
       }
+      // Sound notification when new alive configs are found
+      final int newAlive = snap.goldConfigs.length + snap.silverConfigs.length;
+      final int oldAlive = _goldConfigs.length + _silverConfigs.length;
+      if (newAlive > oldAlive && oldAlive > 0) {
+        _playNewConfigSound();
+      }
+
+      // Parse pause + speed from status
+      final bool paused = snap.status?['paused'] == true;
+      final Map<String, dynamic>? spd = snap.status?['speed'] as Map<String, dynamic>?;
 
       setState(() {
         _allCache = snap.allCache;
@@ -389,6 +558,15 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         _engines = eng;
         _lastRefresh = now;
         _refreshTick += 1;
+        _isPaused = paused;
+        if (spd != null) {
+          _reconcileSpeedState(
+            profile: (spd['profile'] as String?) ?? _speedProfile,
+            threads: (spd['max_threads'] as num?)?.toInt() ?? _speedThreads,
+            timeout: (spd['test_timeout_s'] as num?)?.toInt() ?? _speedTimeout,
+            chunk: (spd['chunk_size'] as num?)?.toInt() ?? _speedChunk,
+          );
+        }
         if (sawNewLogs || snapshotChanged) {
           _lastActivityAt = now;
         }
@@ -486,7 +664,13 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       unawaited(_loadDocs());
 
       _stdoutSub = p.stdout.transform(utf8.decoder).transform(const LineSplitter())
-          .listen((String line) => _log('out', line));
+          .listen((String line) {
+        if (line.startsWith('##STATUS##')) {
+          _handleStatusLine(line.substring(10));
+        } else {
+          _log('out', line);
+        }
+      });
       _stderrSub = p.stderr.transform(utf8.decoder).transform(const LineSplitter())
           .listen((String line) => _log('err', line));
 
@@ -513,10 +697,12 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     });
     _ignitionCtl.forward(from: 0);
     try {
+      // Send stop via stdin for instant response
+      _sendCommand({'command': 'stop'});
       final Directory wd = _effectiveWd();
       await Directory('${wd.path}\\runtime').create(recursive: true);
       File('${wd.path}\\runtime\\stop.flag').writeAsStringSync('stop\n', flush: true);
-      _log('sys', 'stop.flag created');
+      _log('sys', 'Stop command sent');
 
       final Process? p = _process;
       if (p != null) {
@@ -689,8 +875,38 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         if (decoded['targets'] is List) {
           _tgTargets.text = (decoded['targets'] as List<dynamic>).map((dynamic e) => e.toString()).join('\n');
         }
+        if (decoded['github_urls'] is List) {
+          _githubUrls.text = (decoded['github_urls'] as List<dynamic>).map((dynamic e) => e.toString()).join('\n');
+        } else if (_githubUrls.text.isEmpty) {
+          _githubUrls.text = _defaultGithubUrls().join('\n');
+        }
       });
     } catch (_) {}
+  }
+
+  List<String> _defaultGithubUrls() {
+    return const <String>[
+      'https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt',
+      'https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt',
+      'https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt',
+      'https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt',
+      'https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt',
+      'https://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt',
+      'https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt',
+      'https://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt',
+      'https://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt',
+      'https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt',
+      'https://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt',
+      'https://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt',
+      'https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix',
+      'https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix',
+      'https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray',
+      'https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt',
+      'https://raw.githubusercontent.com/freefq/free/master/v2',
+      'https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2',
+      'https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt',
+      'https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub',
+    ];
   }
 
   Future<void> _saveTelegramSettings() async {
@@ -716,6 +932,160 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     await f.writeAsString(jsonEncode(root), flush: true);
     if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Telegram settings saved')));
+    }
+  }
+
+  Future<void> _saveGithubUrls() async {
+    final Directory wd = _effectiveWd();
+    final String path = absPathInWorkingDir(wd, _configPath.text);
+    if (path.isEmpty) return;
+    Map<String, dynamic> root = <String, dynamic>{};
+    final File f = File(path);
+    try {
+      if (f.existsSync()) {
+        final dynamic d = jsonDecode(await f.readAsString());
+        if (d is Map<String, dynamic>) root = d;
+      }
+    } catch (_) {}
+    root['github_urls'] = _githubUrls.text
+        .split(RegExp(r'[\r\n]+'))
+        .map((String s) => s.trim())
+        .where((String s) => s.isNotEmpty && s.startsWith('http'))
+        .toList();
+    await f.parent.create(recursive: true);
+    await f.writeAsString(jsonEncode(root), flush: true);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved ${(root['github_urls'] as List).length} GitHub URLs')));
+    }
+  }
+
+  void _resetGithubUrls() {
+    setState(() {
+      _githubUrls.text = _defaultGithubUrls().join('\n');
+    });
+  }
+
+  // ━━━━━ Sound Notification ━━━━━
+  void _playNewConfigSound() {
+    // Use Windows system beep via PowerShell (non-blocking)
+    Process.start('powershell', <String>['-NoProfile', '-Command', '[console]::beep(800,200);[console]::beep(1000,200)'],
+      runInShell: false).then((_) {}).catchError((_) {});
+  }
+
+  // ━━━━━ Command Sending (to C++ orchestrator via stdin, file fallback) ━━━━━
+  void _sendCommand(Map<String, dynamic> cmd) {
+    final String json = jsonEncode(cmd);
+    if (_process != null) {
+      try {
+        _process!.stdin.writeln(json);
+        return;
+      } catch (_) {}
+    }
+    // File fallback for standalone CLI
+    try {
+      final Directory wd = _effectiveWd();
+      File('${wd.path}\\runtime\\hunter_command.json').writeAsStringSync(json);
+    } catch (_) {}
+  }
+
+  void _togglePause() {
+    if (_isPaused) {
+      _sendCommand({'command': 'resume'});
+    } else {
+      _sendCommand({'command': 'pause'});
+    }
+    setState(() => _isPaused = !_isPaused);
+  }
+
+  void _setSpeedProfile(String profile) {
+    setState(() {
+      _draftSpeedProfile = profile;
+      _draftSpeedThreads = _presetThreadsFor(profile);
+      _draftSpeedTimeout = _presetTimeoutFor(profile);
+    });
+  }
+
+  void _setThreads(int val) {
+    setState(() {
+      _draftSpeedThreads = val;
+      _draftSpeedProfile = 'custom';
+    });
+  }
+
+  void _setTimeout(int val) {
+    setState(() {
+      _draftSpeedTimeout = val;
+      _draftSpeedProfile = 'custom';
+    });
+  }
+
+  void _applySpeedChanges() {
+    if (_state != HunterRunState.running || !_hasPendingSpeedChanges || _speedApplyInFlight) return;
+    final String draftProfile = _draftSpeedProfile;
+    final int draftThreads = _draftSpeedThreads;
+    final int draftTimeout = _draftSpeedTimeout;
+    final bool applyPreset = draftProfile != 'custom' &&
+        draftThreads == _presetThreadsFor(draftProfile) &&
+        draftTimeout == _presetTimeoutFor(draftProfile);
+    if (applyPreset) {
+      _sendCommand({'command': 'speed_profile', 'value': draftProfile});
+    } else {
+      _sendCommand({'command': 'set_threads', 'value': draftThreads});
+      _sendCommand({'command': 'set_timeout', 'value': draftTimeout});
+    }
+    _sendCommand({'command': 'get_status'});
+    setState(() => _speedApplyInFlight = true);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Applying speed changes, please wait...')),
+      );
+    }
+  }
+
+  void _clearOldConfigs() {
+    _sendCommand({'command': 'clear_old', 'hours': _clearAgeHours});
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Clearing configs older than $_clearAgeHours hours...')),
+      );
+    }
+  }
+
+  void _addManualConfigs() {
+    final String text = _manualConfigCtl.text.trim();
+    if (text.isEmpty) return;
+    _sendCommand({'command': 'add_configs', 'configs': text});
+    _manualConfigCtl.clear();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Manual configs submitted for testing')),
+      );
+    }
+  }
+
+  // ━━━━━ System Proxy ━━━━━
+  Future<void> _checkSystemProxy() async {
+    final int? port = await getWindowsSystemProxyPort();
+    if (mounted) setState(() => _activeSystemProxyPort = port);
+  }
+
+  Future<void> _setSystemProxy(int port) async {
+    final bool ok = await setWindowsSystemProxy(port);
+    if (ok && mounted) {
+      setState(() => _activeSystemProxyPort = port);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('System proxy set to socks5://127.0.0.1:$port')),
+      );
+    }
+  }
+
+  Future<void> _clearSystemProxy() async {
+    final bool ok = await clearWindowsSystemProxy();
+    if (ok && mounted) {
+      setState(() => _activeSystemProxyPort = null);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('System proxy cleared')),
+      );
     }
   }
 
@@ -1237,6 +1607,32 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         onNavigate: _navigate,
         onCopyText: _copyText,
         onCopyLines: _copyLines,
+        provisionedPorts: _parseProvisionedPorts(),
+        balancers: _parseBalancers(),
+        activeSystemProxyPort: _activeSystemProxyPort,
+        onSetSystemProxy: _setSystemProxy,
+        onClearSystemProxy: _clearSystemProxy,
+        // Pause / Speed / Maintenance
+        isPaused: _isPaused,
+        onTogglePause: _togglePause,
+        speedProfile: _speedProfile,
+        speedThreads: _speedThreads,
+        speedTimeout: _speedTimeout,
+        draftSpeedProfile: _draftSpeedProfile,
+        draftSpeedThreads: _draftSpeedThreads,
+        draftSpeedTimeout: _draftSpeedTimeout,
+        hasPendingSpeedChanges: _hasPendingSpeedChanges,
+        speedApplyInFlight: _speedApplyInFlight,
+        projectedScanDuration: _projectedScanTimeForDraft(),
+        onSpeedProfile: _setSpeedProfile,
+        onThreadsChanged: _setThreads,
+        onTimeoutChanged: _setTimeout,
+        onApplySpeedChanges: _applySpeedChanges,
+        clearAgeHours: _clearAgeHours,
+        onClearAgeChanged: (int v) => setState(() => _clearAgeHours = v),
+        onClearOldConfigs: _clearOldConfigs,
+        manualConfigCtl: _manualConfigCtl,
+        onAddManualConfigs: _addManualConfigs,
       ),
       HunterNavSection.configs => ConfigsSection(
         listKind: _configKind,
@@ -1292,9 +1688,28 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         onSaveTelegram: _saveTelegramSettings,
         onRefresh: _refresh,
         onCopyText: _copyText,
+        githubUrlsController: _githubUrls,
+        onSaveGithubUrls: _saveGithubUrls,
+        onResetGithubUrls: _resetGithubUrls,
       ),
       HunterNavSection.about => AboutSection(bundledConfigsCount: _bundledCount),
     };
+  }
+
+  List<Map<String, dynamic>> _parseProvisionedPorts() {
+    final dynamic raw = _status?['provisioned_ports'];
+    if (raw is List) {
+      return raw.whereType<Map<String, dynamic>>().toList();
+    }
+    return const <Map<String, dynamic>>[];
+  }
+
+  List<Map<String, dynamic>> _parseBalancers() {
+    final dynamic raw = _status?['balancers'];
+    if (raw is List) {
+      return raw.whereType<Map<String, dynamic>>().toList();
+    }
+    return const <Map<String, dynamic>>[];
   }
 
   Color _stateColor() {

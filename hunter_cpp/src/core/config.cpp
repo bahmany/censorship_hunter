@@ -161,6 +161,24 @@ void HunterConfig::set(const std::string& key, bool value) {
     set(key, value ? std::string("true") : std::string("false"));
 }
 
+std::vector<std::string> HunterConfig::githubUrls() const {
+    auto urls = getStringList("github_urls");
+    if (urls.empty()) {
+        return constants::githubRepos();
+    }
+    return urls;
+}
+
+void HunterConfig::setGithubUrls(const std::vector<std::string>& urls) {
+    std::string arr = "[";
+    for (size_t i = 0; i < urls.size(); i++) {
+        if (i > 0) arr += ",";
+        arr += "\"" + urls[i] + "\"";
+    }
+    arr += "]";
+    set("github_urls", arr);
+}
+
 std::string HunterConfig::getEnv(const std::string& name, const std::string& def) {
     const char* val = std::getenv(name.c_str());
     return val ? std::string(val) : def;

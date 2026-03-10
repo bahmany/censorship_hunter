@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../models.dart';
 import '../services.dart';
+import 'qr_dialog.dart';
 
 class ConfigsSection extends StatelessWidget {
   const ConfigsSection({
@@ -39,7 +40,14 @@ class ConfigsSection extends StatelessWidget {
   final Future<void> Function(List<String> lines, {String? label}) onCopyLines;
   final Future<void> Function(String configUri) onSpeedTest;
 
-  List<String> get _aliveConfigs => <String>[...goldConfigs, ...silverConfigs];
+  List<String> get _aliveConfigs {
+    final Set<String> seen = <String>{};
+    final List<String> result = <String>[];
+    for (final String uri in <String>[...goldConfigs, ...silverConfigs]) {
+      if (seen.add(uri)) result.add(uri);
+    }
+    return result;
+  }
 
   bool get _isLatencyKind => listKind == HunterConfigListKind.balancer || listKind == HunterConfigListKind.gemini;
 
@@ -274,6 +282,14 @@ class ConfigsSection extends StatelessWidget {
                 constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
               ),
             IconButton(
+              icon: const Icon(Icons.qr_code, size: 14, color: C.neonPurple),
+              onPressed: () => showQrDialog(context, uri, title: '$proto Config'),
+              tooltip: 'QR Code for mobile',
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+            IconButton(
               icon: const Icon(Icons.content_copy, size: 14, color: C.txt3),
               onPressed: () => onCopyText(uri, label: 'Config copied!'),
               tooltip: 'Copy',
@@ -299,6 +315,8 @@ class ConfigsSection extends StatelessWidget {
       'TROJAN' => C.neonAmber,
       _ => C.txt3,
     };
+    final String discoveredAt = _fmtUnixTs(cfg.firstSeen);
+    final String lastAliveAt = _fmtUnixTs(cfg.lastAlive);
 
     return InkWell(
       onTap: () => onCopyText(cfg.uri, label: 'Config copied!'),
@@ -323,7 +341,14 @@ class ConfigsSection extends StatelessWidget {
               ),
               child: Text(proto, style: TextStyle(color: protoColor, fontSize: 9, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 6),
+            // Discovery time
+            if (discoveredAt.isNotEmpty)
+              Tooltip(
+                message: 'Found: $discoveredAt\nLast alive: $lastAliveAt\nTests: ${cfg.totalTests ?? 0}',
+                child: Text(discoveredAt, style: TextStyle(color: C.txt3.withValues(alpha: 0.6), fontSize: 9, fontFamily: 'Consolas')),
+              ),
+            const SizedBox(width: 6),
             Expanded(
               child: Tooltip(
                 message: cfg.uri,
@@ -340,6 +365,14 @@ class ConfigsSection extends StatelessWidget {
               constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
             ),
             IconButton(
+              icon: const Icon(Icons.qr_code, size: 14, color: C.neonPurple),
+              onPressed: () => showQrDialog(context, cfg.uri, title: '$proto Config'),
+              tooltip: 'QR Code for mobile',
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+            IconButton(
               icon: const Icon(Icons.content_copy, size: 14, color: C.txt3),
               onPressed: () => onCopyText(cfg.uri, label: 'Config copied!'),
               tooltip: 'Copy',
@@ -351,6 +384,21 @@ class ConfigsSection extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  static String _fmtUnixTs(double? ts) {
+    if (ts == null || ts <= 0) return '';
+    try {
+      final DateTime dt = DateTime.fromMillisecondsSinceEpoch((ts * 1000).toInt(), isUtc: true).toLocal();
+      final DateTime now = DateTime.now();
+      final Duration diff = now.difference(dt);
+      if (diff.inMinutes < 1) return 'now';
+      if (diff.inMinutes < 60) return '${diff.inMinutes}m ago';
+      if (diff.inHours < 24) return '${diff.inHours}h ago';
+      return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    } catch (_) {
+      return '';
+    }
   }
 
   Widget _neonBtn(String label, Color color, VoidCallback? onPressed) {

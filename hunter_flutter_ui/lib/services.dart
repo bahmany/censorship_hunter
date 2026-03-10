@@ -296,8 +296,11 @@ Future<RuntimeSnapshot> loadRuntimeSnapshot(String runtimeDir) async {
               String s => double.tryParse(s),
               _ => null,
             };
+            final double? firstSeen = (row['first_seen'] is num) ? (row['first_seen'] as num).toDouble() : null;
+            final double? lastAlive = (row['last_alive'] is num) ? (row['last_alive'] as num).toDouble() : null;
+            final int? totalTests = (row['total_tests'] is num) ? (row['total_tests'] as num).toInt() : null;
             fallbackUris.add(uri);
-            fallbackLatency.add(HunterLatencyConfig(uri: uri, latencyMs: latency));
+            fallbackLatency.add(HunterLatencyConfig(uri: uri, latencyMs: latency, firstSeen: firstSeen, lastAlive: lastAlive, totalTests: totalTests));
           }
           if (fallbackUris.isNotEmpty) {
             if (s.goldConfigs.isEmpty && s.silverConfigs.isEmpty) {
@@ -807,6 +810,83 @@ double? minLatencyMs(List<HunterLatencyConfig> items) {
     if (best == null || cfg.latencyMs! < best) best = cfg.latencyMs;
   }
   return best;
+}
+
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// Windows System Proxy (registry-based)
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Future<bool> setWindowsSystemProxy(int port) async {
+  if (!Platform.isWindows) return false;
+  try {
+    // Set proxy server to socks=127.0.0.1:port
+    await Process.run('reg', <String>[
+      'add', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+      '/v', 'ProxyServer', '/t', 'REG_SZ',
+      '/d', 'socks=127.0.0.1:$port', '/f',
+    ]);
+    // Enable proxy
+    await Process.run('reg', <String>[
+      'add', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+      '/v', 'ProxyEnable', '/t', 'REG_DWORD',
+      '/d', '1', '/f',
+    ]);
+    // Notify WinInet of change
+    await _refreshWinInet();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<bool> clearWindowsSystemProxy() async {
+  if (!Platform.isWindows) return false;
+  try {
+    // Disable proxy
+    await Process.run('reg', <String>[
+      'add', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+      '/v', 'ProxyEnable', '/t', 'REG_DWORD',
+      '/d', '0', '/f',
+    ]);
+    // Clear proxy server
+    await Process.run('reg', <String>[
+      'delete', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+      '/v', 'ProxyServer', '/f',
+    ]);
+    // Notify WinInet of change
+    await _refreshWinInet();
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+Future<void> _refreshWinInet() async {
+  // Use gpupdate-style approach: simply toggle proxy off/on triggers WinInet refresh
+  // rundll32 is the simplest way to signal Internet Settings changed
+  await Process.run('rundll32.exe', <String>['wininet.dll,InternetSetOptionW']);
+}
+
+Future<int?> getWindowsSystemProxyPort() async {
+  if (!Platform.isWindows) return null;
+  try {
+    final ProcessResult enableResult = await Process.run('reg', <String>[
+      'query', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+      '/v', 'ProxyEnable',
+    ]);
+    if (!enableResult.stdout.toString().contains('0x1')) return null;
+    final ProcessResult serverResult = await Process.run('reg', <String>[
+      'query', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+      '/v', 'ProxyServer',
+    ]);
+    final String output = serverResult.stdout.toString();
+    // Parse "socks=127.0.0.1:PORT" or "127.0.0.1:PORT"
+    final RegExp re = RegExp(r'(?:socks=)?127\.0\.0\.1:(\d+)');
+    final RegExpMatch? m = re.firstMatch(output);
+    if (m != null) return int.tryParse(m.group(1)!);
+    return null;
+  } catch (_) {
+    return null;
+  }
 }
 
 Map<String, int> detectEngines(String workingDir) {

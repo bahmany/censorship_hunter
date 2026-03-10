@@ -31,7 +31,8 @@ public:
         const std::vector<int>& proxy_ports,
         int max_configs = 200,
         float timeout_per_source = 25.0f,
-        int max_workers = 6);
+        int max_workers = 6,
+        const std::vector<std::string>& github_urls = {});
 
     /**
      * @brief Get source rankings by success rate

@@ -119,6 +119,7 @@ struct ConfigHealthRecord {
     std::string tag;              // Source tag (scrape, github_bg, harvest)
     double first_seen = 0.0;
     double last_tested = 0.0;
+    double last_alive_time = 0.0; // When config was last confirmed alive
     bool alive = false;
     float latency_ms = 0.0f;
     int consecutive_fails = 0;

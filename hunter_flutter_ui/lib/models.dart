@@ -10,7 +10,10 @@ class HunterLogLine {
 }
 
 class HunterLatencyConfig {
-  HunterLatencyConfig({required this.uri, this.latencyMs});
+  HunterLatencyConfig({required this.uri, this.latencyMs, this.firstSeen, this.lastAlive, this.totalTests});
   final String uri;
   final double? latencyMs;
+  final double? firstSeen;   // Unix timestamp when first discovered
+  final double? lastAlive;   // Unix timestamp when last confirmed alive
+  final int? totalTests;     // How many times tested
 }

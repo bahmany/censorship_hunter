@@ -287,6 +287,15 @@ std::set<std::string> ConfigFetcher::fetchGithubConfigs(
                               timeout_per, overall_timeout, max_configs, "GitHub");
 }
 
+std::set<std::string> ConfigFetcher::fetchGithubConfigs(
+    const std::vector<std::string>& urls,
+    const std::vector<int>& proxy_ports, int max_configs,
+    int timeout_per, float overall_timeout) {
+    if (direct_works_.load() == -1) checkDirectAccess();
+    return fetchUrlsParallel(urls, proxy_ports,
+                              timeout_per, overall_timeout, max_configs, "GitHub-custom");
+}
+
 std::set<std::string> ConfigFetcher::fetchAntiCensorshipConfigs(
     const std::vector<int>& proxy_ports, int max_configs,
     int timeout_per, float overall_timeout) {

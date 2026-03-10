@@ -83,6 +83,7 @@ void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float late
         rec.latency_ms = latency_ms;
         rec.consecutive_fails = 0;
         rec.total_passes++;
+        rec.last_alive_time = rec.last_tested;
     } else {
         rec.consecutive_fails++;
         if (rec.consecutive_fails >= 3) {
@@ -97,37 +98,46 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
     std::vector<ConfigHealthRecord> batch;
     double now = utils::nowTimestamp();
 
-    // First: never tested
+    // Collect candidates with priority score (lower = higher priority)
+    struct Candidate {
+        const ConfigHealthRecord* rec;
+        int priority;   // 0=never tested, 1=needs_retest, 2=alive stale 5min, 3=failed stale
+        int total_tests; // for secondary sort: fewer tests = higher priority
+    };
+    std::vector<Candidate> candidates;
+
     for (auto& [hash, rec] : db_) {
+        // Priority 0: never tested (brand new configs)
         if (rec.total_tests == 0) {
-            batch.push_back(rec);
-            if ((int)batch.size() >= batch_size) return batch;
+            candidates.push_back({&rec, 0, 0});
+            continue;
+        }
+        // Priority 1: flagged for retest
+        if (rec.needs_retest) {
+            candidates.push_back({&rec, 1, rec.total_tests});
+            continue;
+        }
+        // Priority 2: alive configs stale > 5 minutes — periodic health recheck
+        if (rec.alive && (now - rec.last_tested) > 300.0) {
+            candidates.push_back({&rec, 2, rec.total_tests});
+            continue;
+        }
+        // Priority 3: failed configs with < 5 consecutive fails, stale > 120s
+        if (!rec.alive && rec.consecutive_fails < 5 && (now - rec.last_tested) > 120.0) {
+            candidates.push_back({&rec, 3, rec.total_tests});
+            continue;
         }
     }
 
-    // Second: needs_retest flag
-    for (auto& [hash, rec] : db_) {
-        if (rec.needs_retest && rec.total_tests > 0) {
-            batch.push_back(rec);
-            if ((int)batch.size() >= batch_size) return batch;
-        }
-    }
+    // Sort: primary by priority (ascending), secondary by total_tests (ascending = less tested first)
+    std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.priority != b.priority) return a.priority < b.priority;
+        return a.total_tests < b.total_tests;
+    });
 
-    // Third: stale healthy configs (re-validate after 60s)
-    for (auto& [hash, rec] : db_) {
-        if (rec.alive && rec.total_tests > 0 && (now - rec.last_tested) > 60.0) {
-            batch.push_back(rec);
-            if ((int)batch.size() >= batch_size) return batch;
-        }
-    }
-
-    // Fourth: stale failed configs (retry after 120s)
-    for (auto& [hash, rec] : db_) {
-        if (!rec.alive && rec.total_tests > 0 && rec.consecutive_fails < 5 && 
-            (now - rec.last_tested) > 120.0) {
-            batch.push_back(rec);
-            if ((int)batch.size() >= batch_size) return batch;
-        }
+    for (auto& c : candidates) {
+        batch.push_back(*c.rec);
+        if ((int)batch.size() >= batch_size) break;
     }
 
     return batch;
@@ -143,6 +153,20 @@ std::vector<std::pair<std::string, float>> ConfigDatabase::getHealthyConfigs(int
     }
     std::sort(healthy.begin(), healthy.end(),
               [](const auto& a, const auto& b) { return a.second < b.second; });
+    if ((int)healthy.size() > max_count) healthy.resize(max_count);
+    return healthy;
+}
+
+std::vector<ConfigHealthRecord> ConfigDatabase::getHealthyRecords(int max_count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ConfigHealthRecord> healthy;
+    for (auto& [hash, rec] : db_) {
+        if (rec.alive && rec.latency_ms > 0) {
+            healthy.push_back(rec);
+        }
+    }
+    std::sort(healthy.begin(), healthy.end(),
+              [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) { return a.latency_ms < b.latency_ms; });
     if ((int)healthy.size() > max_count) healthy.resize(max_count);
     return healthy;
 }
@@ -215,8 +239,27 @@ int ConfigDatabase::size() const {
 }
 
 void ConfigDatabase::evictStale() {
-    // Remove oldest entries with most consecutive failures
     if (db_.empty()) return;
+    double now = utils::nowTimestamp();
+    constexpr double THREE_HOURS = 3.0 * 3600.0;
+
+    // Phase 1: Remove configs that have been continuously offline for 3+ hours
+    std::vector<std::string> dead_hashes;
+    for (auto& [hash, rec] : db_) {
+        if (!rec.alive && rec.total_tests > 0 && rec.last_alive_time > 0.0 &&
+            (now - rec.last_alive_time) > THREE_HOURS) {
+            dead_hashes.push_back(hash);
+        }
+        // Also remove configs that were NEVER alive and tested 5+ times
+        if (!rec.alive && rec.total_tests >= 5 && rec.last_alive_time == 0.0 &&
+            rec.consecutive_fails >= 5) {
+            dead_hashes.push_back(hash);
+        }
+    }
+    for (auto& h : dead_hashes) db_.erase(h);
+
+    // Phase 2: If still over capacity, remove oldest high-failure entries
+    if ((int)db_.size() < max_size_) return;
     std::vector<std::pair<std::string, double>> candidates;
     for (auto& [hash, rec] : db_) {
         if (rec.consecutive_fails >= 5 || (!rec.alive && rec.total_tests > 3)) {
@@ -229,6 +272,30 @@ void ConfigDatabase::evictStale() {
     for (int i = 0; i < to_remove && i < (int)candidates.size(); i++) {
         db_.erase(candidates[i].first);
     }
+}
+
+int ConfigDatabase::clearOlderThan(int max_age_hours) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    double now = utils::nowTimestamp();
+    double cutoff = (double)max_age_hours * 3600.0;
+    int removed = 0;
+    for (auto it = db_.begin(); it != db_.end(); ) {
+        auto& rec = it->second;
+        // Remove if: never alive and old enough, or last alive too long ago
+        bool should_remove = false;
+        if (rec.last_alive_time > 0.0 && (now - rec.last_alive_time) > cutoff) {
+            should_remove = true;
+        } else if (rec.last_alive_time == 0.0 && rec.first_seen > 0.0 && (now - rec.first_seen) > cutoff) {
+            should_remove = true;
+        }
+        if (should_remove) {
+            it = db_.erase(it);
+            removed++;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
 }
 
 // ═══════════════════════════════════════════════════════════════════

@@ -143,7 +143,8 @@ GitHubRefreshResult refreshGithubConfigs(HunterOrchestrator* orch, int cap,
     }
 
     auto proxy_ports = githubProxyPorts(orch);
-    auto fetched = orch->configFetcher().fetchGithubConfigs(proxy_ports, cap, timeout_per, overall_timeout);
+    auto github_urls = orch->config().githubUrls();
+    auto fetched = orch->configFetcher().fetchGithubConfigs(github_urls, proxy_ports, cap, timeout_per, overall_timeout);
     lock.unlock();
 
     result.fetched_total = (int)fetched.size();
@@ -235,6 +236,12 @@ void BaseWorker::runLoop() {
             status_.last_error = e.what();
             status_.state = WorkerState::WORKER_ERROR;
             std::cerr << "[" << name << "] Error: " << e.what() << std::endl;
+        } catch (...) {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.errors++;
+            status_.last_error = "unknown non-std exception";
+            status_.state = WorkerState::WORKER_ERROR;
+            std::cerr << "[" << name << "] Error: unknown non-std exception" << std::endl;
         }
 
         if (stop_.load()) break;
@@ -597,7 +604,13 @@ void ValidatorWorker::execute() {
         return;
     }
 
-    network::ContinuousValidator validator(*db, 80);
+    auto hw = HunterTaskManager::instance().getHardware();
+    int batch_size = std::max(5, std::min(50, orch_->chunkSize() * 2));
+    if (hw.ram_percent >= 95.0f) batch_size = std::min(batch_size, 8);
+    else if (hw.ram_percent >= 90.0f) batch_size = std::min(batch_size, 12);
+    else if (hw.ram_percent >= 80.0f) batch_size = std::min(batch_size, 20);
+
+    network::ContinuousValidator validator(*db, batch_size);
     auto [tested, passed] = validator.validateBatch();
 
     { std::ostringstream _ls; _ls << "[Validator] Batch: tested=" << tested << " passed=" << passed;

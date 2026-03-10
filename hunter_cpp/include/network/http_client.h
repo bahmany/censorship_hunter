@@ -95,6 +95,16 @@ public:
         float overall_timeout = 40.0f);
 
     /**
+     * @brief Fetch configs from a custom list of GitHub/subscription URLs
+     */
+    std::set<std::string> fetchGithubConfigs(
+        const std::vector<std::string>& urls,
+        const std::vector<int>& proxy_ports,
+        int max_configs = 0,
+        int timeout_per = 9,
+        float overall_timeout = 40.0f);
+
+    /**
      * @brief Fetch configs from anti-censorship sources
      */
     std::set<std::string> fetchAntiCensorshipConfigs(

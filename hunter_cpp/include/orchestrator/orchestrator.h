@@ -147,19 +147,52 @@ public:
     std::vector<std::pair<std::string, float>>& lastGoodConfigs() { return last_good_configs_; }
     int cachedConfigCount() const;
 
+    // ─── Pause / Resume ───
+    void pause();
+    void resume();
+    bool isPaused() const { return paused_.load(); }
+
+    // ─── Dynamic Speed Controls ───
+    struct SpeedProfile {
+        int max_threads = 10;       // 1-50
+        int test_timeout_s = 5;     // 1-10
+        int chunk_size = 15;        // concurrent tests per chunk
+        std::string profile_name;   // "low", "medium", "high", "custom"
+    };
+    void setSpeedProfile(const SpeedProfile& p);
+    SpeedProfile getSpeedProfile() const;
+    void applyAutoProfile(const std::string& level); // "low", "medium", "high"
+    int maxThreads() const { return speed_max_threads_.load(); }
+    int testTimeout() const { return speed_test_timeout_.load(); }
+    int chunkSize() const { return speed_chunk_size_.load(); }
+
+    // ─── Maintenance ───
+    int clearOldConfigs(int max_age_hours = 168); // default 7 days
+    void addManualConfigs(const std::vector<std::string>& uris);
+
     // ─── Dashboard ───
     void printStartupBanner();
     void printDashboard();
     void writeStatusFile(const std::string& phase = "", int last_tested = 0, int last_passed = 0);
 
-    // ─── Port Provisioning (10801-10805) ───
+    // ─── Real-time UI Communication (stdin/stdout JSON lines) ───
+    /** Process a single JSON command line received from stdin (Flutter UI) */
+    void processStdinCommand(const std::string& json_line);
+    /** Emit ##STATUS## JSON line to stdout for Flutter UI to parse in real-time */
+    void emitStatusJson(const std::string& phase = "running");
+
+    // ─── Port Provisioning (2901-2999) ───
     void provisionPorts();
     void stopProvisionedPorts();
+    void refreshProvisionedPorts();
     struct PortSlot {
         int port = 0;
         std::string uri;
         int pid = -1;
         bool alive = false;
+        float latency_ms = 0.0f;
+        double last_health_check = 0.0;
+        int consecutive_failures = 0;
     };
     std::vector<PortSlot> getProvisionedPorts() const;
 
@@ -183,6 +216,14 @@ private:
     std::unique_ptr<orchestrator::ThreadManager> thread_manager_;
 
     std::atomic<bool> stop_requested_{false};
+    std::atomic<bool> paused_{false};
+
+    // Speed controls (atomic for thread-safe live updates)
+    std::atomic<int> speed_max_threads_{10};
+    std::atomic<int> speed_test_timeout_{5};
+    std::atomic<int> speed_chunk_size_{15};
+    std::string speed_profile_name_ = "medium";
+    mutable std::mutex speed_mutex_;
 
     // State
     std::atomic<int> cycle_count_{0};
@@ -194,9 +235,10 @@ private:
     std::mutex state_mutex_;
     double start_time_ = 0.0;
 
-    // Port provisioning (10801-10805)
-    static constexpr int PROVISION_PORT_BASE = 10801;
-    static constexpr int PROVISION_PORT_COUNT = 5;
+    // Port provisioning (2901-2999)
+    static constexpr int PROVISION_PORT_BASE = 2901;
+    static constexpr int PROVISION_PORT_MAX = 2999;
+    static constexpr int PROVISION_PORT_COUNT = 20;
     std::vector<PortSlot> provisioned_ports_;
     mutable std::mutex provision_mutex_;
 

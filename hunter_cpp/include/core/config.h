@@ -90,6 +90,16 @@ public:
     std::string xrayPath() const { return getString("xray_path", "xray.exe"); }
     std::vector<std::string> telegramTargets() const { return getStringList("targets"); }
 
+    /**
+     * @brief Get GitHub config source URLs (user-configurable, defaults to constants::githubRepos())
+     */
+    std::vector<std::string> githubUrls() const;
+
+    /**
+     * @brief Set GitHub config source URLs
+     */
+    void setGithubUrls(const std::vector<std::string>& urls);
+
 private:
     mutable std::mutex mutex_;
     std::map<std::string, std::string> data_;

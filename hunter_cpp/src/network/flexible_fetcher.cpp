@@ -63,7 +63,8 @@ void FlexibleFetcher::recordFailure(const std::string& source, const std::string
 
 std::vector<FetchResult> FlexibleFetcher::fetchHttpSourcesParallel(
     const std::vector<int>& proxy_ports,
-    int max_configs, float timeout_per_source, int max_workers) {
+    int max_configs, float timeout_per_source, int max_workers,
+    const std::vector<std::string>& github_urls) {
 
     struct SourceMethod {
         std::string name;
@@ -73,11 +74,14 @@ std::vector<FetchResult> FlexibleFetcher::fetchHttpSourcesParallel(
     int tp = std::max(6, std::min(15, (int)(timeout_per_source / 3.0f)));
     float ot = std::max(10.0f, timeout_per_source);
 
-    std::vector<SourceMethod> methods = {
-        {"github", [&]() { return http_fetcher_.fetchGithubConfigs(proxy_ports, max_configs, tp, ot); }},
-        {"anti_censorship", [&]() { return http_fetcher_.fetchAntiCensorshipConfigs(proxy_ports, max_configs, tp, ot); }},
-        {"iran_priority", [&]() { return http_fetcher_.fetchIranPriorityConfigs(proxy_ports, max_configs, tp, ot); }},
-    };
+    std::vector<SourceMethod> methods;
+    if (!github_urls.empty()) {
+        methods.push_back({"github", [&]() { return http_fetcher_.fetchGithubConfigs(github_urls, proxy_ports, max_configs, tp, ot); }});
+    } else {
+        methods.push_back({"github", [&]() { return http_fetcher_.fetchGithubConfigs(proxy_ports, max_configs, tp, ot); }});
+    }
+    methods.push_back({"anti_censorship", [&]() { return http_fetcher_.fetchAntiCensorshipConfigs(proxy_ports, max_configs, tp, ot); }});
+    methods.push_back({"iran_priority", [&]() { return http_fetcher_.fetchIranPriorityConfigs(proxy_ports, max_configs, tp, ot); }});
 
     auto& mgr = HunterTaskManager::instance();
     std::vector<std::future<FetchResult>> futures;

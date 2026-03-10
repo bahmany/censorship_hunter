@@ -182,6 +182,13 @@ if(WIN32)
 
 endif()
 
+# Test executable
+add_executable(hunter_tests
+    tests/test_core.cpp
+)
+target_link_options(hunter_tests PRIVATE -static)
+target_link_libraries(hunter_tests PRIVATE hunter_core)
+
 # Install targets
 install(TARGETS hunter_core hunter_cli
     ARCHIVE DESTINATION lib

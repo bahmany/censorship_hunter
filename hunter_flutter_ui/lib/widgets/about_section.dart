@@ -40,8 +40,6 @@ class AboutSection extends StatelessWidget {
               const SizedBox(height: 6),
               const Text('Anti-Censorship Config Discovery', style: TextStyle(color: C.txt3, fontSize: 12, letterSpacing: 1)),
               const SizedBox(height: 32),
-              _infoCard(Icons.person_outline, 'Developer', 'bahmanymb@gmail.com'),
-              const SizedBox(height: 10),
               _infoCard(Icons.code, 'Repository', 'github.com/bahmany/censorship_hunter'),
               const SizedBox(height: 10),
               _infoCard(Icons.storage_outlined, 'Bundled Seeds', '$bundledConfigsCount configs'),
