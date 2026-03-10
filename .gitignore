@@ -75,3 +75,6 @@ HUNTER_*.txt
 config/
 docs/
 !docs/ARCHITECTURE.md
+!docs/v1.0.0_RELEASE_GUIDE.md
+!docs/WINDOWS_INSTALLATION_GUIDE.md
+!docs/FLUTTER_UI_GUIDE.md
