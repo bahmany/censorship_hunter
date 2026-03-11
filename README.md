@@ -1,659 +1,348 @@
 <div align="center">
 
-# 🏹 Hunter — Complete Anti-Censorship Solution
+# Hunter
 
-**v1.0.0 Released! Modern Flutter UI + High-Performance C++ Backend**
+**Autonomous Proxy Configuration Discovery & Load Balancing Engine**
 
-[![Release](https://img.shields.io/badge/Release-v1.0.0-blue.svg)](https://github.com/bahmany/censorship_hunter/releases/tag/v1.0.0)
-[![Download](https://img.shields.io/badge/Download-64.55%20MB-green.svg)](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip)
-[![Platform](https://img.shields.io/badge/Platform-Windows%2010%2F11%20x64-lightgrey.svg)]()
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](https://opensource.org/licenses/MIT)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![Flutter](https://img.shields.io/badge/Flutter-3.11-02569B.svg)](https://flutter.dev)
+[![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6.svg)](#system-requirements)
+[![Release](https://img.shields.io/github/v/release/bahmany/censorship_hunter)](https://github.com/bahmany/censorship_hunter/releases)
 
-**📦 [Download Hunter v1.0.0](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (64.55 MB, Self-Contained, No Dependencies)**
-
-**[English](#english) | [فارسی](#persian-farsi)**
+*A high-performance C++ backend with a modern Flutter desktop UI that autonomously discovers, benchmarks, and load-balances proxy configurations from 20+ public sources — designed for environments with heavy internet restrictions.*
 
 </div>
 
 ---
 
-## 🎯 What's New in v1.0.0
+## Table of Contents
 
-### 🖥️ Modern Flutter UI
-- **Dark Racing Neon Theme** - Professional interface with stunning visual design
-- **Real-time Dashboard** - Live monitoring of configs, speeds, and system status  
-- **QR Code Generation** - Seamless mobile device integration
-- **System Tray Integration** - Minimize to tray with context menu
-- **Single Instance Lock** - Prevents multiple instances
-
-### ⚡ High-Performance C++ Backend
-- **Multi-threaded Architecture** - Optimized for concurrent operations
-- **Smart Caching System** - Intelligent configuration prioritization
-- **Continuous Validation** - Background testing with automatic failover
-- **Memory Efficient** - Handles 150K+ configurations with automatic cleanup
-
-### 📦 Self-Contained Package
-- **Zero Dependencies** - Everything bundled, no installation required
-- **Portable** - Works from any directory, just extract and run
-- **Complete** - Includes all proxy engines, libraries, and documentation
-- **Tested** - Verified in multiple isolated environments
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Features](#features)
+- [Quick Start](#quick-start)
+- [Building from Source](#building-from-source)
+- [Configuration](#configuration)
+- [Project Structure](#project-structure)
+- [How It Works](#how-it-works)
+- [Network Ports](#network-ports)
+- [Supported Protocols](#supported-protocols)
+- [System Requirements](#system-requirements)
+- [Troubleshooting](#troubleshooting)
+- [Contributing](#contributing)
+- [License](#license)
 
 ---
 
-<a name="english"></a>
-## 🇬🇧 English
+## Overview
 
-### 🚀 Quick Start (Windows)
+Hunter is an autonomous system that continuously scrapes proxy configuration URIs from public GitHub repositories and Telegram channels, parses and validates them by spawning temporary XRay processes, benchmarks latency, and feeds the best-performing configs into a multi-backend SOCKS5 load balancer — all without manual intervention.
 
-#### Option 1: Download Pre-built Executable (Recommended)
+The project consists of two main components:
 
-1. **Download**: [Hunter-v1.0.0-Final.zip](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (64.55 MB)
-2. **Extract** to any folder (e.g., `C:\Hunter\`)
-3. **Run** `hunter_dashboard.exe`
-4. **Click START** to begin config discovery
+| Component | Technology | Description |
+|-----------|------------|-------------|
+| **Backend Engine** (`hunter_cli`) | C++17, CMake, libcurl, zlib | Autonomous orchestrator with 9 concurrent worker threads |
+| **Desktop UI** (`hunter_dashboard`) | Flutter 3.11, Dart | Real-time monitoring dashboard with neon dark theme |
 
-**System Requirements**: Windows 10/11 x64, 4GB+ RAM recommended
+Communication between the UI and backend uses **bidirectional JSON lines over stdin/stdout**, with file-based status updates as a secondary channel.
 
-#### Option 2: Python Version (Advanced Users)
+## Architecture
 
-Hunter is an **autonomous, production-grade proxy hunting system** designed for users in heavily censored regions (Iran, China, Russia, etc.). It continuously:
-
-1. **Scrapes** — Fetches fresh V2Ray/XRay configs from Telegram channels and GitHub repositories
-2. **Benchmarks** — Tests each config with **two independent pipelines** (Telegram-sourced vs. GitHub-sourced)
-3. **Validates** — Ranks configs by latency, stability, and anti-DPI features
-4. **Serves** — Provides a local SOCKS5 load balancer with automatic failover
-
-### 🚀 Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **🔀 Dual Benchmark Pipelines** | Separate validation lines for Telegram and GitHub configs with isolated port ranges |
-| **⚖️ Smart Load Balancer** | Multi-backend SOCKS5 proxy with health checks and auto-failover |
-| **🛡️ 2026 Anti-DPI Suite** | TLS fragmentation, JA3/JA4 spoofing, VLESS-Reality-Vision, MTU optimization |
-| **🌐 Multi-Protocol** | VMess, VLESS, Trojan, Shadowsocks, Hysteria2, TUIC v5, WireGuard |
-| **🤖 Telegram Integration** | Auto-scrape from channels + report results via bot |
-| **📊 Web Dashboard** | Real-time monitoring at `http://localhost:8585` |
-| **📱 Android App** | Native VPN app with full feature parity |
-| **🧠 Adaptive Intelligence** | DPI-aware config prioritization, memory-safe chunking, circuit breakers |
-| **🎨 Modern UI** | Flutter-based dashboard with Racing Neon theme |
-
-### 🏗️ Architecture Overview
-
-#### v1.0.0 Windows Package Structure
 ```
-Hunter/
-├── hunter_dashboard.exe     # Flutter UI - Main application entry point
-├── hunter_cli.exe           # C++ Backend - Core engine (in bin/)
-├── bin/                     # Proxy engines and backend
-│   ├── hunter_cli.exe       # C++ orchestrator
-│   ├── xray.exe             # XRay Core proxy engine
-│   ├── sing-box.exe         # Sing-box universal proxy
-│   ├── mihomo-windows-amd64-compatible.exe  # Mihomo/Clash core
-│   └── tor.exe              # Tor network support
-├── data/                    # Flutter AOT compiled assets
-├── config/                  # Configuration files and seed configs
-├── docs/                    # Comprehensive documentation (27 files)
-├── runtime/                 # Runtime cache and temporary files
-└── [All DLLs bundled]       # Complete dependencies included
+┌─────────────────────────────────────────────────────────┐
+│                   Flutter Desktop UI                     │
+│  Dashboard │ Configs │ Logs │ Advanced │ About           │
+│  ─────────────────────────────────────────────────────── │
+│  stdin JSON commands ↓          ↑ ##STATUS## JSON lines  │
+└─────────────────────────┬───────┴───────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────┐
+│                 C++ Orchestrator (hunter_cli)             │
+│                                                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
+│  │ Config   │  │ GitHub   │  │Continuous│  │Aggressive│ │
+│  │ Scanner  │  │Downloader│  │Validator │  │Harvester │ │
+│  └────┬─────┘  └────┬─────┘  └────┬─────┘  └────┬────┘ │
+│       │              │              │              │      │
+│       ▼              ▼              ▼              ▼      │
+│  ┌──────────────────────────────────────────────────┐    │
+│  │            ConfigDatabase (in-memory, 150K+)      │    │
+│  └──────────────────────┬───────────────────────────┘    │
+│                         │                                 │
+│       ┌─────────────────▼─────────────────────┐          │
+│       │     ProxyBenchmark (XRay subprocess)    │          │
+│       │     Gold (<2s) │ Silver (<5s) │ Dead    │          │
+│       └─────────────────┬─────────────────────┘          │
+│                         │                                 │
+│  ┌──────────────────────▼──────────────────────────┐     │
+│  │       MultiProxyServer (Load Balancer)           │     │
+│  │  Main :10808 │ Gemini :10809 │ Ports 2901-2999  │     │
+│  │  Least-ping strategy │ Up to 20 backends         │     │
+│  └──────────────────────────────────────────────────┘     │
+│                                                           │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
+│  │   DPI    │  │Obfusca-  │  │ Telegram │  │  Smart  │ │
+│  │ Evasion  │  │  tion    │  │ Reporter │  │  Cache  │ │
+│  └──────────┘  └──────────┘  └──────────┘  └─────────┘ │
+└─────────────────────────────────────────────────────────┘
 ```
 
-#### System Architecture
-```
-┌─────────────────────────────────────────────────────────────────┐
-│                         Hunter System                          │
-├─────────────────────────────────────────────────────────────────┤
-│  ┌─────────────┐    ┌─────────────┐    ┌─────────────────────┐  │
-│  │   Telegram  │    │    GitHub   │    │  Anti-Censorship   │  │
-│  │  Scrapers   │    │   Sources   │    │     Sources        │  │
-│  └──────┬──────┘    └──────┬──────┘    └──────────┬──────────┘  │
-│         │                    │                      │            │
-│         └────────────────────┼──────────────────────┘            │
-│                              ▼                                   │
-│                    ┌─────────────────┐                          │
-│                    │ Config Pipeline │                          │
-│                    │  (separate TG/   │                          │
-│                    │   GH queues)     │                          │
-│                    └────────┬────────┘                          │
-│                             │                                    │
-│         ┌───────────────────┼───────────────────┐                 │
-│         ▼                   ▼                   ▼                │
-│  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐      │
-│  │   Benchmark  │    │   Benchmark  │    │    Tier      │      │
-│  │   Line 1:    │    │   Line 2:    │    │   Ranking    │      │
-│  │  Telegram    │    │   GitHub     │    │ (Gold/Silver/│      │
-│  │  (port 11808)│    │  (port 16808)│    │   Bronze)    │      │
-│  └──────┬───────┘    └──────┬───────┘    └──────┬───────┘      │
-│         │                    │                    │              │
-│         └────────────────────┼────────────────────┘            │
-│                              ▼                                   │
-│                    ┌─────────────────┐                          │
-│                    │  Load Balancer  │                          │
-│                    │   (SOCKS5)      │                          │
-│                    └────────┬────────┘                          │
-│                             │                                    │
-│                             ▼                                    │
-│                      [Your Applications]                         │
-└─────────────────────────────────────────────────────────────────┘
-```
+## Features
 
-### 📦 Installation
+### Backend Engine (C++)
 
-#### Option 1: Windows Executable (Recommended for v1.0.0)
+- **Multi-source Config Discovery** — Scrapes 20+ GitHub repositories, anti-censorship aggregators, and Iran-priority Reality sources in parallel
+- **URI Parser** — Parses VMess, VLESS, Trojan, Shadowsocks, SSR, Hysteria2, and TUIC URIs into structured configs with full parameter extraction
+- **XRay-based Benchmarking** — Spawns temporary XRay processes per config, tests HTTP connectivity through SOCKS, measures latency; classifies into Gold (<2s), Silver (<5s), or Dead tiers
+- **Dual Load Balancers** — Two independent `MultiProxyServer` instances (main on port 10808, gemini on 10809) with least-ping backend selection, health monitoring, and hot config reload
+- **Port Provisioning** — Spins up individual XRay proxy processes on ports 2901–2999 (up to 20 slots) with automatic health checks every 30 seconds
+- **9 Concurrent Worker Threads** — ConfigScanner, GitHubDownloader, ContinuousValidator, AggressiveHarvester, BalancerMonitor, HealthMonitor, TelegramPublisher, DpiPressure, ImportWatcher
+- **ConfigDatabase** — In-memory health database (up to 150K entries) tracking per-config alive/dead status, latency, first-seen/last-alive timestamps, test counts, and priority-based batch scheduling
+- **DPI Evasion** — Adaptive strategy selection (Reality, SplitHTTP/CDN, WebSocket/CDN, gRPC/CDN, Hysteria2); network condition detection; config prioritization by anti-censorship features
+- **Stealth Obfuscation** — SNI randomization, TLS fingerprint rotation (Chrome/Firefox/Safari/Edge), WebSocket path obfuscation
+- **Telegram Bot Reporter** — Publishes validated configs to Telegram groups via Bot API with proxy fallback
+- **Smart Cache** — File-persistent config cache with working/all separation, deduplication, and age-based staleness
+- **Import Watcher** — Monitors `config/import/` folder for manually dropped `.txt` files, auto-processes and adds valid URIs to database
+- **Hardware-Aware Scaling** — Detects CPU count and RAM, adjusts thread pools and batch sizes dynamically
+- **Crash Resilience** — SEH exception handler (Windows), crash logging to `runtime/hunter_crash.log`, graceful shutdown on CTRL+C
 
-**Prerequisites**: Windows 10/11 x64, 4GB+ RAM
+### Desktop UI (Flutter)
 
-1. **Download**: [Hunter-v1.0.0-Final.zip](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (64.55 MB)
-2. **Extract** to any folder (e.g., `C:\Hunter\` or `D:\Tools\Hunter\`)
-3. **Run** `hunter_dashboard.exe`
-4. **Configure** Telegram settings in the UI (optional)
-5. **Click START** to begin config discovery
+- **Real-time Dashboard** — Arc gauges, sparkline trends, alive config count, engine status, provisioned port status with health indicators
+- **Config Browser** — 6 tabs (Alive, Silver, Balancer, Gemini, All Cache, GitHub) with per-row copy, speed test, and QR code generation
+- **Log Viewer** — Color-coded console output with auto-scroll, 100KB memory cap with oldest-line trimming
+- **Advanced Controls** — Pause/Resume, speed profiles (Low/Medium/High), thread count slider (1–50), test timeout slider (1–10s), config age cleanup, manual config addition, GitHub source URL editor
+- **System Proxy Integration** — One-click "USE" button sets Windows system proxy to any active port; "CLEAR" removes it
+- **System Tray** — Minimize to tray on close, context menu (Show/Start/Stop/Exit), tooltip updates on new config discovery
+- **QR Code** — Pure-Dart QR encoder (no external dependencies) for sharing config URIs to mobile devices
+- **Bundled Seed Configs** — Ships with initial config files in `assets/configs/` that are copied to `Documents/Hunter/config` on first run
+- **Single Instance Lock** — File-based exclusive lock prevents multiple dashboard instances
+- **Window Auto-Adapt** — Detects screen resolution, sets window to 75% × 85% clamped between 900×600 and 1800×1200
 
-**That's it!** No Python, no dependencies, no installation. Fully portable.
+## Quick Start
 
-#### Option 2: Python Version (Advanced Users / Developers)
+### Using Pre-built Release
 
-**Prerequisites**: Python 3.8+
+1. Download the latest `.zip` from [Releases](https://github.com/bahmany/censorship_hunter/releases)
+2. Extract to any folder
+3. Run `hunter_dashboard.exe`
+4. Click **START** — the backend begins autonomous discovery immediately
+5. Configure your browser to use `127.0.0.1:10808` as a SOCKS5 proxy
+
+No installation required. No dependencies. Fully portable.
+
+### Optional: Telegram Integration
+
+To also scrape configs from Telegram channels, configure in the Advanced tab:
+1. Get API credentials from [my.telegram.org](https://my.telegram.org/apps)
+2. Enter API ID, API Hash, and phone number in the UI
+3. Add target channel usernames
+4. The backend will scrape configs from these channels alongside GitHub sources
+
+## Building from Source
+
+### Prerequisites
+
+| Tool | Version | Purpose |
+|------|---------|---------|
+| [MSYS2](https://www.msys2.org/) | Latest | C++ toolchain (UCRT64 environment) |
+| [CMake](https://cmake.org/) | ≥ 3.16 | C++ build system |
+| [Ninja](https://ninja-build.org/) | Latest | Fast build backend |
+| [Flutter SDK](https://flutter.dev/) | ≥ 3.11 | Desktop UI framework |
+| [Visual Studio](https://visualstudio.microsoft.com/) | 2022+ | Windows SDK & C++ desktop workload |
+
+### Build C++ Backend
 
 ```bash
-# 1. Clone repository
-git clone https://github.com/bahmany/censorship_hunter.git
-cd hunter
-
-# 2. Create virtual environment
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-# Linux/macOS: source .venv/bin/activate
-
-# 3. Install dependencies
-pip install -r requirements.txt
-
-# 4. Configure environment
-cp .env.example .env
-# Edit .env with your Telegram API credentials
-
-# 5. Run
-python main.py
-```
-
-The load balancer starts on `127.0.0.1:10808` (SOCKS5).
-
-### ⚙️ Configuration (Python Version)
-
-#### Required Variables
-
-| Variable | Source | Description |
-|----------|--------|-------------|
-| `HUNTER_API_ID` | [my.telegram.org](https://my.telegram.org/apps) | Telegram API ID |
-| `HUNTER_API_HASH` | [my.telegram.org](https://my.telegram.org/apps) | Telegram API Hash |
-| `HUNTER_PHONE` | Your phone | International format (e.g., `+1234567890`) |
-
-#### Key Optional Settings
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `TOKEN` | — | Telegram bot token for reporting |
-| `CHAT_ID` | — | Telegram channel/group ID for reports |
-| `HUNTER_MULTIPROXY_PORT` | `10808` | Local SOCKS5 proxy port |
-| `HUNTER_WEB_PORT` | `8585` | Web dashboard port |
-| `IRAN_FRAGMENT_ENABLED` | `false` | TLS fragmentation for Iran's DPI |
-| `ADEE_ENABLED` | `true` | Adversarial DPI Exhaustion Engine |
-
-See `.env.example` for the complete list.
-
-### 🔒 Security Notes
-
-- **Never commit** `.env`, `*.session`, or `hunter_secrets.env`
-- Telegram sessions are stored locally and encrypted
-- All proxy traffic is routed through your local machine
-- No telemetry or data collection
-
-### 🛠️ Advanced Usage
-
-```bash
-# Run with custom config
-python main.py --config custom_config.json
-
-# Diagnostic mode
-python scripts/diagnostic.py
-
-# Enhanced hunter with advanced features
-python scripts/enhanced_hunter.py
-```
-
-### 🗂️ Project Structure
-
-```
-hunter/
-├── main.py                  # Entry point
-├── orchestrator.py          # Core workflow coordinator (dual benchmark lines)
-├── launcher.py              # Interactive launcher
-├── run.bat                  # Windows launcher script
-├── .env.example             # Configuration template
-├── requirements.txt         # Python dependencies
-├── bin/                     # Proxy engine binaries
-│   ├── xray[.exe]          # XRay Core
-│   ├── sing-box[.exe]      # Sing-box
-│   └── mihomo[.exe]        # Clash Meta
-├── core/                    # Core modules
-│   ├── config.py            # Configuration management
-│   ├── models.py            # Data models (HunterBenchResult, etc.)
-│   └── utils.py             # 12-tier config prioritization
-├── parsers/                 # Protocol URI parsers
-│   └── uri_parser.py        # VMess, VLESS, Trojan, SS, Hysteria2, TUIC
-├── security/                # 2026 Anti-DPI Suite
-│   ├── dpi_evasion_orchestrator.py    # Central coordinator
-│   ├── tls_fingerprint_evasion.py     # JA3/JA4 spoofing
-│   ├── tls_fragmentation.py           # ClientHello fragmentation
-│   ├── reality_config_generator.py    # VLESS-Reality-Vision
-│   ├── udp_protocols.py                 # Hysteria2 / TUIC v5
-│   ├── mtu_optimizer.py                 # 5G PMTUD mitigation
-│   ├── active_probe_defense.py
-│   ├── split_http_transport.py        # SplitHTTP/XHTTP
-│   └── stealth_obfuscation.py
-├── proxy/                   # Load balancing
-│   └── load_balancer.py     # Multi-backend SOCKS5 with health checks
-├── network/                 # HTTP client & config fetchers
-│   ├── http_client.py
-│   └── flexible_fetcher.py  # Telegram-first fetching
-├── telegram/                # Telegram integration
-│   ├── scraper.py         # Channel scraper
-│   └── fallback_sender.py   # Bot reporter
-├── performance/             # Adaptive thread management
-│   └── adaptive_thread_manager.py
-├── web/                     # Web dashboard (Flask)
-│   └── server.py
-├── scripts/                 # Utility & diagnostic scripts
-├── native/android/          # Android VPN app (Java + C++)
-├── logs/                    # Runtime logs (git ignored)
-└── runtime/                 # Runtime cache (git ignored)
-```
-
-### 📱 Android App
-
-Full-featured Android VPN app in `native/android/`:
-
-| Feature | Description |
-|---------|-------------|
-| **UI** | Material3 dark theme with Persian (Farsi) localization |
-| **VPN Service** | Load balancing with up to 10 concurrent configs |
-| **Split Tunneling** | Per-app VPN routing |
-| **Auto-Discovery** | Fetch configs from Telegram/GitHub automatically |
-| **DPI Evasion** | Full 2026 suite on Android |
-| **Requirements** | Android 8.0+ (API 26+) |
-
-See [`native/android/README.md`](native/android/README.md) for build instructions.
-
-### 🐛 Troubleshooting
-
-| Issue | Cause | Solution |
-|-------|-------|----------|
-| **No working configs** | Missing binaries or wrong Telegram credentials | Check `bin/` has xray/sing-box/mihomo, verify `.env` |
-| **Port 10808 in use** | Another app using the port | Change `HUNTER_MULTIPROXY_PORT` in `.env` |
-| **Telegram auth loop** | Corrupted session | Delete `*.session` files, re-authenticate |
-| **Windows permission errors** | Insufficient privileges | Run terminal as Administrator |
-| **Large cache files** | Accumulated cache | Delete `runtime/*.json` and `subscriptions_cache.txt` |
-| **High memory usage** | Too many configs loaded | Reduce `max_total` in config, enable REDUCED mode |
-| **DPI detection** | Basic configs blocked | Enable `IRAN_FRAGMENT_ENABLED=true` |
-
-### 🤝 Contributing
-
-We welcome contributions from the community!
-
-1. **Fork** the repository
-2. **Branch** — Create a feature branch: `git checkout -b feature/amazing-feature`
-3. **Commit** — Make your changes with clear messages
-4. **Test** — Run the test suite: `python -m pytest testing/ -v`
-5. **PR** — Submit a pull request to `main`
-
-#### Development Guidelines
-
-- Follow PEP 8 style guide
-- Add docstrings for new functions/classes
-- Update README.md if adding user-facing features
-- Test on both Windows and Linux if possible
-
-### 📄 License
-
-MIT License — see [LICENSE](LICENSE) file for details.
-
----
-
-## 🖥️ Hunter C++ (Native Engine)
-
-Hunter also includes a high-performance **C++ native engine** (`hunter_cpp/`) that runs as a standalone Windows/Linux binary. This is the recommended version for production use.
-
-### Architecture
-
-```
-hunter_cli.exe
-├── Orchestrator          Main coordinator — manages all phases
-│   ├── Phase -1          Kill port occupants
-│   ├── Phase 0           Load configs (raw files → cache → bundle → import)
-│   ├── Phase 1           Censorship detection + emergency bootstrap
-│   ├── Phase 2           Start DPI evasion engines
-│   ├── Phase 3           Startup banner
-│   ├── Phase 4           Start all worker threads
-│   └── Phase 5           Main loop + dashboard
-│
-├── Worker Threads (9 parallel)
-│   ├── config_scanner    Scrapes configs from Telegram + GitHub
-│   ├── github_bg         Background GitHub config downloader
-│   ├── harvester         Aggressive multi-source harvester
-│   ├── validator         Tests configs for speed and connectivity
-│   ├── balancer          Health-checks the load balancer
-│   ├── import_watcher    Watches config/import/ for manual imports
-│   ├── telegram_pub      Publishes working configs to Telegram
-│   ├── dpi_pressure      Anti-DPI pressure testing
-│   └── health_monitor    RAM/CPU monitoring
-│
-├── ConfigDatabase        In-memory config store with health tracking
-├── Load Balancer         SOCKS5 multi-backend (port 10808)
-├── Gemini Balancer       Secondary balancer (port 10809)
-└── Provisioned Ports     Individual proxies on 10801-10805
-```
-
-### Ports
-
-| Port | Purpose |
-|------|---------|
-| **10808** | Main SOCKS5 load balancer (multi-backend) |
-| **10809** | Gemini balancer (secondary) |
-| **10801-10805** | Individual proxy ports (top configs) |
-
-### Config Sources
-
-Hunter loads configs from multiple sources in priority order:
-
-1. **Raw files** — `config/All_Configs_Sub.txt`, `config/all_extracted_configs.txt`, `config/sub.txt`
-2. **Cache** — `runtime/HUNTER_all_cache.txt` (previous session's configs)
-3. **Bundle files** — `bundle/*.txt` (shipped config packs)
-4. **Manual import** — `config/import/*.txt` (user-added configs)
-5. **GitHub** — Automatic background fetching from GitHub repos
-6. **Telegram** — Scraping from configured Telegram channels
-7. **Harvester** — Aggressive multi-source harvesting
-
-### 📥 Manual Config Import
-
-You can manually import configs from any source:
-
-1. **Download** configs from GitHub, Telegram, or any website
-2. **Save** them as a `.txt` file (one URI per line)
-3. **Copy** the file into `config/import/`
-4. **Done!** Hunter scans this folder every 30 seconds
-
-**Supported formats:**
-- `.txt`, `.conf`, `.list`, `.sub` files
-- One proxy URI per line (`vmess://`, `vless://`, `trojan://`, `ss://`, etc.)
-- Base64-encoded subscription content (auto-decoded)
-
-**Automatic cleanup:**
-- ✅ Duplicates are removed automatically
-- ✅ Malformed/invalid URIs are rejected
-- ✅ vmess:// payloads are validated (must decode to JSON with `"add"` field)
-- ✅ vless:// and trojan:// must have `uuid@host:port` format
-- ✅ Processed files are moved to `config/import/processed/`
-- ✅ Invalid URIs are logged in `config/import/invalid/last_invalid.txt`
-
-**Supported protocols:** `vmess://`, `vless://`, `trojan://`, `ss://`, `ssr://`, `hysteria2://`, `hy2://`, `tuic://`
-
-### Directory Structure (C++)
-
-```
-hunter/
-├── bin/
-│   ├── hunter_cli.exe          CLI binary
-│   ├── hunter_ui.exe           Windows GUI binary
-│   └── xray.exe                XRay core engine
-├── config/
-│   ├── All_Configs_Sub.txt     Raw config files
-│   ├── all_extracted_configs.txt
-│   ├── sub.txt
-│   └── import/                 ★ Drop your .txt files here!
-│       ├── README.txt          Instructions
-│       ├── processed/          Processed files moved here
-│       └── invalid/            Invalid URI logs
-├── bundle/                     Bundled config packs
-├── runtime/
-│   ├── HUNTER_status.json      Live status (DB stats, validator progress)
-│   ├── HUNTER_all_cache.txt    All-configs cache
-│   ├── hunter_state.json       Persisted state
-│   └── HUNTER_balancer_cache.json
-└── hunter_cpp/                 C++ source code
-    ├── CMakeLists.txt
-    ├── include/                Headers
-    └── src/                    Source files
-```
-
-### Environment Variables (C++)
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `HUNTER_CONTINUOUS` | `true` | Continuous scanning mode |
-| `HUNTER_SCANNER_INTERVAL_S` | auto | Config scanner interval |
-| `HUNTER_VALIDATOR_INTERVAL_S` | auto | Validator interval |
-| `HUNTER_GITHUB_BG_ENABLED` | `true` | Enable GitHub background fetch |
-| `HUNTER_GITHUB_BG_INTERVAL_S` | auto | GitHub fetch interval |
-| `HUNTER_GITHUB_BG_CAP` | `5000` | Max configs per GitHub fetch |
-| `HUNTER_HARVESTER_INTERVAL_S` | auto | Harvester interval |
-
-### Building from Source
-
-```bash
-# Requires MSYS2 UCRT64 on Windows
-pacman -S mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-ninja \
-          mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-curl \
-          mingw-w64-ucrt-x86_64-zlib
+# In MSYS2 UCRT64 shell:
+pacman -S mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,curl,zlib}
 
 cd hunter_cpp
 mkdir build && cd build
 cmake .. -G Ninja
-cmake --build . --target hunter_cli
+ninja
+
+# Output: hunter_cpp/build/hunter_cli.exe (also copied to bin/)
 ```
 
-### Status Monitoring
+### Build Flutter UI
 
-Hunter writes live status to `runtime/HUNTER_status.json`:
+```powershell
+cd hunter_flutter_ui
+flutter pub get
+flutter build windows --release
 
-```json
-{
-  "db": {
-    "total": 355,
-    "alive": 12,
-    "tested_unique": 200,
-    "untested_unique": 155,
-    "avg_latency_ms": 450.5
-  },
-  "validator": {
-    "last_tested": 20,
-    "last_passed": 3,
-    "rate_per_s": 0.8
-  }
-}
+# Output: hunter_flutter_ui/build/windows/x64/runner/Release/hunter_dashboard.exe
 ```
 
-The dashboard prints every 15 seconds in the console showing uptime, DB size, alive configs, RAM usage, worker status, and DPI strategy.
-
----
-
-<a name="persian-farsi"></a>
-<div dir="rtl" align="right">
-
-## 🇮🇷 فارسی
-
-### 🌟 Hunter چیست؟
-
-**Hunter** یک سیستم **خودکار و صنعتی** برای یافتن، تست و مدیریت پروکسی‌های V2Ray/XRay است. این ابزار برای کاربران مناطق با سانسور سنگین (ایران، چین، روسیه و ...) طراحی شده و به صورت مداوم:
-
-1. **جمع‌آوری** — کانفیگ‌های تازه را از کانال‌های تلگرام و مخازن گیت‌هاب دریافت می‌کند
-2. **تست** — هر کانفیگ را با **دو خط بنچمارک مستقل** (تلگرام و گیت‌هاب) بررسی می‌کند
-3. **رتبه‌بندی** — بر اساس سرعت، پایداری و ویژگی‌های ضد DPI امتیاز می‌دهد
-4. **سرویس‌دهی** — یک پروکسی SOCKS5 محلی با بالانسر هوشمند و failover خودکار ارائه می‌دهد
-
-### 🚀 ویژگی‌های کلیدی
-
-| ویژگی | توضیحات |
-|-------|---------|
-| **🔀 دو خط بنچمارک** | اعتبارسنجی جداگانه کانفیگ‌های تلگرام و گیت‌هاب با رنج پورت متفاوت |
-| **⚖️ بالانسر هوشمند** | پروکسی SOCKS5 چندسروره با چک سلامت و failover خودکار |
-| **🛡️ سوییت ضد DPI 2026** | تکه‌تکه‌سازی TLS، جعل JA3/JA4، VLESS-Reality-Vision، بهینه‌سازی MTU |
-| **🌐 چند پروتکل** | VMess، VLESS، Trojan، Shadowsocks، Hysteria2، TUIC v5، WireGuard |
-| **🤖 یکپارچگی تلگرام** | جمع‌آوری خودکار از کانال‌ها + گزارش‌دهی از طریق بات |
-| **📊 داشبورد وب** | مانیتورینگ لحظه‌ای در `http://localhost:8585` |
-| **📱 اپلیکیشن اندروید** | VPN-native با تمام قابلیت‌ها |
-| **🧠 هوش تطبیقی** | اولویت‌بندی بر اساس DPI، chunking حافظه‌ایمن، circuit breaker |
-| **🎨 رابط کاربری مدرن** | داشبورد مبتنی بر Flutter با تم Racing Neon |
-
-### 📦 راه‌اندازی سریع
-
-#### گزینه ۱: نسخه اجرایی ویندوز (توصیه شده برای v1.0.0)
-
-**پیش‌نیازها**: ویندوز ۱۰/۱۱ x64، ۴ گیگابایت رم یا بیشتر
-
-۱. **دانلود**: [Hunter-v1.0.0-Final.zip](https://github.com/bahmany/censorship_hunter/releases/download/v1.0.0/Hunter-v1.0.0-Final.zip) (۶۴.۵۵ مگابایت)
-۲. **استخراج** در هر پوشه‌ای (مثلاً `C:\Hunter\` یا `D:\Tools\Hunter\`)
-۳. **اجرا**ی `hunter_dashboard.exe`
-۴. **تنظیم** تلگرام در رابط کاربری (اختیاری)
-۵. **کلیک** روی START برای شروع کشف کانفیگ
-
-**تمام!** بدون پایتون، بدون وابستگی، بدون نصب. کاملاً portable.
-
-#### گزینه ۲: نسخه پایتون (کاربران پیشرفته / توسعه‌دهندگان)
-
-**پیش‌نیازها**: پایتون ۳.۸+
+### Run Tests
 
 ```bash
-# ۱. کلون کردن مخزن
-git clone https://github.com/bahmany/censorship_hunter.git
-cd hunter
-
-# ۲. ساخت محیط مجازی
-python -m venv .venv
-# ویندوز: .venv\Scripts\activate
-# لینوکس/مک: source .venv/bin/activate
-
-# ۳. نصب وابستگی‌ها
-pip install -r requirements.txt
-
-# ۴. پیکربندی
-# فایل .env.example را به .env کپی کنید
-# مقادیر API تلگرام را از my.telegram.org دریافت کنید
-
-# ۵. اجرا
-python main.py
+# C++ unit tests (21 tests covering utils, models, URI parser, ConfigDatabase):
+cd hunter_cpp/build
+./hunter_tests.exe
 ```
 
-بالانسر روی `۱۲۷.۰.۰.۱:۱۰۸۰۸` (SOCKS5) راه‌اندازی می‌شود.
+## Configuration
 
-### ⚙️ پیکربندی (نسخه پایتون)
+The backend reads configuration from `runtime/hunter_config.json` (auto-created with defaults on first run). The UI can modify settings live via stdin JSON commands.
 
-#### متغیرهای ضروری
+Key configuration options are also available through environment variables. See [`.env.example`](.env.example) for the full list.
 
-| متغیر | منبع | توضیحات |
-|-------|------|---------|
-| `HUNTER_API_ID` | [my.telegram.org](https://my.telegram.org/apps) | شناسه API تلگرام |
-| `HUNTER_API_HASH` | [my.telegram.org](https://my.telegram.org/apps) | هش API تلگرام |
-| `HUNTER_PHONE` | شماره شما | فرمت بین‌الملل (مثال: `+989123456789`) |
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `HUNTER_MULTIPROXY_PORT` | `10808` | Main SOCKS5 balancer port |
+| `HUNTER_GEMINI_PORT` | `10809` | Secondary balancer port |
+| `HUNTER_SCAN_LIMIT` | `50` | Configs per scan cycle |
+| `HUNTER_MAX_CONFIGS` | `1000` | Max configs to keep in working set |
+| `HUNTER_WORKERS` | `10` | Worker thread count |
+| `HUNTER_TEST_TIMEOUT` | `10` | Per-config test timeout (seconds) |
+| `HUNTER_GITHUB_BG_CAP` | `150000` | Max configs from GitHub background fetch |
+| `HUNTER_DPI_EVASION` | `true` | Enable adaptive DPI evasion |
+| `TELEGRAM_BOT_TOKEN` | — | Telegram Bot API token for reporting |
 
-#### تنظیمات اختیاری مهم
+## Project Structure
 
-| متغیر | پیش‌فرض | توضیحات |
-|-------|---------|---------|
-| `TOKEN` | — | توکن بات تلگرام برای گزارش‌دهی |
-| `CHAT_ID` | — | شناسه کانال/گروه تلگرام |
-| `HUNTER_MULTIPROXY_PORT` | `10808` | پورت پروکسی SOCKS5 محلی |
-| `HUNTER_WEB_PORT` | `8585` | پورت داشبورد وب |
-| `IRAN_FRAGMENT_ENABLED` | `false` | تکه‌تکه‌سازی TLS برای DPI ایران |
-| `ADEE_ENABLED` | `true` | موتور خستگی DPI adversarial |
-
-فایل `.env.example` را برای لیست کامل ببینید.
-
-### 🔒 نکات امنیتی
-
-- **هرگز** فایل‌های `.env`، `*.session` یا `hunter_secrets.env` را commit نکنید
-- session‌های تلگرام به صورت محلی و رمزنگاری‌شده ذخیره می‌شوند
-- تمام ترافیک پروکسی از طریق ماشین محلی شما مسیریابی می‌شود
-- هیچ telemetry یا جمع‌آوری داده‌ای وجود ندارد
-
-### 🛠️ استفاده پیشرفته
-
-```bash
-# اجرا با تنظیمات سفارشی
-python main.py --config custom_config.json
-
-# حالت diagnostic
-python scripts/diagnostic.py
-
-# هانتر پیشرفته با ویژگی‌های اضافی
-python scripts/enhanced_hunter.py
+```
+hunter/
+├── hunter_cpp/                    # C++ backend engine
+│   ├── CMakeLists.txt             # Build configuration (C++17, static linking)
+│   ├── build.bat                  # Quick build script
+│   ├── include/
+│   │   ├── core/                  # Config, models, utils, constants, task_manager
+│   │   ├── network/               # HTTP client, URI parser, config fetcher,
+│   │   │                          # continuous validator, proxy tester,
+│   │   │                          # aggressive harvester, flexible fetcher
+│   │   ├── proxy/                 # Multi-backend load balancer, XRay manager
+│   │   ├── testing/               # Proxy benchmarking engine
+│   │   ├── security/              # DPI evasion orchestrator, obfuscation engine
+│   │   ├── telegram/              # Bot API reporter
+│   │   ├── cache/                 # Smart file-persistent cache
+│   │   ├── orchestrator/          # Main orchestrator, thread manager (9 workers)
+│   │   └── web/                   # HTTP server, dashboard (optional)
+│   ├── src/                       # Implementation files (mirrors include/ layout)
+│   └── tests/
+│       └── test_core.cpp          # 21 unit tests
+│
+├── hunter_flutter_ui/             # Flutter desktop UI
+│   ├── lib/
+│   │   ├── main.dart              # App entry, process management, stdin/stdout IPC
+│   │   ├── theme.dart             # "Racing Neon" dark color palette
+│   │   ├── models.dart            # Enums and data classes
+│   │   ├── services.dart          # File I/O, engine detection, speed test helpers
+│   │   └── widgets/
+│   │       ├── dashboard_section  # Gauges, alive configs, port status, controls
+│   │       ├── configs_section    # 6-tab config browser with copy/QR/speed test
+│   │       ├── logs_section       # Color-coded log viewer
+│   │       ├── advanced_section   # Speed controls, GitHub URL editor, Telegram
+│   │       ├── about_section      # Project info
+│   │       ├── gauge_painter      # Arc gauge + sparkline custom painters
+│   │       ├── qr_painter         # Pure-Dart QR encoder (no deps)
+│   │       └── qr_dialog          # QR code display dialog
+│   ├── assets/configs/            # Bundled seed configurations
+│   ├── pubspec.yaml               # Dependencies: window_manager, system_tray, etc.
+│   └── windows/                   # Windows runner (Visual Studio project)
+│
+├── config/                        # Runtime config directory
+│   └── import/                    # Drop .txt files here for auto-import
+├── .env.example                   # Environment variable reference
+├── .gitignore
+├── LICENSE                        # MIT License
+├── CHANGELOG.md
+└── CONTRIBUTING.md
 ```
 
-### 📱 اپلیکیشن اندروید
+## How It Works
 
-اپلیکیشن VPN کامل در `native/android/`:
+### Autonomous Hunting Loop
 
-| ویژگی | توضیحات |
-|-------|---------|
-| **رابط** | Material3 تم تیره با محلی‌سازی فارسی |
-| **VPN Service** | بالانسر با تا 10 کانفیگ همزمان |
-| **Split Tunneling** | مسیریابی برنامه به برنامه |
-| **کشف خودکار** | دریافت کانفیگ از تلگرام/گیت‌هاب |
-| **ضد DPI** | سوییت کامل 2026 روی اندروید |
-| **نیازمندی** | اندروید 8.0+ (API 26+) |
+1. **Startup** — Load cached configs from previous session → start balancers with cached backends for immediate connectivity → start all 9 worker threads
+2. **Scrape** — ConfigScanner and GitHubDownloader fetch URIs from 20+ sources in parallel; AggressiveHarvester uses round-robin proxy ports for reliability
+3. **Parse** — UriParser extracts structured `ParsedConfig` from each URI (protocol, address, port, TLS settings, transport, SNI, fingerprint, etc.)
+4. **Benchmark** — ProxyBenchmark spawns temporary XRay processes, tests HTTP download through SOCKS, measures latency → Gold (<2s) / Silver (<5s) / Dead
+5. **Balance** — Gold configs are fed to `MultiProxyServer` which manages up to 20 XRay backend processes with least-ping selection
+6. **Validate** — ContinuousValidator continuously re-tests the database in priority order (untested → stale → alive), evicts configs dead >3 hours
+7. **Publish** — TelegramPublisher sends validated Gold configs to configured Telegram group
+8. **Repeat** — Main loop runs every 30 minutes with adaptive sleep; balancer health checks every 60 seconds; validator batches every 2 seconds
 
-برای دستورالعمل ساخت، [`native/android/README.md`](native/android/README.md) را ببینید.
+### Config Prioritization
 
-### 📥 وارد کردن دستی کانفیگ
+Configs are scored by anti-censorship features:
 
-می‌توانید کانفیگ‌هایی که از گیت‌هاب، تلگرام یا هر منبع دیگری دانلود کرده‌اید را به صورت دستی وارد کنید:
+| Priority | Feature | Rationale |
+|----------|---------|-----------|
+| Highest | VLESS + Reality | Indistinguishable from legitimate TLS traffic |
+| High | gRPC over CDN | Hides behind CDN infrastructure |
+| Medium | WebSocket over TLS | Common CDN transport |
+| Lower | Trojan over TLS | Standard TLS encryption |
+| Lowest | Plain VMess/SS | No advanced evasion |
 
-1. کانفیگ‌ها را در یک فایل `.txt` ذخیره کنید (هر خط یک URI)
-2. فایل را در پوشه `config/import/` کپی کنید
-3. **تمام!** Hunter هر ۳۰ ثانیه این پوشه را اسکن می‌کند
+## Network Ports
 
-**پاکسازی خودکار:**
-- ✅ کانفیگ‌های تکراری حذف می‌شوند
-- ✅ کانفیگ‌های خراب و نامعتبر رد می‌شوند
-- ✅ فایل‌های پردازش‌شده به `config/import/processed/` منتقل می‌شوند
-- ✅ URIهای نامعتبر در `config/import/invalid/last_invalid.txt` ذخیره می‌شوند
+| Port | Service | Description |
+|------|---------|-------------|
+| `10808` | Main SOCKS5 balancer | Primary proxy endpoint — configure your browser here |
+| `10809` | Gemini SOCKS5 balancer | Secondary independent balancer |
+| `2901`–`2999` | Provisioned proxies | Individual XRay processes (up to 20 slots) |
+| `11808`+ | Benchmark ports | Temporary ports used during config testing |
 
-**فرمت‌های پشتیبانی‌شده:** `.txt`، `.conf`، `.list`، `.sub`
+## Supported Protocols
 
-**پروتکل‌های پشتیبانی‌شده:** `vmess://`، `vless://`، `trojan://`، `ss://`، `ssr://`، `hysteria2://`، `hy2://`، `tuic://`
+| Protocol | URI Scheme | Proxy Engine |
+|----------|-----------|--------------|
+| VMess | `vmess://` | XRay |
+| VLESS | `vless://` | XRay |
+| VLESS + Reality | `vless://...&security=reality` | XRay |
+| Trojan | `trojan://` | XRay |
+| Shadowsocks | `ss://` | XRay |
+| ShadowsocksR | `ssr://` | XRay |
+| Hysteria2 | `hysteria2://`, `hy2://` | Sing-box |
+| TUIC v5 | `tuic://` | Sing-box |
 
-### 🐛 عیب‌یابی
+**Transport types:** TCP, WebSocket, gRPC, HTTP/2, SplitHTTP, HTTPUpgrade
 
-| مشکل | علت | راه‌حل |
-|------|-----|--------|
-| **کانفیگ سالم پیدا نشد** | باینری ناقص یا اعتبار اشتباه | `bin/` را بررسی کنید، `.env` را Verify کنید |
-| **پورت 10808 اشغال است** | برنامه دیگر از پورت استفاده می‌کند | `HUNTER_MULTIPROXY_PORT` را در `.env` تغییر دهید |
-| **حلقه احراز هویت تلگرام** | session خراب | فایل‌های `*.session` را حذف و دوباره احراز هویت کنید |
-| **خطای دسترسی ویندوز** | دسترسی ناکافی | ترمینال را به عنوان Administrator اجرا کنید |
-| **فایل‌های کش حجیم** | انباشت cache | `runtime/*.json` و `subscriptions_cache.txt` را حذف کنید |
-| **مصرف حافظه بالا** | کانفیگ‌های زیاد بارگذاری شده | `max_total` را کاهش دهید، REDUCED mode را فعال کنید |
-| **تشخیص DPI** | کانفیگ‌های ساده بلاک شده‌اند | `IRAN_FRAGMENT_ENABLED=true` را فعال کنید |
+**Proxy engines included in release:**
+- [XRay-core](https://github.com/XTLS/Xray-core) — Primary engine for V2Ray-family protocols
+- [Sing-box](https://github.com/SagerNet/sing-box) — Universal proxy platform (Hysteria2, TUIC)
+- [Mihomo](https://github.com/MetaCubeX/mihomo) — Clash Meta compatible engine
+- [Tor](https://www.torproject.org/) — Onion routing network support
 
-### 🤝 مشارکت
+## System Requirements
 
-مشارکت شما خوش‌آمد است!
+| Requirement | Minimum | Recommended |
+|-------------|---------|-------------|
+| OS | Windows 10 x64 | Windows 11 x64 |
+| RAM | 4 GB | 8 GB |
+| Storage | 200 MB | 500 MB |
+| CPU | 2 cores | 4+ cores |
+| Network | Internet access | Unrestricted or censored |
 
-1. مخزن را **Fork** کنید
-2. **Branch** بسازید: `git checkout -b feature/amazing-feature`
-3. **Commit** — تغییرات را با پیام‌های واضح commit کنید
-4. **Test** — تست‌ها را اجرا کنید: `python -m pytest testing/ -v`
-5. **PR** — Pull request به `main` ارسال کنید
+## Troubleshooting
 
-### 📄 مجوز
+| Symptom | Cause | Solution |
+|---------|-------|----------|
+| `hunter_cli.exe` not found | Backend binary missing from `bin/` | Re-extract from release ZIP or build from source |
+| DLL errors on launch | Antivirus quarantined files | Add extraction folder to antivirus exclusions |
+| Port 10808 already in use | Another proxy or previous instance | Kill the process using the port, or change port in `runtime/hunter_config.json` |
+| No configs appearing | No internet, or all sources blocked | Check connectivity; try adding manual configs via Advanced tab |
+| UI won't start | Missing `data/` folder | Ensure `data/` with `app.so` exists alongside `hunter_dashboard.exe` |
+| Slow config discovery | Default speed profile is conservative | Switch to "High" speed profile in dashboard controls |
+| Configs found but proxy not working | Balancer has no healthy backends yet | Wait for benchmarking to complete (watch Gold count in dashboard) |
 
-مجوز MIT — فایل [LICENSE](LICENSE) را ببینید.
+## Contributing
 
-</div>
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## License
+
+This project is licensed under the **MIT License** — see the [LICENSE](LICENSE) file for details.
 
 ---
 
 <div align="center">
 
-**Made with ❤️ for a free and open internet**
-
-[⭐ Star us on GitHub](https://github.com/yourusername/hunter) | [🐛 Report Bug](../../issues) | [💡 Request Feature](../../issues)
+Made with determination for a free and open internet.
 
 </div>

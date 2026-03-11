@@ -1,80 +1,79 @@
-# =============================================================
-# OS & IDE
-# =============================================================
+# ═══════════════════════════════════════════════════════════════
+# Hunter — .gitignore
+# ═══════════════════════════════════════════════════════════════
 
+# ─── OS Generated Files ──────────────────────────────────────
 .DS_Store
 Thumbs.db
+Desktop.ini
+ehthumbs.db
 *~
+
+# ─── IDE / Editor ────────────────────────────────────────────
 .vscode/
 .idea/
 *.swp
 *.swo
+*.suo
+*.user
+*.sln.docstates
 
-# =============================================================
-# C++ Build Artifacts
-# =============================================================
-
+# ─── C++ Build Artifacts ────────────────────────────────────
 hunter_cpp/build/
+hunter_cpp/runtime/
 *.o
 *.obj
 *.a
 *.lib
-*.exe
-!bin/*.exe
+*.pch
+*.pdb
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+Makefile
 
-# =============================================================
-# Flutter
-# =============================================================
-
+# ─── Flutter Build Artifacts ─────────────────────────────────
 hunter_flutter_ui/.dart_tool/
 hunter_flutter_ui/.packages
 hunter_flutter_ui/build/
 hunter_flutter_ui/.flutter-plugins
 hunter_flutter_ui/.flutter-plugins-dependencies
 hunter_flutter_ui/pubspec.lock
+hunter_flutter_ui/windows_installer_wix/
 *.iml
 
-# =============================================================
-# Sensitive / Secrets
-# =============================================================
-
-.env
-*.env
-!.env.example
-hunter_secrets.env
-*.session
-
-# =============================================================
-# Logs & Diagnostics
-# =============================================================
-
-*.log
-logs/
-
-# =============================================================
-# Project Runtime & Cache
-# =============================================================
-
-# Proxy engine binaries (download separately)
+# ─── Binaries & Proxy Engines (release-only) ────────────────
+# These are large binaries shipped in GitHub Releases, not in source.
+# Download from Releases or build from source.
 bin/
 
-# Runtime working directory
+# ─── Runtime Data ────────────────────────────────────────────
 runtime/
-
-# Subscription and config caches (can be large)
-*cache*.txt
-subscriptions_cache.txt
-working_configs_cache.txt
 HUNTER_*.json
 HUNTER_*.txt
 
-# =============================================================
-# Misc
-# =============================================================
+# ─── Config Caches (user/runtime data) ──────────────────────
+config/All_Configs_Sub.txt
+config/all_extracted_configs.txt
+config/sub.txt
+config/__pycache__/
+config/import/processed/
+*cache*.txt
+subscriptions_cache.txt
+working_configs_cache.txt
 
-config/
-docs/
-!docs/ARCHITECTURE.md
-!docs/v1.0.0_RELEASE_GUIDE.md
-!docs/WINDOWS_INSTALLATION_GUIDE.md
-!docs/FLUTTER_UI_GUIDE.md
+# ─── Release Packages ───────────────────────────────────────
+*.zip
+Hunter-Release/
+Hunter-v*-*/
+installer/output/
+
+# ─── Secrets & Credentials ──────────────────────────────────
+.env
+*.env
+!.env.example
+*.session
+
+# ─── Logs ────────────────────────────────────────────────────
+*.log
+logs/

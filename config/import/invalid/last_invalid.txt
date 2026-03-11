@@ -1,0 +1,9 @@
+# --- Import scan at Sat Mar  7 12:59:27 2026
+- One proxy URI per line (vmess://, vless://, etc.)
+ss://         Shadowsocks
+trojan://     Trojan
+vless://      VLESS (XRay)
+vmess://      VMess (V2Ray)
+✓ Checks ss:// has valid method:password or base64 encoding
+✓ Checks vless:// and trojan:// have uuid@host:port format
+✓ Checks vmess:// base64 payload is valid JSON with required fields
