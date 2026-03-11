@@ -248,6 +248,7 @@ class RuntimeSnapshot {
   List<String> goldConfigs = const <String>[];
   List<HunterLatencyConfig> balancerConfigs = const <HunterLatencyConfig>[];
   List<HunterLatencyConfig> geminiConfigs = const <HunterLatencyConfig>[];
+  List<HunterLatencyConfig> allRecords = const <HunterLatencyConfig>[];
   Map<String, dynamic>? status;
   List<Map<String, dynamic>> history = const <Map<String, dynamic>>[];
 }
@@ -282,7 +283,7 @@ Future<RuntimeSnapshot> loadRuntimeSnapshot(String runtimeDir) async {
         final dynamic aliveRaw = decoded['alive_configs'];
         if (aliveRaw is List) {
           final List<String> fallbackUris = <String>[];
-          final List<HunterLatencyConfig> fallbackLatency = <HunterLatencyConfig>[];
+          final List<HunterLatencyConfig> allParsed = <HunterLatencyConfig>[];
           final Set<String> seen = <String>{};
           for (final dynamic row in aliveRaw) {
             if (row is! Map) continue;
@@ -293,21 +294,33 @@ Future<RuntimeSnapshot> loadRuntimeSnapshot(String runtimeDir) async {
             final dynamic latencyRaw = row['latency_ms'];
             final double? latency = switch (latencyRaw) {
               num v => v.toDouble(),
-              String s => double.tryParse(s),
+              String sv => double.tryParse(sv),
               _ => null,
             };
             final double? firstSeen = (row['first_seen'] is num) ? (row['first_seen'] as num).toDouble() : null;
             final double? lastAlive = (row['last_alive'] is num) ? (row['last_alive'] as num).toDouble() : null;
+            final double? lastTested = (row['last_tested'] is num) ? (row['last_tested'] as num).toDouble() : null;
             final int? totalTests = (row['total_tests'] is num) ? (row['total_tests'] as num).toInt() : null;
-            fallbackUris.add(uri);
-            fallbackLatency.add(HunterLatencyConfig(uri: uri, latencyMs: latency, firstSeen: firstSeen, lastAlive: lastAlive, totalTests: totalTests));
+            final int? totalPasses = (row['total_passes'] is num) ? (row['total_passes'] as num).toInt() : null;
+            final int? consecutiveFails = (row['consecutive_fails'] is num) ? (row['consecutive_fails'] as num).toInt() : null;
+            final bool? alive = (row['alive'] is bool) ? row['alive'] as bool : null;
+            final String? tag = (row['tag'] is String) ? row['tag'] as String : null;
+            final HunterLatencyConfig cfg = HunterLatencyConfig(
+              uri: uri, latencyMs: latency, firstSeen: firstSeen,
+              lastAlive: lastAlive, lastTested: lastTested,
+              totalTests: totalTests, totalPasses: totalPasses,
+              consecutiveFails: consecutiveFails, alive: alive, tag: tag,
+            );
+            allParsed.add(cfg);
+            if (alive == true) fallbackUris.add(uri);
           }
+          s.allRecords = allParsed;
           if (fallbackUris.isNotEmpty) {
             if (s.goldConfigs.isEmpty && s.silverConfigs.isEmpty) {
               s.goldConfigs = fallbackUris;
             }
             if (s.balancerConfigs.isEmpty) {
-              s.balancerConfigs = fallbackLatency;
+              s.balancerConfigs = allParsed.where((HunterLatencyConfig c) => c.alive == true).toList();
             }
           }
         }
@@ -815,20 +828,30 @@ double? minLatencyMs(List<HunterLatencyConfig> items) {
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Windows System Proxy (registry-based)
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-Future<bool> setWindowsSystemProxy(int port) async {
+Future<bool> setWindowsSystemProxy(int socksPort, {int httpPort = 0}) async {
   if (!Platform.isWindows) return false;
   try {
-    // Set proxy server to socks=127.0.0.1:port
+    // Build proxy string: prefer HTTP (universally supported by Windows apps)
+    // with SOCKS fallback for apps that support it
+    final String proxyValue = httpPort > 0
+        ? 'http=127.0.0.1:$httpPort;https=127.0.0.1:$httpPort;socks=127.0.0.1:$socksPort'
+        : 'socks=127.0.0.1:$socksPort';
     await Process.run('reg', <String>[
       'add', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
       '/v', 'ProxyServer', '/t', 'REG_SZ',
-      '/d', 'socks=127.0.0.1:$port', '/f',
+      '/d', proxyValue, '/f',
     ]);
     // Enable proxy
     await Process.run('reg', <String>[
       'add', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
       '/v', 'ProxyEnable', '/t', 'REG_DWORD',
       '/d', '1', '/f',
+    ]);
+    // Bypass local addresses
+    await Process.run('reg', <String>[
+      'add', r'HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings',
+      '/v', 'ProxyOverride', '/t', 'REG_SZ',
+      '/d', 'localhost;127.*;10.*;192.168.*;172.16.*;<local>', '/f',
     ]);
     // Notify WinInet of change
     await _refreshWinInet();

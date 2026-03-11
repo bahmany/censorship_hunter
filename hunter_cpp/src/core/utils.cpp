@@ -337,10 +337,20 @@ std::string execCommand(const std::string& cmd) {
     return result;
 }
 
+// Thread-safe WSAStartup — called once across all threads
+#ifdef _WIN32
+static std::once_flag s_wsa_once;
+static void ensureWsaInit() {
+    std::call_once(s_wsa_once, []() {
+        WSADATA d;
+        WSAStartup(MAKEWORD(2, 2), &d);
+    });
+}
+#endif
+
 bool isPortAlive(int port, int timeout_ms) {
 #ifdef _WIN32
-    static bool ws_init=false;
-    if(!ws_init){WSADATA d;WSAStartup(MAKEWORD(2,2),&d);ws_init=true;}
+    ensureWsaInit();
 #endif
     int fd=socket(AF_INET,SOCK_STREAM,0);
     if(fd<0) return false;
@@ -365,8 +375,7 @@ bool isPortAlive(int port, int timeout_ms) {
 
 bool tcpConnect(const std::string& host, int port, int timeout_ms) {
 #ifdef _WIN32
-    static bool ws_init2=false;
-    if(!ws_init2){WSADATA d;WSAStartup(MAKEWORD(2,2),&d);ws_init2=true;}
+    ensureWsaInit();
 #endif
     // Only pre-screen IP addresses, skip domains (DNS is censored locally)
     sockaddr_in addr{};

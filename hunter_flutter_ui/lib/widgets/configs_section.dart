@@ -15,6 +15,7 @@ class ConfigsSection extends StatelessWidget {
     required this.goldConfigs,
     required this.balancerConfigs,
     required this.geminiConfigs,
+    required this.allRecords,
     required this.lastRefresh,
     required this.onKindChanged,
     required this.onSearchChanged,
@@ -32,6 +33,7 @@ class ConfigsSection extends StatelessWidget {
   final List<String> goldConfigs;
   final List<HunterLatencyConfig> balancerConfigs;
   final List<HunterLatencyConfig> geminiConfigs;
+  final List<HunterLatencyConfig> allRecords;
   final DateTime? lastRefresh;
   final ValueChanged<HunterConfigListKind> onKindChanged;
   final VoidCallback onSearchChanged;
@@ -69,9 +71,12 @@ class ConfigsSection extends StatelessWidget {
     };
   }
 
+  int get _aliveCount => allRecords.where((HunterLatencyConfig c) => c.alive == true).length;
+  int get _deadCount => allRecords.where((HunterLatencyConfig c) => c.alive == false && c.totalTests != null && c.totalTests! > 0).length;
+
   String _kindLabel(HunterConfigListKind k) {
     return switch (k) {
-      HunterConfigListKind.alive => 'Found (${_aliveConfigs.length})',
+      HunterConfigListKind.alive => 'Health ($_aliveCount✔ $_deadCount✘)',
       HunterConfigListKind.silver => 'Silver (${silverConfigs.length})',
       HunterConfigListKind.balancer => 'Live Xray (${balancerConfigs.length})',
       HunterConfigListKind.gemini => 'Live Gemini (${geminiConfigs.length})',
@@ -84,18 +89,26 @@ class ConfigsSection extends StatelessWidget {
   Widget build(BuildContext context) {
     final String q = searchController.text.trim().toLowerCase();
     final bool latency = _isLatencyKind;
+    final bool isHealthTab = listKind == HunterConfigListKind.alive;
 
     List<String> visibleUris;
     List<HunterLatencyConfig> visibleLatency;
+    List<HunterLatencyConfig> visibleHealth;
 
-    if (latency) {
+    if (isHealthTab) {
+      visibleHealth = q.isEmpty ? allRecords : allRecords.where((HunterLatencyConfig c) => c.uri.toLowerCase().contains(q)).toList();
+      visibleUris = visibleHealth.map((HunterLatencyConfig e) => e.uri).toList();
+      visibleLatency = const <HunterLatencyConfig>[];
+    } else if (latency) {
       final List<HunterLatencyConfig> base = _baseLatency();
       visibleLatency = q.isEmpty ? base : base.where((HunterLatencyConfig c) => c.uri.toLowerCase().contains(q)).toList();
       visibleUris = visibleLatency.map((HunterLatencyConfig e) => e.uri).toList();
+      visibleHealth = const <HunterLatencyConfig>[];
     } else {
       final List<String> base = _baseStrings();
       visibleUris = q.isEmpty ? base : base.where((String s) => s.toLowerCase().contains(q)).toList();
       visibleLatency = const <HunterLatencyConfig>[];
+      visibleHealth = const <HunterLatencyConfig>[];
     }
 
     return Column(
@@ -222,8 +235,11 @@ class ConfigsSection extends StatelessWidget {
               borderRadius: const BorderRadius.vertical(bottom: Radius.circular(14)),
               child: ListView.builder(
                 padding: EdgeInsets.zero,
-                itemCount: latency ? visibleLatency.length : visibleUris.length,
+                itemCount: isHealthTab ? visibleHealth.length : (latency ? visibleLatency.length : visibleUris.length),
                 itemBuilder: (BuildContext context, int i) {
+                  if (isHealthTab) {
+                    return _healthRow(context, visibleHealth[i]);
+                  }
                   if (latency) {
                     return _latencyRow(context, visibleLatency[i]);
                   }
@@ -296,6 +312,138 @@ class ConfigsSection extends StatelessWidget {
               visualDensity: VisualDensity.compact,
               padding: EdgeInsets.zero,
               constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _healthRow(BuildContext context, HunterLatencyConfig cfg) {
+    final bool isAlive = cfg.alive == true;
+    final bool isDead = cfg.alive == false && (cfg.totalTests ?? 0) > 0;
+    final String proto = cfg.uri.contains('://') ? cfg.uri.split('://').first.toUpperCase() : '?';
+    final Color protoColor = switch (proto) {
+      'VLESS' || 'VMESS' => C.neonCyan,
+      'SS' || 'SHADOWSOCKS' => C.neonPurple,
+      'TROJAN' => C.neonAmber,
+      _ => C.txt3,
+    };
+
+    // Status badge
+    final String statusLabel = isAlive ? '✔' : (isDead ? '✘' : '?');
+    final Color statusColor = isAlive ? C.neonGreen : (isDead ? C.neonRed : C.txt3);
+
+    // Latency
+    final String latencyText = (cfg.latencyMs != null && cfg.latencyMs! > 0 && isAlive) ? '${cfg.latencyMs!.toStringAsFixed(0)}ms' : '';
+    final Color latColor = (cfg.latencyMs != null)
+        ? (cfg.latencyMs! < 500 ? C.neonGreen : (cfg.latencyMs! < 2000 ? C.neonAmber : C.neonRed))
+        : C.txt3;
+
+    final String foundAt = _fmtUnixTs(cfg.firstSeen);
+    final String lastChecked = _fmtUnixTs(cfg.lastTested);
+    final String tagLabel = (cfg.tag != null && cfg.tag!.isNotEmpty) ? cfg.tag! : '';
+
+    // Build tooltip with full details
+    final StringBuffer tip = StringBuffer();
+    if (foundAt.isNotEmpty) tip.writeln('Found: $foundAt');
+    if (lastChecked.isNotEmpty) tip.writeln('Last checked: $lastChecked');
+    if (cfg.totalTests != null) tip.write('Tests: ${cfg.totalTests}');
+    if (cfg.totalPasses != null) tip.write(' | Passes: ${cfg.totalPasses}');
+    if (cfg.consecutiveFails != null && cfg.consecutiveFails! > 0) tip.write(' | Fails: ${cfg.consecutiveFails}');
+    if (tagLabel.isNotEmpty) tip.write('\nSource: $tagLabel');
+
+    return InkWell(
+      onTap: () => onCopyText(cfg.uri, label: 'Config copied!'),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+        decoration: const BoxDecoration(
+          border: Border(bottom: BorderSide(color: C.border, width: 0.5)),
+        ),
+        child: Row(
+          children: <Widget>[
+            // Status badge
+            Container(
+              width: 22, height: 22,
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: statusColor.withValues(alpha: 0.15),
+                borderRadius: BorderRadius.circular(4),
+                border: Border.all(color: statusColor.withValues(alpha: 0.4)),
+              ),
+              child: Text(statusLabel, style: TextStyle(color: statusColor, fontSize: 11, fontWeight: FontWeight.w800)),
+            ),
+            const SizedBox(width: 6),
+            // Latency
+            if (latencyText.isNotEmpty)
+              SizedBox(
+                width: 48,
+                child: Text(latencyText, textAlign: TextAlign.right,
+                  style: TextStyle(color: latColor, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+              ),
+            if (latencyText.isNotEmpty) const SizedBox(width: 6),
+            // Protocol badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+              decoration: BoxDecoration(
+                color: protoColor.withValues(alpha: 0.12),
+                borderRadius: BorderRadius.circular(3),
+              ),
+              child: Text(proto, style: TextStyle(color: protoColor, fontSize: 8, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+            ),
+            const SizedBox(width: 6),
+            // Found/checked timestamps
+            if (foundAt.isNotEmpty)
+              Text(foundAt, style: TextStyle(color: C.txt3.withValues(alpha: 0.5), fontSize: 8, fontFamily: 'Consolas')),
+            if (foundAt.isNotEmpty && lastChecked.isNotEmpty)
+              Text(' · ', style: TextStyle(color: C.txt3.withValues(alpha: 0.3), fontSize: 8)),
+            if (lastChecked.isNotEmpty)
+              Text(lastChecked, style: TextStyle(color: isAlive ? C.neonGreen.withValues(alpha: 0.5) : C.txt3.withValues(alpha: 0.5), fontSize: 8, fontFamily: 'Consolas')),
+            const SizedBox(width: 6),
+            // Source tag
+            if (tagLabel.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 3, vertical: 0),
+                decoration: BoxDecoration(
+                  color: C.txt3.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(2),
+                ),
+                child: Text(tagLabel, style: TextStyle(color: C.txt3.withValues(alpha: 0.5), fontSize: 7, fontFamily: 'Consolas')),
+              ),
+            if (tagLabel.isNotEmpty) const SizedBox(width: 4),
+            // URI
+            Expanded(
+              child: Tooltip(
+                message: tip.toString(),
+                child: Text(cfg.uri, maxLines: 1, overflow: TextOverflow.ellipsis,
+                  style: TextStyle(color: isAlive ? C.txt1 : (isDead ? C.txt3 : C.txt2), fontSize: 10, fontFamily: 'Consolas', height: 1.2)),
+              ),
+            ),
+            // Action buttons
+            if (isAlive)
+              IconButton(
+                icon: const Icon(Icons.speed, size: 14, color: C.neonAmber),
+                onPressed: () => onSpeedTest(cfg.uri),
+                tooltip: 'Speed test',
+                visualDensity: VisualDensity.compact,
+                padding: EdgeInsets.zero,
+                constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+              ),
+            IconButton(
+              icon: const Icon(Icons.qr_code, size: 12, color: C.neonPurple),
+              onPressed: () => showQrDialog(context, cfg.uri, title: '$proto Config'),
+              tooltip: 'QR Code',
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
+            ),
+            IconButton(
+              icon: const Icon(Icons.content_copy, size: 12, color: C.txt3),
+              onPressed: () => onCopyText(cfg.uri, label: 'Config copied!'),
+              tooltip: 'Copy',
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 24, minHeight: 24),
             ),
           ],
         ),

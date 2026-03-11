@@ -196,6 +196,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   List<String> _goldConfigs = const <String>[];
   List<HunterLatencyConfig> _balancerConfigs = const <HunterLatencyConfig>[];
   List<HunterLatencyConfig> _geminiConfigs = const <HunterLatencyConfig>[];
+  List<HunterLatencyConfig> _allRecords = const <HunterLatencyConfig>[];
   Map<String, dynamic>? _status;
   List<Map<String, dynamic>> _history = const <Map<String, dynamic>>[];
   Map<String, int> _engines = const <String, int>{};
@@ -553,6 +554,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         _goldConfigs = snap.goldConfigs;
         _balancerConfigs = snap.balancerConfigs;
         _geminiConfigs = snap.geminiConfigs;
+        _allRecords = snap.allRecords;
         _status = snap.status;
         _history = nextHistory;
         _engines = eng;
@@ -767,6 +769,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _goldConfigs = const <String>[];
     _balancerConfigs = const <HunterLatencyConfig>[];
     _geminiConfigs = const <HunterLatencyConfig>[];
+    _allRecords = const <HunterLatencyConfig>[];
     _status = null;
     _history = const <Map<String, dynamic>>[];
     _lastRefresh = null;
@@ -1070,12 +1073,22 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   }
 
   Future<void> _setSystemProxy(int port) async {
-    final bool ok = await setWindowsSystemProxy(port);
+    // Find the HTTP port for this SOCKS port from provisioned ports
+    int httpPort = 0;
+    final List<Map<String, dynamic>> ports = _parseProvisionedPorts();
+    for (final Map<String, dynamic> p in ports) {
+      if ((p['port'] is num) && (p['port'] as num).toInt() == port) {
+        httpPort = (p['http_port'] is num) ? (p['http_port'] as num).toInt() : 0;
+        break;
+      }
+    }
+    final bool ok = await setWindowsSystemProxy(port, httpPort: httpPort);
     if (ok && mounted) {
       setState(() => _activeSystemProxyPort = port);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('System proxy set to socks5://127.0.0.1:$port')),
-      );
+      final String msg = httpPort > 0
+          ? 'System proxy: HTTP :$httpPort + SOCKS5 :$port'
+          : 'System proxy: SOCKS5 :$port';
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
     }
   }
 
@@ -1643,6 +1656,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         goldConfigs: _goldConfigs,
         balancerConfigs: _balancerConfigs,
         geminiConfigs: _geminiConfigs,
+        allRecords: _allRecords,
         lastRefresh: _lastRefresh,
         onKindChanged: (HunterConfigListKind k) => setState(() { _configKind = k; _searchCtl.clear(); }),
         onSearchChanged: () => setState(() {}),

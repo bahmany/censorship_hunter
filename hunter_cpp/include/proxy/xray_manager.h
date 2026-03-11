@@ -64,22 +64,24 @@ public:
     bool isProcessAlive(int pid) const;
 
     /**
-     * @brief Generate XRay JSON config for a single outbound
+     * @brief Generate XRay JSON config for a single outbound (dual-protocol: SOCKS + HTTP)
      * @param parsed Parsed proxy config
      * @param socks_port Local SOCKS port to bind
+     * @param http_port Local HTTP port to bind (0 = no HTTP inbound)
      * @return JSON config string
      */
-    static std::string generateConfig(const ParsedConfig& parsed, int socks_port);
+    static std::string generateConfig(const ParsedConfig& parsed, int socks_port, int http_port = 0);
 
     /**
-     * @brief Generate XRay balanced config with multiple outbounds
+     * @brief Generate XRay balanced config with multiple outbounds (dual-protocol: SOCKS + HTTP)
      * @param configs Parsed configs with their SOCKS ports
-     * @param listen_port Main listener port
+     * @param listen_port Main SOCKS listener port
+     * @param http_port HTTP listener port (0 = no HTTP inbound)
      * @return JSON config string
      */
     static std::string generateBalancedConfig(
         const std::vector<std::pair<ParsedConfig, int>>& configs,
-        int listen_port);
+        int listen_port, int http_port = 0);
 
     /**
      * @brief Write config to temp file and return path

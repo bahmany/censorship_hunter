@@ -530,23 +530,26 @@ class DashboardSection extends StatelessWidget {
               ]),
             ),
 
-          // ── Provisioned proxy ports ──
+          // ── Provisioned proxy ports (dual-protocol: SOCKS + HTTP) ──
           ...provisionedPorts.map((Map<String, dynamic> p) {
             final int port = (p['port'] is num) ? (p['port'] as num).toInt() : 0;
+            final int httpPort = (p['http_port'] is num) ? (p['http_port'] as num).toInt() : 0;
             final String uri = (p['uri'] is String) ? p['uri'] as String : '';
             final bool alive = p['alive'] == true;
             final double latency = (p['latency_ms'] is num) ? (p['latency_ms'] as num).toDouble() : 0.0;
             final int failures = (p['consecutive_failures'] is num) ? (p['consecutive_failures'] as num).toInt() : 0;
             final String proto = uri.contains('://') ? uri.split('://').first.toUpperCase() : '?';
             final bool isActive = activeSystemProxyPort == port;
-            return _buildPortRow(
-              port: port,
+            return _buildDualPortRow(
+              socksPort: port,
+              httpPort: httpPort,
               label: proto,
               alive: alive,
               detail: latency > 0 ? '${latency.toStringAsFixed(0)}ms' : (failures > 0 ? '×$failures' : '--'),
               isSystemProxy: isActive,
               onSetProxy: alive && onSetSystemProxy != null ? () => onSetSystemProxy!(port) : null,
-              onCopy: () => onCopyText('socks5://127.0.0.1:$port', label: 'Copied SOCKS5 :$port'),
+              onCopySocks: () => onCopyText('socks5://127.0.0.1:$port', label: 'Copied SOCKS5 :$port'),
+              onCopyHttp: httpPort > 0 ? () => onCopyText('http://127.0.0.1:$httpPort', label: 'Copied HTTP :$httpPort') : null,
               badgeColor: _protoColor(proto),
               uri: uri,
             );
@@ -639,6 +642,119 @@ class DashboardSection extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildDualPortRow({
+    required int socksPort,
+    required int httpPort,
+    required String label,
+    required bool alive,
+    required String detail,
+    required bool isSystemProxy,
+    VoidCallback? onSetProxy,
+    required VoidCallback onCopySocks,
+    VoidCallback? onCopyHttp,
+    required Color badgeColor,
+    String uri = '',
+  }) {
+    final Color statusColor = alive ? C.neonGreen : C.neonRed;
+    return Tooltip(
+      message: 'SOCKS5  127.0.0.1:$socksPort\n'
+          '${httpPort > 0 ? 'HTTP     127.0.0.1:$httpPort\n' : ''}'
+          'Smart routing: Iranian sites direct, DNS through proxy, TLS fragment anti-DPI',
+      child: Padding(
+        padding: const EdgeInsets.only(bottom: 3),
+        child: Row(
+          children: <Widget>[
+            // Status dot
+            Container(
+              width: 8, height: 8,
+              decoration: BoxDecoration(
+                color: statusColor, shape: BoxShape.circle,
+                boxShadow: alive ? <BoxShadow>[BoxShadow(color: statusColor.withValues(alpha: 0.4), blurRadius: 4)] : null,
+              ),
+            ),
+            const SizedBox(width: 6),
+            // Dual port display
+            SizedBox(
+              width: 88,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text('S:$socksPort', style: TextStyle(color: alive ? C.neonCyan : C.txt3, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+                  if (httpPort > 0)
+                    Text('H:$httpPort', style: TextStyle(color: alive ? C.neonAmber : C.txt3, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+                ],
+              ),
+            ),
+            // Badge
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+              decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(3)),
+              child: Text(label, style: TextStyle(color: badgeColor, fontSize: 9, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+            ),
+            const SizedBox(width: 6),
+            // Detail (latency)
+            SizedBox(
+              width: 50,
+              child: Text(detail, style: TextStyle(color: alive ? C.neonGreen : C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+            ),
+            // URI
+            if (uri.isNotEmpty)
+              Expanded(child: Text(uri, maxLines: 1, overflow: TextOverflow.ellipsis, style: TextStyle(color: alive ? C.txt2 : C.txt3, fontSize: 9, fontFamily: 'Consolas')))
+            else
+              const Spacer(),
+            // System proxy indicator or button
+            if (isSystemProxy)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: C.neonGreen.withValues(alpha: 0.15),
+                  borderRadius: BorderRadius.circular(4),
+                  border: Border.all(color: C.neonGreen.withValues(alpha: 0.4)),
+                ),
+                child: const Text('✓ SYSTEM', style: TextStyle(color: C.neonGreen, fontSize: 8, fontWeight: FontWeight.w800)),
+              )
+            else if (onSetProxy != null)
+              InkWell(
+                onTap: onSetProxy,
+                borderRadius: BorderRadius.circular(4),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: C.neonCyan.withValues(alpha: 0.08),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(color: C.neonCyan.withValues(alpha: 0.2)),
+                  ),
+                  child: const Text('USE', style: TextStyle(color: C.neonCyan, fontSize: 8, fontWeight: FontWeight.w700)),
+                ),
+              ),
+            const SizedBox(width: 4),
+            // Copy SOCKS button
+            InkWell(
+              onTap: onCopySocks,
+              borderRadius: BorderRadius.circular(4),
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Text('S', style: TextStyle(color: C.neonCyan.withValues(alpha: 0.7), fontSize: 10, fontWeight: FontWeight.w800, fontFamily: 'Consolas')),
+              ),
+            ),
+            // Copy HTTP button
+            if (onCopyHttp != null) ...<Widget>[
+              const SizedBox(width: 2),
+              InkWell(
+                onTap: onCopyHttp,
+                borderRadius: BorderRadius.circular(4),
+                child: Padding(
+                  padding: const EdgeInsets.all(2),
+                  child: Text('H', style: TextStyle(color: C.neonAmber.withValues(alpha: 0.7), fontSize: 10, fontWeight: FontWeight.w800, fontFamily: 'Consolas')),
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }

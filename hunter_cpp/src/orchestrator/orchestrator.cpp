@@ -1044,21 +1044,23 @@ void HunterOrchestrator::provisionPorts() {
     }
     provisioned_ports_.clear();
 
-    // Start individual XRay processes on ports 2901+
+    // Start individual XRay processes on ports 2901+ (SOCKS) with HTTP on port+100
     double now = utils::nowTimestamp();
     for (int i = 0; i < count; i++) {
-        int port = PROVISION_PORT_BASE + i;
+        int socks_port = PROVISION_PORT_BASE + i;
+        int http_port = socks_port + 100;  // HTTP on port+100 (e.g., 3001 for SOCKS 2901)
         auto& [uri, latency] = best[i];
 
         auto parsed = network::UriParser::parse(uri);
         if (!parsed.has_value() || !parsed->isValid()) continue;
 
-        std::string config_json = proxy::XRayManager::generateConfig(*parsed, port);
+        std::string config_json = proxy::XRayManager::generateConfig(*parsed, socks_port, http_port);
         std::string config_path = xray_manager_.writeConfigFile(config_json);
         int pid = xray_manager_.startProcess(config_path);
 
         PortSlot slot;
-        slot.port = port;
+        slot.port = socks_port;
+        slot.http_port = http_port;
         slot.uri = uri;
         slot.pid = pid;
         slot.alive = (pid > 0);
@@ -1068,15 +1070,16 @@ void HunterOrchestrator::provisionPorts() {
         provisioned_ports_.push_back(slot);
 
         if (pid > 0) {
-            std::cout << "[Provision] Port " << port << " <- "
+            std::cout << "[Provision] SOCKS:" << socks_port << " HTTP:" << http_port << " <- "
                       << uri.substr(0, std::min((int)uri.size(), 50)) << "..."
                       << " (latency=" << latency << "ms)" << std::endl;
         }
     }
 
     if (count > 0) {
-        std::cout << "[Provision] " << count << " ports provisioned ("
+        std::cout << "[Provision] " << count << " dual-protocol ports provisioned (SOCKS "
                   << PROVISION_PORT_BASE << "-" << (PROVISION_PORT_BASE + count - 1)
+                  << ", HTTP " << (PROVISION_PORT_BASE + 100) << "-" << (PROVISION_PORT_BASE + 100 + count - 1)
                   << ")" << std::endl;
     }
 }
@@ -1158,12 +1161,15 @@ void HunterOrchestrator::refreshProvisionedPorts() {
             continue;
         }
 
-        int port = provisioned_ports_[idx].port;
-        std::string config_json = proxy::XRayManager::generateConfig(*parsed, port);
+        int socks_port = provisioned_ports_[idx].port;
+        int h_port = provisioned_ports_[idx].http_port;
+        if (h_port <= 0) h_port = socks_port + 100;  // ensure http_port is set
+        std::string config_json = proxy::XRayManager::generateConfig(*parsed, socks_port, h_port);
         std::string config_path = xray_manager_.writeConfigFile(config_json);
         int pid = xray_manager_.startProcess(config_path);
 
         provisioned_ports_[idx].uri = uri;
+        provisioned_ports_[idx].http_port = h_port;
         provisioned_ports_[idx].pid = pid;
         provisioned_ports_[idx].alive = (pid > 0);
         provisioned_ports_[idx].latency_ms = latency;
@@ -1172,7 +1178,8 @@ void HunterOrchestrator::refreshProvisionedPorts() {
 
         if (pid > 0) {
             utils::LogRingBuffer::instance().push(
-                "[Provision] Replaced dead port " + std::to_string(port) +
+                "[Provision] Replaced dead SOCKS:" + std::to_string(socks_port) +
+                " HTTP:" + std::to_string(h_port) +
                 " with new config (latency=" + std::to_string((int)latency) + "ms)");
         }
         replaced++;
@@ -1885,6 +1892,7 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
             ports_first = false;
             utils::JsonBuilder pj;
             pj.add("port", slot.port)
+              .add("http_port", slot.http_port)
               .add("uri", slot.uri)
               .add("alive", slot.alive)
               .add("latency_ms", slot.latency_ms)

@@ -180,7 +180,7 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
         stream += ",\"splithttpSettings\":{\"path\":\"" + (path.empty() ? "/" : path) + "\""
                   + (host.empty() ? "" : ",\"host\":\"" + host + "\"") + "}";
     } else if (net == "grpc") {
-        std::string sn = path.empty() ? extra.count("serviceName") ? extra.at("serviceName") : "" : path;
+        std::string sn = !path.empty() ? path : (extra.count("serviceName") ? extra.at("serviceName") : "");
         stream += ",\"grpcSettings\":{\"serviceName\":\"" + sn + "\"}";
     } else if (net == "h2") {
         stream += ",\"httpSettings\":{\"path\":\"" + (path.empty() ? "/" : path) + "\""

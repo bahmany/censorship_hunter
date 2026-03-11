@@ -186,7 +186,8 @@ public:
     void stopProvisionedPorts();
     void refreshProvisionedPorts();
     struct PortSlot {
-        int port = 0;
+        int port = 0;          // SOCKS port
+        int http_port = 0;     // HTTP port (port + 100)
         std::string uri;
         int pid = -1;
         bool alive = false;

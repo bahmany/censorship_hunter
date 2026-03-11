@@ -12,6 +12,10 @@
 #include <filesystem>
 #include <fstream>
 
+#ifdef _WIN32
+#include <windows.h>
+#endif
+
 namespace hunter {
 namespace orchestrator {
 
@@ -610,7 +614,9 @@ void ValidatorWorker::execute() {
     else if (hw.ram_percent >= 90.0f) batch_size = std::min(batch_size, 12);
     else if (hw.ram_percent >= 80.0f) batch_size = std::min(batch_size, 20);
 
-    network::ContinuousValidator validator(*db, batch_size);
+    int timeout_s = orch_->testTimeout();
+    int max_concurrent = orch_->maxThreads();
+    network::ContinuousValidator validator(*db, batch_size, timeout_s, max_concurrent);
     auto [tested, passed] = validator.validateBatch();
 
     { std::ostringstream _ls; _ls << "[Validator] Batch: tested=" << tested << " passed=" << passed;
@@ -689,20 +695,32 @@ void ValidatorWorker::execute() {
     }
     hist << "]";
 
-    auto healthy_configs = db->getHealthyConfigs(200);
+    auto all_records = db->getAllRecords(500);
     static bool had_alive_configs = false;
     static uint64_t last_live_refresh_attempt_ms = 0;
     static uint64_t last_live_refresh_success_ms = 0;
+
+    // Build alive_configs JSON with full health details
     std::ostringstream alive_json;
     alive_json << "[";
     bool alive_first = true;
-    for (auto& [uri, lat] : healthy_configs) {
+    int alive_count_for_refresh = 0;
+    for (auto& rec : all_records) {
         if (!alive_first) alive_json << ",";
         alive_first = false;
         utils::JsonBuilder item;
-        item.add("uri", uri)
-            .add("latency_ms", lat);
+        item.add("uri", rec.uri)
+            .add("latency_ms", rec.latency_ms)
+            .add("alive", rec.alive)
+            .add("first_seen", rec.first_seen)
+            .add("last_tested", rec.last_tested)
+            .add("last_alive", rec.last_alive_time)
+            .add("total_tests", rec.total_tests)
+            .add("total_passes", rec.total_passes)
+            .add("consecutive_fails", rec.consecutive_fails)
+            .add("tag", rec.tag);
         alive_json << item.build();
+        if (rec.alive) alive_count_for_refresh++;
     }
     alive_json << "]";
 
@@ -734,7 +752,7 @@ void ValidatorWorker::execute() {
     bool write_ok = utils::saveJsonFile(status_path, root.build());
     { std::ostringstream _ls; _ls << "[Validator] Status: " << (write_ok ? "OK" : "FAIL")
               << " db=" << stats.db.total << " alive=" << stats.db.alive
-              << " ready=" << healthy_configs.size();
+              << " records=" << all_records.size();
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // In continuous mode, validate more frequently (still can be overridden by env)
@@ -744,13 +762,20 @@ void ValidatorWorker::execute() {
         interval_seconds = std::min(interval_seconds, 2);
     }
 
-    const bool has_live_now = !healthy_configs.empty();
+    // Build healthy pair list for balancer/file operations
+    std::vector<std::pair<std::string, float>> healthy_pairs;
+    for (auto& rec : all_records) {
+        if (rec.alive && rec.latency_ms > 0)
+            healthy_pairs.emplace_back(rec.uri, rec.latency_ms);
+    }
+
+    const bool has_live_now = alive_count_for_refresh > 0;
     const bool should_refresh_after_live = has_live_now && (!had_alive_configs ||
         (last_live_refresh_success_ms == 0 && (last_live_refresh_attempt_ms == 0 || (now_ms - last_live_refresh_attempt_ms) > 120000)));
 
     // Write files FIRST so Flutter sees them immediately, then update balancers
     if (stats.db.alive > 0) {
-        const auto& healthy = healthy_configs;
+        const auto& healthy = healthy_pairs;
         std::cout << "[Validator] Alive=" << stats.db.alive << " healthy_from_db=" << healthy.size() << std::endl;
         std::cout.flush();
         if (!healthy.empty()) {

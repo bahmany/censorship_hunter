@@ -101,7 +101,7 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
     // Collect candidates with priority score (lower = higher priority)
     struct Candidate {
         const ConfigHealthRecord* rec;
-        int priority;   // 0=never tested, 1=needs_retest, 2=alive stale 5min, 3=failed stale
+        int priority;   // 0=never tested, 1=needs_retest, 2=alive stale 30s, 3=failed stale 60s
         int total_tests; // for secondary sort: fewer tests = higher priority
     };
     std::vector<Candidate> candidates;
@@ -117,13 +117,13 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
             candidates.push_back({&rec, 1, rec.total_tests});
             continue;
         }
-        // Priority 2: alive configs stale > 5 minutes — periodic health recheck
-        if (rec.alive && (now - rec.last_tested) > 300.0) {
+        // Priority 2: alive configs stale > 30 seconds — continuous health recheck
+        if (rec.alive && (now - rec.last_tested) > 30.0) {
             candidates.push_back({&rec, 2, rec.total_tests});
             continue;
         }
-        // Priority 3: failed configs with < 5 consecutive fails, stale > 120s
-        if (!rec.alive && rec.consecutive_fails < 5 && (now - rec.last_tested) > 120.0) {
+        // Priority 3: failed configs with < 5 consecutive fails, stale > 60s
+        if (!rec.alive && rec.consecutive_fails < 5 && (now - rec.last_tested) > 60.0) {
             candidates.push_back({&rec, 3, rec.total_tests});
             continue;
         }
@@ -176,6 +176,23 @@ std::set<std::string> ConfigDatabase::getAllUris() {
     std::set<std::string> uris;
     for (auto& [hash, rec] : db_) uris.insert(rec.uri);
     return uris;
+}
+
+std::vector<ConfigHealthRecord> ConfigDatabase::getAllRecords(int max_count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ConfigHealthRecord> all;
+    all.reserve(db_.size());
+    for (auto& [hash, rec] : db_) {
+        all.push_back(rec);
+    }
+    // Sort: alive first (by latency asc), then dead (by last_tested desc)
+    std::sort(all.begin(), all.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
+        if (a.alive != b.alive) return a.alive > b.alive; // alive first
+        if (a.alive) return a.latency_ms < b.latency_ms;  // alive: lower latency first
+        return a.last_tested > b.last_tested;              // dead: most recently tested first
+    });
+    if ((int)all.size() > max_count) all.resize(max_count);
+    return all;
 }
 
 ConfigDatabase::TagStats ConfigDatabase::getTagStats(const std::string& tag) {
@@ -302,8 +319,9 @@ int ConfigDatabase::clearOlderThan(int max_age_hours) {
 // ContinuousValidator
 // ═══════════════════════════════════════════════════════════════════
 
-ContinuousValidator::ContinuousValidator(ConfigDatabase& db, int batch_size)
-    : db_(db), batch_size_(batch_size) {}
+ContinuousValidator::ContinuousValidator(ConfigDatabase& db, int batch_size,
+                                         int timeout_s, int max_concurrent)
+    : db_(db), batch_size_(batch_size), timeout_s_(timeout_s), max_concurrent_(max_concurrent) {}
 
 bool ContinuousValidator::quickCheck(const std::string& uri) {
     // Use real proxy testing with cachefly download
@@ -312,7 +330,7 @@ bool ContinuousValidator::quickCheck(const std::string& uri) {
     tester.setSingBoxPath("bin/sing-box.exe");
     tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
     
-    ProxyTestResult result = tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", 15);
+    ProxyTestResult result = tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", timeout_s_);
     return result.success;
 }
 
@@ -328,20 +346,26 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
     int tested = 0, passed = 0;
     auto& mgr = HunterTaskManager::instance();
 
-    // Process in small chunks to avoid saturating the shared thread pool
-    constexpr size_t VCHUNK = 10;
-    for (size_t off = 0; off < batch.size(); off += VCHUNK) {
-        size_t chunk_end = std::min(off + VCHUNK, batch.size());
+    // Process in chunks sized by user speed settings (max_concurrent_)
+    size_t vchunk = (size_t)std::max(1, std::min(50, max_concurrent_));
+    int test_timeout = std::max(1, std::min(30, timeout_s_));
+
+    { std::ostringstream _ls; _ls << "[Validator] Speed: concurrency=" << vchunk << " timeout=" << test_timeout << "s";
+      utils::LogRingBuffer::instance().push(_ls.str()); }
+
+    for (size_t off = 0; off < batch.size(); off += vchunk) {
+        size_t chunk_end = std::min(off + vchunk, batch.size());
         std::vector<std::future<std::tuple<std::string, bool, float>>> futures;
         for (size_t i = off; i < chunk_end; i++) {
             std::string uri = batch[i].uri;
-            futures.push_back(mgr.submitIO([uri]() -> std::tuple<std::string, bool, float> {
+            int timeout_cap = test_timeout;
+            futures.push_back(mgr.submitIO([uri, timeout_cap]() -> std::tuple<std::string, bool, float> {
                 ProxyTester local_tester;
                 local_tester.setXrayPath("bin/xray.exe");
                 local_tester.setSingBoxPath("bin/sing-box.exe");
                 local_tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
                 
-                ProxyTestResult result = local_tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", 15);
+                ProxyTestResult result = local_tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", timeout_cap);
                 // Only count as alive if actual HTTP download succeeded (not telegram-only)
                 bool real_success = result.success && !result.telegram_only;
                 return {uri, real_success, result.download_speed_kbps};

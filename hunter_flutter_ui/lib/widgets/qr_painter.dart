@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Pure-Dart QR Code encoder + Flutter CustomPainter
-// Supports QR versions 1–10 (up to ~270 chars), byte mode, ECC-L
+// Supports QR versions 1–20 (up to ~858 chars), byte mode, ECC-L
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class QrCodeWidget extends StatelessWidget {
@@ -84,7 +84,7 @@ class QrEncoder {
     4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
   ];
 
-  // Alignment pattern positions per version
+  // Alignment pattern positions per version (v0-v20)
   static const List<List<int>> _alignmentPositions = <List<int>>[
     <int>[], // v0
     <int>[], // v1
@@ -97,15 +97,25 @@ class QrEncoder {
     <int>[6, 24, 42],
     <int>[6, 26, 46],
     <int>[6, 28, 50], // v10
+    <int>[6, 30, 54], // v11
+    <int>[6, 32, 58], // v12
+    <int>[6, 34, 62], // v13
+    <int>[6, 26, 46, 66], // v14
+    <int>[6, 26, 48, 70], // v15
+    <int>[6, 26, 50, 74], // v16
+    <int>[6, 30, 54, 78], // v17
+    <int>[6, 30, 56, 82], // v18
+    <int>[6, 30, 58, 86], // v19
+    <int>[6, 34, 62, 90], // v20
   ];
 
   static List<List<bool>>? encode(String text) {
     final Uint8List bytes = Uint8List.fromList(text.codeUnits);
     if (bytes.isEmpty) return null;
 
-    // Find minimum version
+    // Find minimum version (v1-v20, max ~858 chars)
     int version = 0;
-    for (int v = 1; v <= 10; v++) {
+    for (int v = 1; v <= 20; v++) {
       if (bytes.length <= _byteCapacityL[v]) {
         version = v;
         break;
@@ -231,7 +241,9 @@ class QrEncoder {
     reserved[8][8] = true;
 
     // Reserve version info areas (v7+)
-    // Not needed for v1-10 except v7+ but keeping simple
+    if (version >= 7) {
+      _reserveVersionInfo(reserved, size);
+    }
 
     // Place data bits
     _placeDataBits(matrix, reserved, interleaved, size);
@@ -252,8 +264,47 @@ class QrEncoder {
 
     _applyMask(matrix, reserved, bestMask);
     _placeFormatInfo(matrix, bestMask, size);
+    if (version >= 7) {
+      _placeVersionInfo(matrix, version, size);
+    }
 
     return matrix;
+  }
+
+  // Version info bits for v7-v20 (18 bits each, BCH encoded)
+  static const List<int> _versionInfoBits = <int>[
+    0, 0, 0, 0, 0, 0, 0, // v0-v6: no version info
+    0x07C94, 0x085BC, 0x09A99, 0x0A4D3, 0x0BBF6, 0x0C762, 0x0D847,
+    0x0E60D, 0x0F928, 0x10B78, 0x1145D, 0x12A17, 0x13532, 0x149A6,
+  ];
+
+  static void _reserveVersionInfo(List<List<bool>> r, int size) {
+    // Bottom-left block: 6×3 area
+    for (int i = 0; i < 6; i++) {
+      for (int j = 0; j < 3; j++) {
+        r[size - 11 + j][i] = true;
+      }
+    }
+    // Top-right block: 3×6 area
+    for (int i = 0; i < 6; i++) {
+      for (int j = 0; j < 3; j++) {
+        r[i][size - 11 + j] = true;
+      }
+    }
+  }
+
+  static void _placeVersionInfo(List<List<bool>> m, int version, int size) {
+    if (version < 7 || version >= _versionInfoBits.length) return;
+    final int bits = _versionInfoBits[version];
+    for (int i = 0; i < 18; i++) {
+      final bool bit = ((bits >> i) & 1) == 1;
+      final int row = i ~/ 3;
+      final int col = i % 3;
+      // Bottom-left
+      m[size - 11 + col][row] = bit;
+      // Top-right
+      m[row][size - 11 + col] = bit;
+    }
   }
 
   static void _placeFinder(List<List<bool>> m, List<List<bool>> r, int row, int col) {

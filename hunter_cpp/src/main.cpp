@@ -36,12 +36,16 @@ static void writeCrashLog(const std::string& reason) {
 
 #ifdef _WIN32
 static LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
-    std::string msg = "Unhandled SEH exception code=0x";
-    char hex[32];
-    snprintf(hex, sizeof(hex), "%08lX", ep->ExceptionRecord->ExceptionCode);
-    msg += hex;
-    std::cerr << "[Hunter] FATAL: " << msg << std::endl;
-    writeCrashLog(msg);
+    char buf[256];
+    snprintf(buf, sizeof(buf),
+             "Unhandled SEH code=0x%08lX addr=%p thread=%lu",
+             ep->ExceptionRecord->ExceptionCode,
+             ep->ExceptionRecord->ExceptionAddress,
+             (unsigned long)GetCurrentThreadId());
+    std::cerr << "[Hunter] FATAL: " << buf << std::endl;
+    writeCrashLog(buf);
+    // Signal graceful shutdown instead of hard-terminating
+    g_running = false;
     if (g_orchestrator) {
         try { g_orchestrator->stop(); } catch (...) {}
     }

@@ -143,9 +143,14 @@ bool XRayManager::isProcessAlive(int pid) const {
 #endif
 }
 
-std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_port) {
+std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_port, int http_port) {
     std::string outbound = parsed.toXrayOutboundJson(socks_port);
     if (outbound.empty()) return "";  // Unsupported protocol/cipher/transport
+
+    // Determine if TLS fragment should be applied (anti-DPI for Iranian censorship)
+    // Fragment splits ClientHello into small pieces to bypass SNI-based filtering
+    // Only applicable to TLS connections (not reality, not plain)
+    const bool use_fragment = (parsed.security == "tls");
 
     std::ostringstream ss;
     ss << "{\n"
@@ -153,7 +158,8 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
        << "  \"dns\":{"
        <<     "\"tag\":\"dns-module\","
        <<     "\"servers\":[\"1.1.1.1\",\"8.8.8.8\",\"https+local://1.1.1.1/dns-query\"],"
-       <<     "\"queryStrategy\":\"UseIPv4\""
+       <<     "\"queryStrategy\":\"UseIPv4\","
+       <<     "\"disableCache\":false"
        <<   "},\n"
        << "  \"inbounds\":[{"
        <<     "\"tag\":\"socks-in\","
@@ -161,23 +167,59 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
        <<     "\"listen\":\"127.0.0.1\","
        <<     "\"protocol\":\"socks\","
        <<     "\"settings\":{\"udp\":true},"
-       <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\"],\"routeOnly\":true}"
-       <<   "}],\n"
-       << "  \"outbounds\":[" << outbound 
-       << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
-       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n"
-       << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
-       <<     "{\"type\":\"field\",\"inboundTag\":[\"socks-in\"],\"port\":53,\"outboundTag\":\"dns-out\"},"
-       <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"outboundTag\":\"proxy\"},"
-       <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
-       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\"],\"outboundTag\":\"direct\"}"
-       <<   "]}\n"
-       << "}";
+       <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
+       <<   "}";
+    if (http_port > 0) {
+        ss << ",{"
+           <<     "\"tag\":\"http-in\","
+           <<     "\"port\":" << http_port << ","
+           <<     "\"listen\":\"127.0.0.1\","
+           <<     "\"protocol\":\"http\","
+           <<     "\"settings\":{\"allowTransparent\":false},"
+           <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
+           <<   "}";
+    }
+    ss << "],\n";
+
+    // Outbounds: proxy, direct, dns-out, and optionally fragment
+    if (use_fragment) {
+        // Insert sockopt with TLS fragment into proxy outbound's streamSettings
+        // We need to inject fragment into the outbound JSON
+        // Fragment outbound: proxy → fragment → internet
+        ss << "  \"outbounds\":[" << outbound
+           << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
+           << ",{\"protocol\":\"freedom\",\"tag\":\"fragment-out\",\"settings\":{\"domainStrategy\":\"AsIs\""
+           <<     ",\"fragment\":{\"packets\":\"tlshello\",\"length\":\"100-200\",\"interval\":\"10-20\"}"
+           <<   "}}"
+           << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
+    } else {
+        ss << "  \"outbounds\":[" << outbound 
+           << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
+           << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
+    }
+
+    // Build inbound tags for DNS routing
+    std::string client_inbounds = "\"socks-in\"";
+    if (http_port > 0) client_inbounds += ",\"http-in\"";
+
+    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":[";
+    // 1. Client DNS queries → dns-out (intercept and resolve via XRay DNS)
+    ss <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"port\":53,\"outboundTag\":\"dns-out\"},";
+    // 2. DNS module resolves through proxy (bypasses Iranian DNS censorship)
+    ss <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"outboundTag\":\"proxy\"},";
+    // 3. Internal DNS → direct
+    ss <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},";
+    // 4. Private/local IPs → direct
+    ss <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}";
+    // 5. Iranian domains direct (optional, improves speed for local sites)
+    ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"}";
+    ss << "]}\n";
+    ss << "}";
     return ss.str();
 }
 
 std::string XRayManager::generateBalancedConfig(
-    const std::vector<std::pair<ParsedConfig, int>>& configs, int listen_port) {
+    const std::vector<std::pair<ParsedConfig, int>>& configs, int listen_port, int http_port) {
 
     std::ostringstream ss;
     ss << "{\n"
@@ -185,7 +227,8 @@ std::string XRayManager::generateBalancedConfig(
        << "  \"dns\":{"
        <<     "\"tag\":\"dns-module\","
        <<     "\"servers\":[\"1.1.1.1\",\"8.8.8.8\",\"https+local://1.1.1.1/dns-query\"],"
-       <<     "\"queryStrategy\":\"UseIPv4\""
+       <<     "\"queryStrategy\":\"UseIPv4\","
+       <<     "\"disableCache\":false"
        <<   "},\n"
        << "  \"inbounds\":[{"
        <<     "\"tag\":\"socks-in\","
@@ -193,8 +236,19 @@ std::string XRayManager::generateBalancedConfig(
        <<     "\"listen\":\"127.0.0.1\","
        <<     "\"protocol\":\"socks\","
        <<     "\"settings\":{\"udp\":true},"
-       <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\"],\"routeOnly\":true}"
-       <<   "}],\n"
+       <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
+       <<   "}";
+    if (http_port > 0) {
+        ss << ",{"
+           <<     "\"tag\":\"http-in\","
+           <<     "\"port\":" << http_port << ","
+           <<     "\"listen\":\"127.0.0.1\","
+           <<     "\"protocol\":\"http\","
+           <<     "\"settings\":{\"allowTransparent\":false},"
+           <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
+           <<   "}";
+    }
+    ss << "],\n"
        << "  \"outbounds\":[";
 
     std::vector<std::string> outbound_tags;
@@ -218,12 +272,17 @@ std::string XRayManager::generateBalancedConfig(
     ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
        << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
 
-    // Balancer + routing with DNS rules
+    // Build inbound tags for DNS routing
+    std::string client_inbounds = "\"socks-in\"";
+    if (http_port > 0) client_inbounds += ",\"http-in\"";
+
+    // Balancer + routing with DNS rules + smart routing
     ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
-       <<     "{\"type\":\"field\",\"inboundTag\":[\"socks-in\"],\"port\":53,\"outboundTag\":\"dns-out\"},"
+       <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"port\":53,\"outboundTag\":\"dns-out\"},"
        <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"balancerTag\":\"proxy-balancer\"},"
        <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
-       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\"],\"outboundTag\":\"direct\"},"
+       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},"
+       <<     "{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"},"
        <<     "{\"type\":\"field\",\"network\":\"tcp,udp\",\"balancerTag\":\"proxy-balancer\"}"
        << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[";
     first = true;

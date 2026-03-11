@@ -58,6 +58,12 @@ public:
     std::set<std::string> getAllUris();
 
     /**
+     * @brief Get all config records with full health details (for UI display)
+     * Sorted: alive first (by latency), then dead (by last_tested desc)
+     */
+    std::vector<ConfigHealthRecord> getAllRecords(int max_count = 500);
+
+    /**
      * @brief Get stats for a specific tag
      */
     struct TagStats {
@@ -113,7 +119,8 @@ private:
  */
 class ContinuousValidator {
 public:
-    explicit ContinuousValidator(ConfigDatabase& db, int batch_size = 80);
+    explicit ContinuousValidator(ConfigDatabase& db, int batch_size = 80,
+                                 int timeout_s = 15, int max_concurrent = 10);
     ~ContinuousValidator() = default;
 
     /**
@@ -141,6 +148,8 @@ public:
 private:
     ConfigDatabase& db_;
     int batch_size_;
+    int timeout_s_;
+    int max_concurrent_;
     std::atomic<int> total_tested_{0};
     std::atomic<int> total_passed_{0};
 
