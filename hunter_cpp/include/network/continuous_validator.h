@@ -31,11 +31,14 @@ public:
      * @return Number of newly added configs
      */
     int addConfigs(const std::set<std::string>& uris, const std::string& tag = "");
+    int addConfigsWithPriority(const std::set<std::string>& uris, const std::string& tag = "",
+                               int* promoted_existing = nullptr);
 
     /**
      * @brief Update health status after a test
      */
-    void updateHealth(const std::string& uri, bool alive, float latency_ms = 0.0f);
+    void updateHealth(const std::string& uri, bool alive, float latency_ms = 0.0f,
+                      const std::string& engine_used = "");
 
     /**
      * @brief Get a batch of untested or stale configs
@@ -62,6 +65,11 @@ public:
      * Sorted: alive first (by latency), then dead (by last_tested desc)
      */
     std::vector<ConfigHealthRecord> getAllRecords(int max_count = 500);
+
+    /**
+     * @brief Get the last known preferred runtime engine for a specific URI
+     */
+    std::string getPreferredEngine(const std::string& uri);
 
     /**
      * @brief Get stats for a specific tag

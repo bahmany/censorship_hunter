@@ -13,6 +13,7 @@ class HunterLatencyConfig {
   HunterLatencyConfig({
     required this.uri,
     this.latencyMs,
+    this.engineUsed,
     this.firstSeen,
     this.lastAlive,
     this.lastTested,
@@ -24,6 +25,7 @@ class HunterLatencyConfig {
   });
   final String uri;
   final double? latencyMs;
+  final String? engineUsed;
   final double? firstSeen;        // Unix timestamp when first discovered
   final double? lastAlive;        // Unix timestamp when last confirmed alive
   final double? lastTested;       // Unix timestamp of last health check

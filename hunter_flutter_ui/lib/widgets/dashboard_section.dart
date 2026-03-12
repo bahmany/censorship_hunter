@@ -49,6 +49,12 @@ class DashboardSection extends StatelessWidget {
     this.onClearOldConfigs,
     this.manualConfigCtl,
     this.onAddManualConfigs,
+    this.onRunCycle,
+    this.onRefreshProvisionedPorts,
+    this.onReprovisionPorts,
+    this.onLoadRawFiles,
+    this.onLoadBundleFiles,
+    this.onDetectCensorship,
   });
 
   final Map<String, dynamic>? status;
@@ -94,6 +100,12 @@ class DashboardSection extends StatelessWidget {
   final VoidCallback? onClearOldConfigs;
   final TextEditingController? manualConfigCtl;
   final VoidCallback? onAddManualConfigs;
+  final VoidCallback? onRunCycle;
+  final VoidCallback? onRefreshProvisionedPorts;
+  final VoidCallback? onReprovisionPorts;
+  final VoidCallback? onLoadRawFiles;
+  final VoidCallback? onLoadBundleFiles;
+  final VoidCallback? onDetectCensorship;
 
   @override
   Widget build(BuildContext context) {
@@ -103,6 +115,21 @@ class DashboardSection extends StatelessWidget {
     final Map<String, dynamic>? val = status?['validator'] is Map<String, dynamic>
         ? status!['validator'] as Map<String, dynamic>
         : null;
+    final Map<String, dynamic>? speed = status?['speed'] is Map<String, dynamic>
+        ? status!['speed'] as Map<String, dynamic>
+        : null;
+    final Map<String, dynamic>? hardware = status?['hardware'] is Map<String, dynamic>
+        ? status!['hardware'] as Map<String, dynamic>
+        : null;
+    final Map<String, dynamic>? runtime = status?['runtime_config'] is Map<String, dynamic>
+        ? status!['runtime_config'] as Map<String, dynamic>
+        : null;
+    final List<Map<String, dynamic>> workers = status?['workers'] is List
+        ? (status!['workers'] as List<dynamic>)
+            .whereType<Map<String, dynamic>>()
+            .map((Map<String, dynamic> item) => Map<String, dynamic>.from(item))
+            .toList(growable: false)
+        : const <Map<String, dynamic>>[];
 
     final int dbTotal = _num(db, 'total');
     final int dbTested = _num(db, 'tested_unique');
@@ -138,6 +165,8 @@ class DashboardSection extends StatelessWidget {
           const SizedBox(height: 16),
           // ── Maintenance: clear old + manual add ──
           _buildMaintenanceSection(context, isRunning),
+          const SizedBox(height: 16),
+          _buildRealtimeAdminSection(context, isRunning, hardware, runtime, speed, val, workers),
           const SizedBox(height: 16),
           // ── Active Proxy Ports (balancers + provisioned) ──
           if (provisionedPorts.isNotEmpty || balancers.isNotEmpty)
@@ -344,6 +373,169 @@ class DashboardSection extends StatelessWidget {
     );
   }
 
+  Widget _buildRealtimeAdminSection(
+    BuildContext context,
+    bool isRunning,
+    Map<String, dynamic>? hardware,
+    Map<String, dynamic>? runtime,
+    Map<String, dynamic>? speed,
+    Map<String, dynamic>? validator,
+    List<Map<String, dynamic>> workers,
+  ) {
+    final String phase = (status?['phase'] ?? '--').toString();
+    final String mode = (hardware?['mode'] ?? '--').toString().toUpperCase();
+    final int cpuCount = _num(hardware, 'cpu_count');
+    final double cpuPercent = _dbl(hardware, 'cpu_percent');
+    final double ramPercent = _dbl(hardware, 'ram_percent');
+    final int targetsCount = _num(runtime, 'targets_count');
+    final int githubUrlsCount = _num(runtime, 'github_urls_count');
+    final String mainPort = (runtime?['multiproxy_port'] ?? '--').toString();
+    final String geminiPort = (runtime?['gemini_port'] ?? '--').toString();
+    final String effectiveThreads = _displayNum(speed, 'effective_max_concurrent', fallback: _displayNum(speed, 'max_threads'));
+    final String effectiveTimeout = _displayNum(speed, 'effective_timeout_s', suffix: 's', fallback: _displayNum(speed, 'test_timeout_s', suffix: 's'));
+    final String effectiveBatch = _displayNum(speed, 'effective_batch_size');
+    final String effectiveChunk = _displayNum(speed, 'effective_chunk_size', fallback: _displayNum(speed, 'chunk_size'));
+    final String validatorRate = _dbl(validator, 'rate_per_s') > 0.01 ? '${_dbl(validator, 'rate_per_s').toStringAsFixed(1)}/s' : '--';
+    final String validatorInterval = _displayNum(validator, 'interval_s', suffix: 's');
+    final String activeTestPids = _displayNum(validator, 'active_test_processes');
+    final String maxTestPids = _displayNum(validator, 'max_test_processes');
+    final String pending = (_num(status, 'pending_unique') > 0) ? '${_num(status, 'pending_unique')}' : '--';
+    final String eta = _dbl(status, 'eta_seconds') > 0 ? fmtDuration(Duration(seconds: _dbl(status, 'eta_seconds').round())) : '--';
+    final List<Map<String, dynamic>> visibleWorkers = workers.take(6).toList(growable: false);
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: C.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: C.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(Icons.hub_outlined, color: C.neonPurple, size: 18),
+              const SizedBox(width: 8),
+              const Text('REALTIME ADMIN', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1)),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(color: C.surface, borderRadius: BorderRadius.circular(20), border: Border.all(color: C.border)),
+                child: Text('PHASE ${phase.toUpperCase()}', style: const TextStyle(color: C.txt2, fontSize: 10, fontWeight: FontWeight.w700)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: <Widget>[
+              _statChip('MODE', mode, C.neonPurple),
+              _statChip('CPU', cpuPercent > 0 ? '${cpuPercent.toStringAsFixed(1)}%' : '--', C.neonCyan),
+              _statChip('RAM', ramPercent > 0 ? '${ramPercent.toStringAsFixed(1)}%' : '--', C.neonAmber),
+              _statChip('CORES', cpuCount > 0 ? '$cpuCount' : '--', C.txt2),
+              _statChip('MAIN PORT', mainPort, C.neonGreen),
+              _statChip('GEMINI', geminiPort, C.neonGreen),
+              _statChip('THREADS', effectiveThreads, C.neonCyan),
+              _statChip('TIMEOUT', effectiveTimeout, C.neonPurple),
+              _statChip('BATCH', effectiveBatch, C.neonAmber),
+              _statChip('CHUNK', effectiveChunk, C.neonAmber),
+              _statChip('VALIDATOR', validatorRate, C.neonGreen),
+              _statChip('INTERVAL', validatorInterval, C.txt2),
+              _statChip('TEST PIDS', activeTestPids, C.neonRed),
+              _statChip('PID CAP', maxTestPids, C.neonRed),
+              _statChip('PENDING', pending, C.neonAmber),
+              _statChip('ETA', eta, C.txt2),
+              _statChip('TG TARGETS', '$targetsCount', C.neonAmber),
+              _statChip('GITHUB URLS', '$githubUrlsCount', C.neonCyan),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              _actionBtn('RUN CYCLE', C.neonCyan, isRunning ? onRunCycle : null),
+              _actionBtn('REFRESH PORTS', C.neonGreen, isRunning ? onRefreshProvisionedPorts : null),
+              _actionBtn('REPROVISION', C.neonAmber, isRunning ? onReprovisionPorts : null),
+              _actionBtn('LOAD RAW', C.neonPurple, isRunning ? onLoadRawFiles : null),
+              _actionBtn('LOAD BUNDLE', C.neonPurple, isRunning ? onLoadBundleFiles : null),
+              _actionBtn('CHECK CENSORSHIP', C.neonRed, isRunning ? onDetectCensorship : null),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Row(
+            children: <Widget>[
+              const Text('Workers', style: TextStyle(color: C.txt2, fontSize: 11, fontWeight: FontWeight.w700)),
+              const SizedBox(width: 6),
+              Text('${workers.length}', style: const TextStyle(color: C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+            ],
+          ),
+          const SizedBox(height: 8),
+          if (visibleWorkers.isEmpty)
+            const Text('No worker status in snapshot yet', style: TextStyle(color: C.txt3, fontSize: 11))
+          else
+            ...visibleWorkers.map((Map<String, dynamic> worker) {
+              final String state = (worker['state'] ?? 'unknown').toString();
+              final int runs = (worker['runs'] as num?)?.toInt() ?? 0;
+              final int errors = (worker['errors'] as num?)?.toInt() ?? 0;
+              final double nextRun = (worker['next_run_in'] as num?)?.toDouble() ?? 0.0;
+              final String lastError = (worker['last_error'] ?? '').toString();
+              final Map<String, dynamic>? extra = worker['extra'] is Map<String, dynamic>
+                  ? worker['extra'] as Map<String, dynamic>
+                  : null;
+              final String extraSummary = _workerExtraSummary((worker['name'] ?? '').toString(), extra);
+              final Color stateColor = _workerStateColor(state);
+              return Container(
+                margin: const EdgeInsets.only(bottom: 8),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                decoration: BoxDecoration(
+                  color: C.surface,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: stateColor.withValues(alpha: 0.25)),
+                ),
+                child: Row(
+                  children: <Widget>[
+                    Container(width: 8, height: 8, decoration: BoxDecoration(color: stateColor, shape: BoxShape.circle)),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Text((worker['name'] ?? 'worker').toString(), style: const TextStyle(color: C.txt1, fontSize: 11, fontWeight: FontWeight.w700)),
+                          if (extraSummary.isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 2),
+                              child: Text(extraSummary, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: C.txt3, fontSize: 9, fontFamily: 'Consolas')),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Text(state.toUpperCase(), style: TextStyle(color: stateColor, fontSize: 10, fontWeight: FontWeight.w800)),
+                    const SizedBox(width: 10),
+                    Text('runs $runs', style: const TextStyle(color: C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+                    const SizedBox(width: 8),
+                    Text('err $errors', style: TextStyle(color: errors > 0 ? C.neonRed : C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+                    if (nextRun > 0) ...<Widget>[
+                      const SizedBox(width: 8),
+                      Text('next ${nextRun.round()}s', style: const TextStyle(color: C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+                    ],
+                    if (lastError.isNotEmpty) ...<Widget>[
+                      const SizedBox(width: 8),
+                      Tooltip(
+                        message: lastError,
+                        child: const Icon(Icons.error_outline, color: C.neonRed, size: 14),
+                      ),
+                    ],
+                  ],
+                ),
+              );
+            }),
+        ],
+      ),
+    );
+  }
+
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // CONFIG PREVIEW — show found configs with copy buttons
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -442,8 +634,12 @@ class DashboardSection extends StatelessWidget {
   // ACTIVE PROXY PORTS — balancers + provisioned with system proxy
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Widget _buildProvisionedPorts(BuildContext context) {
-    final int aliveCount = provisionedPorts.where((Map<String, dynamic> p) => p['alive'] == true).length;
-    final int balAlive = balancers.where((Map<String, dynamic> b) => b['running'] == true).length;
+    final int aliveCount = provisionedPorts.where((Map<String, dynamic> p) {
+      return p['tcp_alive'] == true && p['socks_ready'] == true && p['http_ready'] == true;
+    }).length;
+    final int balAlive = balancers.where((Map<String, dynamic> b) {
+      return b['tcp_alive'] == true && b['socks_ready'] == true && b['http_ready'] == true;
+    }).length;
     final bool hasProxy = activeSystemProxyPort != null;
 
     return Container(
@@ -502,16 +698,20 @@ class DashboardSection extends StatelessWidget {
             final int port = (b['port'] is num) ? (b['port'] as num).toInt() : 0;
             final String type = (b['type'] is String) ? (b['type'] as String).toUpperCase() : '?';
             final bool running = b['running'] == true;
+            final bool tcpAlive = b['tcp_alive'] == true;
+            final bool socksReady = b['socks_ready'] == true;
+            final bool httpReady = b['http_ready'] == true;
+            final bool mixedReady = tcpAlive && socksReady && httpReady;
             final int backends = (b['backends'] is num) ? (b['backends'] as num).toInt() : 0;
             final int healthy = (b['healthy'] is num) ? (b['healthy'] as num).toInt() : 0;
             final bool isActive = activeSystemProxyPort == port;
             return _buildPortRow(
               port: port,
               label: '$type BALANCER',
-              alive: running,
-              detail: '$healthy/$backends backends',
+              alive: mixedReady,
+              detail: running ? '$healthy/$backends ${_protocolHealthLabel(tcpAlive, socksReady, httpReady)}' : 'down',
               isSystemProxy: isActive,
-              onSetProxy: running && onSetSystemProxy != null ? () => onSetSystemProxy!(port) : null,
+              onSetProxy: mixedReady && onSetSystemProxy != null ? () => onSetSystemProxy!(port) : null,
               onCopy: () => onCopyText('socks5://127.0.0.1:$port', label: 'Copied SOCKS5 :$port'),
               badgeColor: C.neonCyan,
             );
@@ -535,23 +735,33 @@ class DashboardSection extends StatelessWidget {
             final int port = (p['port'] is num) ? (p['port'] as num).toInt() : 0;
             final int httpPort = (p['http_port'] is num) ? (p['http_port'] as num).toInt() : 0;
             final String uri = (p['uri'] is String) ? p['uri'] as String : '';
-            final bool alive = p['alive'] == true;
+            final String engineUsed = (p['engine_used'] is String) ? p['engine_used'] as String : '';
+            final bool tcpAlive = p['tcp_alive'] == true;
+            final bool socksReady = p['socks_ready'] == true;
+            final bool httpReady = p['http_ready'] == true;
+            final bool alive = tcpAlive && socksReady && httpReady;
             final double latency = (p['latency_ms'] is num) ? (p['latency_ms'] as num).toDouble() : 0.0;
             final int failures = (p['consecutive_failures'] is num) ? (p['consecutive_failures'] as num).toInt() : 0;
             final String proto = uri.contains('://') ? uri.split('://').first.toUpperCase() : '?';
             final bool isActive = activeSystemProxyPort == port;
+            final String detail = alive
+                ? '${latency > 0 ? latency.toStringAsFixed(0) : "--"}ms'
+                : (failures > 0
+                    ? '×$failures ${_protocolHealthLabel(tcpAlive, socksReady, httpReady)}'
+                    : _protocolHealthLabel(tcpAlive, socksReady, httpReady));
             return _buildDualPortRow(
               socksPort: port,
               httpPort: httpPort,
               label: proto,
               alive: alive,
-              detail: latency > 0 ? '${latency.toStringAsFixed(0)}ms' : (failures > 0 ? '×$failures' : '--'),
+              detail: detail,
               isSystemProxy: isActive,
               onSetProxy: alive && onSetSystemProxy != null ? () => onSetSystemProxy!(port) : null,
               onCopySocks: () => onCopyText('socks5://127.0.0.1:$port', label: 'Copied SOCKS5 :$port'),
               onCopyHttp: httpPort > 0 ? () => onCopyText('http://127.0.0.1:$httpPort', label: 'Copied HTTP :$httpPort') : null,
               badgeColor: _protoColor(proto),
               uri: uri,
+              engine: engineUsed,
             );
           }),
         ],
@@ -658,11 +868,14 @@ class DashboardSection extends StatelessWidget {
     VoidCallback? onCopyHttp,
     required Color badgeColor,
     String uri = '',
+    String engine = '',
   }) {
     final Color statusColor = alive ? C.neonGreen : C.neonRed;
+    final bool mixedPort = httpPort <= 0 || httpPort == socksPort;
     return Tooltip(
-      message: 'SOCKS5  127.0.0.1:$socksPort\n'
-          '${httpPort > 0 ? 'HTTP     127.0.0.1:$httpPort\n' : ''}'
+      message: '${mixedPort ? 'MIXED    127.0.0.1:$socksPort\n' : 'SOCKS5  127.0.0.1:$socksPort\n'}'
+          '${!mixedPort && httpPort > 0 ? 'HTTP     127.0.0.1:$httpPort\n' : ''}'
+          '${engine.isNotEmpty ? 'Engine   $engine\n' : ''}'
           'Smart routing: Iranian sites direct, DNS through proxy, TLS fragment anti-DPI',
       child: Padding(
         padding: const EdgeInsets.only(bottom: 3),
@@ -683,8 +896,8 @@ class DashboardSection extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  Text('S:$socksPort', style: TextStyle(color: alive ? C.neonCyan : C.txt3, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
-                  if (httpPort > 0)
+                  Text('${mixedPort ? 'M' : 'S'}:$socksPort', style: TextStyle(color: alive ? C.neonCyan : C.txt3, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+                  if (!mixedPort && httpPort > 0)
                     Text('H:$httpPort', style: TextStyle(color: alive ? C.neonAmber : C.txt3, fontSize: 10, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
                 ],
               ),
@@ -695,10 +908,18 @@ class DashboardSection extends StatelessWidget {
               decoration: BoxDecoration(color: badgeColor.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(3)),
               child: Text(label, style: TextStyle(color: badgeColor, fontSize: 9, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
             ),
+            if (engine.isNotEmpty) ...<Widget>[
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                decoration: BoxDecoration(color: C.neonAmber.withValues(alpha: 0.15), borderRadius: BorderRadius.circular(3)),
+                child: Text(engine, style: const TextStyle(color: C.neonAmber, fontSize: 9, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+              ),
+            ],
             const SizedBox(width: 6),
             // Detail (latency)
             SizedBox(
-              width: 50,
+              width: 88,
               child: Text(detail, style: TextStyle(color: alive ? C.neonGreen : C.txt3, fontSize: 10, fontFamily: 'Consolas')),
             ),
             // URI
@@ -738,11 +959,11 @@ class DashboardSection extends StatelessWidget {
               borderRadius: BorderRadius.circular(4),
               child: Padding(
                 padding: const EdgeInsets.all(2),
-                child: Text('S', style: TextStyle(color: C.neonCyan.withValues(alpha: 0.7), fontSize: 10, fontWeight: FontWeight.w800, fontFamily: 'Consolas')),
+                child: Text(mixedPort ? 'M' : 'S', style: TextStyle(color: C.neonCyan.withValues(alpha: 0.7), fontSize: 10, fontWeight: FontWeight.w800, fontFamily: 'Consolas')),
               ),
             ),
             // Copy HTTP button
-            if (onCopyHttp != null) ...<Widget>[
+            if (!mixedPort && onCopyHttp != null) ...<Widget>[
               const SizedBox(width: 2),
               InkWell(
                 onTap: onCopyHttp,
@@ -1144,17 +1365,34 @@ class DashboardSection extends StatelessWidget {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   // Helpers
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-  Widget _actionBtn(String label, Color color, VoidCallback onPressed) {
+  Widget _actionBtn(String label, Color color, VoidCallback? onPressed) {
     return TextButton(
       onPressed: onPressed,
       style: TextButton.styleFrom(
         foregroundColor: color,
+        disabledForegroundColor: C.txt3,
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6), side: BorderSide(color: color.withValues(alpha: 0.3))),
         backgroundColor: color.withValues(alpha: 0.08),
+        disabledBackgroundColor: C.surface,
       ),
       child: Text(label, style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700, letterSpacing: 0.5)),
     );
+  }
+
+  Color _workerStateColor(String state) {
+    switch (state.toLowerCase()) {
+      case 'running':
+        return C.neonGreen;
+      case 'sleeping':
+        return C.neonAmber;
+      case 'error':
+        return C.neonRed;
+      case 'stopped':
+        return C.txt3;
+      default:
+        return C.neonCyan;
+    }
   }
 
   Color _protoColor(String proto) {
@@ -1164,6 +1402,10 @@ class DashboardSection extends StatelessWidget {
       'TROJAN' => C.neonAmber,
       _ => C.txt3,
     };
+  }
+
+  String _protocolHealthLabel(bool tcpAlive, bool socksReady, bool httpReady) {
+    return 'T${tcpAlive ? 1 : 0} S${socksReady ? 1 : 0} H${httpReady ? 1 : 0}';
   }
 
   Color _logColor(HunterLogLine line) {
@@ -1180,6 +1422,33 @@ class DashboardSection extends StatelessWidget {
   bool _isLiveNow() {
     if (runState != HunterRunState.running || lastActivityAt == null) return false;
     return DateTime.now().difference(lastActivityAt!).inSeconds <= 5;
+  }
+
+  String _displayNum(Map<String, dynamic>? m, String k, {String suffix = '', String fallback = '--'}) {
+    if (m?[k] is num) return '${(m![k] as num).toInt()}$suffix';
+    return fallback;
+  }
+
+  String _workerExtraSummary(String workerName, Map<String, dynamic>? extra) {
+    if (extra == null || extra.isEmpty) return '';
+    String read(String key) => (extra[key] ?? '').toString();
+    if (workerName == 'validator') {
+      final List<String> parts = <String>[];
+      if (read('effective_max_concurrent').isNotEmpty) parts.add('thr ${read('effective_max_concurrent')}');
+      if (read('effective_timeout_s').isNotEmpty) parts.add('to ${read('effective_timeout_s')}s');
+      if (read('effective_batch_size').isNotEmpty) parts.add('batch ${read('effective_batch_size')}');
+      if (read('active_test_processes').isNotEmpty) parts.add('pid ${read('active_test_processes')}/${read('max_test_processes')}');
+      if (read('pending_unique').isNotEmpty) parts.add('pending ${read('pending_unique')}');
+      if (read('rate_per_s').isNotEmpty) parts.add('rate ${read('rate_per_s')}');
+      return parts.join(' | ');
+    }
+    final List<String> parts = <String>[];
+    for (final String key in extra.keys.take(4)) {
+      final String value = (extra[key] ?? '').toString();
+      if (value.isEmpty || key == 'history_json') continue;
+      parts.add('$key=$value');
+    }
+    return parts.join(' | ');
   }
 
   int _num(Map<String, dynamic>? m, String k) => (m?[k] is num) ? (m![k] as num).toInt() : 0;

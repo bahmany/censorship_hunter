@@ -2,6 +2,7 @@
 #include "core/constants.h"
 #include "core/utils.h"
 #include "orchestrator/orchestrator.h"
+#include "realtime/websocket_bridge.h"
 
 #include <iostream>
 #include <string>
@@ -151,6 +152,25 @@ int main(int argc, char* argv[]) {
     hunter::HunterOrchestrator orchestrator(config);
     g_orchestrator = &orchestrator;
 
+    constexpr int kRealtimeControlPort = 15491;
+    constexpr int kRealtimeMonitorPort = 15492;
+    hunter::realtime::WebSocketBridge realtime_bridge(kRealtimeControlPort, kRealtimeMonitorPort);
+    realtime_bridge.setCommandHandler([&orchestrator](const std::string& json) {
+        return orchestrator.processRealtimeCommand(json);
+    });
+    realtime_bridge.setStatusProvider([&orchestrator]() {
+        return orchestrator.buildStatusJson(orchestrator.isPaused() ? "paused" : "running");
+    });
+    realtime_bridge.setLogsProvider([]() {
+        return hunter::utils::LogRingBuffer::instance().recent(12);
+    });
+    if (realtime_bridge.start()) {
+        std::cout << "[Realtime] control=ws://127.0.0.1:" << kRealtimeControlPort
+                  << " monitor=ws://127.0.0.1:" << kRealtimeMonitorPort << std::endl;
+    } else {
+        std::cerr << "[Realtime] Failed to start websocket bridge" << std::endl;
+    }
+
     std::cout << "Starting autonomous hunting service..." << std::endl;
 
     // Stdin reader thread: reads JSON-line commands from Flutter UI process stdin
@@ -175,6 +195,8 @@ int main(int argc, char* argv[]) {
         std::cerr << "Fatal error: unknown exception" << std::endl;
         writeCrashLog("unknown exception (catch-all)");
     }
+
+    realtime_bridge.stop();
 
     // Cleanup
     g_orchestrator = nullptr;

@@ -364,6 +364,27 @@ void test_configDB_getUntestedBatch() {
     PASS();
 }
 
+void test_configDB_priorityPromotion() {
+    TEST("ConfigDatabase priority promotion for imported configs");
+    ConfigDatabase db;
+    const std::string imported = "vless://prio@host1:443";
+    const std::string regular = "vless://regular@host2:443";
+
+    db.addConfigs(std::set<std::string>{imported, regular}, "scrape");
+    db.updateHealth(imported, true, 120.0f);
+    db.updateHealth(regular, true, 150.0f);
+
+    int promoted = 0;
+    const int added = db.addConfigsWithPriority(std::set<std::string>{imported}, "user_import", &promoted);
+    CHECK(added == 0, "duplicate import should not add new records");
+    CHECK(promoted == 1, "existing imported config should be promoted");
+
+    auto batch = db.getUntestedBatch(1);
+    CHECK(batch.size() == 1, "priority batch should contain one config");
+    CHECK(batch[0].uri == imported, "promoted imported config should be first in batch");
+    PASS();
+}
+
 void test_configDB_clearOlderThan() {
     TEST("ConfigDatabase clearOlderThan");
     ConfigDatabase db;
@@ -423,6 +444,7 @@ int main() {
     test_configDB_basic();
     test_configDB_healthUpdate();
     test_configDB_getUntestedBatch();
+    test_configDB_priorityPromotion();
     test_configDB_clearOlderThan();
 
     // Summary

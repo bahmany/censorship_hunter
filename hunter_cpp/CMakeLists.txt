@@ -48,7 +48,8 @@ set(NETWORK_SOURCES
 
 # ─── Proxy Library Sources ───
 set(PROXY_SOURCES
-    src/proxy/load_balancer.cpp
+    src/proxy/load_balancer_impl.cpp
+    src/proxy/runtime_engine_manager.cpp
     src/proxy/xray_manager.cpp
 )
 
@@ -79,6 +80,11 @@ set(ORCHESTRATOR_SOURCES
     src/orchestrator/orchestrator.cpp
 )
 
+# ─── Realtime Bridge Sources ───
+set(REALTIME_SOURCES
+    src/realtime/websocket_bridge.cpp
+)
+
 # ─── Web Dashboard Sources ───
 # Create hunter core static library
 add_library(hunter_core STATIC
@@ -90,6 +96,7 @@ add_library(hunter_core STATIC
     ${TELEGRAM_SOURCES}
     ${CACHE_SOURCES}
     ${ORCHESTRATOR_SOURCES}
+    ${REALTIME_SOURCES}
 )
 
 target_link_libraries(hunter_core

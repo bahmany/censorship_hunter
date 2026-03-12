@@ -3,6 +3,7 @@
 #include "core/utils.h"
 #include "core/constants.h"
 #include "core/task_manager.h"
+#include "network/proxy_tester.h"
 #include "network/uri_parser.h"
 
 #include <chrono>
@@ -633,6 +634,13 @@ void ValidatorWorker::execute() {
     updateExtra("db_stale_unique", std::to_string(stats.db.stale_unique));
     updateExtra("total_tested", std::to_string(stats.db.total_tested));
     updateExtra("total_passed", std::to_string(stats.db.total_passed));
+    updateExtra("interval_s", std::to_string(interval_seconds));
+    updateExtra("effective_timeout_s", std::to_string(timeout_s));
+    updateExtra("effective_max_concurrent", std::to_string(max_concurrent));
+    updateExtra("effective_batch_size", std::to_string(batch_size));
+    updateExtra("effective_chunk_size", std::to_string(orch_->chunkSize()));
+    updateExtra("active_test_processes", std::to_string(network::ProxyTester::activeTestCount()));
+    updateExtra("max_test_processes", std::to_string(network::ProxyTester::maxConcurrentTestCount()));
 
     static uint64_t last_ms = 0;
     static int last_total_tests = 0;
@@ -674,17 +682,6 @@ void ValidatorWorker::execute() {
     last_ms = now_ms;
     last_total_tests = stats.db.total_tested;
 
-    std::string base = utils::dirName(orch_->config().stateFile());
-    if (base.empty()) base = "runtime";
-    std::string status_path = base + "/HUNTER_status.json";
-
-    // Debug logging for status file path
-    static bool first_status_write = true;
-    if (first_status_write) {
-        utils::LogRingBuffer::instance().push("[Validator] Status path: " + status_path);
-        first_status_write = false;
-    }
-
     std::ostringstream hist;
     hist << "[";
     bool first = true;
@@ -694,66 +691,16 @@ void ValidatorWorker::execute() {
         hist << row;
     }
     hist << "]";
+    updateExtra("history_json", hist.str());
 
     auto all_records = db->getAllRecords(500);
     static bool had_alive_configs = false;
     static uint64_t last_live_refresh_attempt_ms = 0;
     static uint64_t last_live_refresh_success_ms = 0;
-
-    // Build alive_configs JSON with full health details
-    std::ostringstream alive_json;
-    alive_json << "[";
-    bool alive_first = true;
     int alive_count_for_refresh = 0;
     for (auto& rec : all_records) {
-        if (!alive_first) alive_json << ",";
-        alive_first = false;
-        utils::JsonBuilder item;
-        item.add("uri", rec.uri)
-            .add("latency_ms", rec.latency_ms)
-            .add("alive", rec.alive)
-            .add("first_seen", rec.first_seen)
-            .add("last_tested", rec.last_tested)
-            .add("last_alive", rec.last_alive_time)
-            .add("total_tests", rec.total_tests)
-            .add("total_passes", rec.total_passes)
-            .add("consecutive_fails", rec.consecutive_fails)
-            .add("tag", rec.tag);
-        alive_json << item.build();
         if (rec.alive) alive_count_for_refresh++;
     }
-    alive_json << "]";
-
-    utils::JsonBuilder dbj;
-    dbj.add("total", stats.db.total)
-       .add("alive", stats.db.alive)
-       .add("tested_unique", stats.db.tested_unique)
-       .add("untested_unique", stats.db.untested_unique)
-       .add("stale_unique", stats.db.stale_unique)
-       .add("avg_latency_ms", stats.db.avg_latency_ms)
-       .add("total_tests", stats.db.total_tested)
-       .add("total_passes", stats.db.total_passed);
-
-    utils::JsonBuilder valj;
-    valj.add("last_tested", tested)
-       .add("last_passed", passed)
-       .add("interval_s", interval_seconds)
-       .add("rate_per_s", rate_tests);
-
-    utils::JsonBuilder root;
-    root.add("ts", now_ts)
-        .addRaw("db", dbj.build())
-        .addRaw("validator", valj.build())
-        .add("pending_unique", pending_unique)
-        .add("eta_seconds", eta_s)
-        .addRaw("alive_configs", alive_json.str())
-        .addRaw("history", hist.str());
-
-    bool write_ok = utils::saveJsonFile(status_path, root.build());
-    { std::ostringstream _ls; _ls << "[Validator] Status: " << (write_ok ? "OK" : "FAIL")
-              << " db=" << stats.db.total << " alive=" << stats.db.alive
-              << " records=" << all_records.size();
-      utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // In continuous mode, validate more frequently (still can be overridden by env)
     const int env_interval = HunterConfig::getEnvInt("HUNTER_VALIDATOR_INTERVAL_S", -1);
@@ -804,6 +751,8 @@ void ValidatorWorker::execute() {
                 bcj << "{\"uri\":\"" << uri << "\",\"latency_ms\":" << lat << "}";
             }
             bcj << "]}";
+            std::string base = utils::dirName(orch_->config().stateFile());
+            if (base.empty()) base = "runtime";
             bool bc_ok = utils::saveJsonFile(base + "/HUNTER_balancer_cache.json", bcj.str());
             std::cout << "[Validator] Balancer cache: " << (bc_ok ? "OK" : "FAIL") << " (" << healthy.size() << " configs)" << std::endl;
             std::cout.flush();
@@ -1129,7 +1078,7 @@ ThreadManager::Status ThreadManager::getStatus() const {
         "NORMAL","MODERATE","SCALED","CONSERVATIVE","REDUCED","MINIMAL","ULTRA-MINIMAL"
     };
     s.hardware.mode = mode_names[std::min((int)hw.mode, 6)];
-    s.hardware.thread_count = 0; // Would need platform-specific thread count
+    s.hardware.thread_count = static_cast<int>(all_workers_.size());
 
     for (auto* w : all_workers_) {
         s.workers[w->name] = w->getStatus();

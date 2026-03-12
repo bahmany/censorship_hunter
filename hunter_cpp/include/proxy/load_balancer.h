@@ -8,8 +8,10 @@
 #include <thread>
 #include <functional>
 #include <set>
+#include <utility>
 
 #include "core/models.h"
+#include "proxy/runtime_engine_manager.h"
 
 namespace hunter {
 namespace proxy {
@@ -24,6 +26,7 @@ namespace proxy {
 class MultiProxyServer {
 public:
     using StatusCallback = std::function<void(const BalancerStatus&)>;
+    using EngineHintCallback = std::function<std::string(const std::string&)>;
 
     explicit MultiProxyServer(int port = 10808, int max_backends = 20);
     ~MultiProxyServer();
@@ -83,6 +86,7 @@ public:
         std::string uri;
         std::string uri_short;
         float latency;
+        std::string engine_used;
     };
     std::vector<PoolEntry> getAvailableConfigsList() const;
 
@@ -100,6 +104,11 @@ public:
      * @brief Set status callback
      */
     void setStatusCallback(StatusCallback cb) { status_callback_ = cb; }
+
+    void setXRayPath(const std::string& path) { xray_path_ = path; runtime_engine_manager_.setXRayPath(path); }
+    void setSingBoxPath(const std::string& path) { runtime_engine_manager_.setSingBoxPath(path); }
+    void setMihomoPath(const std::string& path) { runtime_engine_manager_.setMihomoPath(path); }
+    void setEngineHintCallback(EngineHintCallback cb) { engine_hint_callback_ = std::move(cb); }
 
 private:
     int port_;
@@ -120,13 +129,21 @@ private:
     // XRay process management
     struct XRayProcess {
         std::string uri;
+        std::string engine_used;
         int socks_port = 0;
         int pid = 0;
         bool alive = false;
     };
     std::vector<XRayProcess> xray_processes_;
+    std::string xray_path_ = "bin/xray.exe";
+    RuntimeEngineManager runtime_engine_manager_;
+    bool tcp_alive_ = false;
+    bool socks_ready_ = false;
+    bool http_ready_ = false;
+    double last_probe_ts_ = 0.0;
 
     StatusCallback status_callback_;
+    EngineHintCallback engine_hint_callback_;
 
     void serverLoop();
     void healthMonitorLoop();

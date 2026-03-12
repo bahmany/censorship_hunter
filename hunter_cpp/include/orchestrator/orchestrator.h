@@ -16,6 +16,7 @@
 #include "network/aggressive_harvester.h"
 #include "network/flexible_fetcher.h"
 #include "proxy/load_balancer.h"
+#include "proxy/runtime_engine_manager.h"
 #include "proxy/xray_manager.h"
 #include "testing/benchmark.h"
 #include "security/dpi_evasion.h"
@@ -135,6 +136,7 @@ public:
     proxy::MultiProxyServer* balancer() { return balancer_.get(); }
     proxy::MultiProxyServer* geminiBalancer() { return gemini_balancer_.get(); }
     proxy::XRayManager& xrayManager() { return xray_manager_; }
+    proxy::RuntimeEngineManager& runtimeEngineManager() { return runtime_engine_manager_; }
     testing::ProxyBenchmark& benchmarker() { return benchmarker_; }
     security::DpiEvasionOrchestrator* dpiEvasion() { return dpi_evasion_.get(); }
     telegram::BotReporter* botReporter() { return bot_reporter_.get(); }
@@ -178,8 +180,12 @@ public:
     // ─── Real-time UI Communication (stdin/stdout JSON lines) ───
     /** Process a single JSON command line received from stdin (Flutter UI) */
     void processStdinCommand(const std::string& json_line);
+    /** Process a realtime JSON command and return a JSON result payload */
+    std::string processRealtimeCommand(const std::string& json_line);
     /** Emit ##STATUS## JSON line to stdout for Flutter UI to parse in real-time */
     void emitStatusJson(const std::string& phase = "running");
+    /** Build the full status snapshot JSON used by websocket monitor + file state */
+    std::string buildStatusJson(const std::string& phase = "", int last_tested = 0, int last_passed = 0);
 
     // ─── Port Provisioning (2901-2999) ───
     void provisionPorts();
@@ -187,12 +193,17 @@ public:
     void refreshProvisionedPorts();
     struct PortSlot {
         int port = 0;          // SOCKS port
-        int http_port = 0;     // HTTP port (port + 100)
+        int http_port = 0;     // HTTP port (same as port in mixed mode)
         std::string uri;
+        std::string engine_used;
         int pid = -1;
         bool alive = false;
+        bool tcp_alive = false;
+        bool socks_ready = false;
+        bool http_ready = false;
         float latency_ms = 0.0f;
         double last_health_check = 0.0;
+        double last_probe_ts = 0.0;
         int consecutive_failures = 0;
     };
     std::vector<PortSlot> getProvisionedPorts() const;
@@ -207,6 +218,7 @@ private:
     std::unique_ptr<network::ConfigDatabase> config_db_;
     std::unique_ptr<network::ContinuousValidator> continuous_validator_;
     proxy::XRayManager xray_manager_;
+    proxy::RuntimeEngineManager runtime_engine_manager_;
     testing::ProxyBenchmark benchmarker_;
     std::unique_ptr<proxy::MultiProxyServer> balancer_;
     std::unique_ptr<proxy::MultiProxyServer> gemini_balancer_;
@@ -232,6 +244,7 @@ private:
     std::atomic<int> consecutive_scrape_failures_{0};
     std::vector<std::pair<std::string, float>> last_good_configs_;
     std::map<std::string, std::vector<std::pair<std::string, float>>> cached_configs_;
+    std::map<std::string, std::string> cached_engine_hints_;
     std::mutex cycle_lock_;
     std::mutex state_mutex_;
     double start_time_ = 0.0;
@@ -239,7 +252,7 @@ private:
     // Port provisioning (2901-2999)
     static constexpr int PROVISION_PORT_BASE = 2901;
     static constexpr int PROVISION_PORT_MAX = 2999;
-    static constexpr int PROVISION_PORT_COUNT = 20;
+    static constexpr int PROVISION_PORT_COUNT = PROVISION_PORT_MAX - PROVISION_PORT_BASE + 1;
     std::vector<PortSlot> provisioned_ports_;
     mutable std::mutex provision_mutex_;
 

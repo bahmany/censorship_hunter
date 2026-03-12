@@ -323,6 +323,7 @@ class ConfigsSection extends StatelessWidget {
     final bool isAlive = cfg.alive == true;
     final bool isDead = cfg.alive == false && (cfg.totalTests ?? 0) > 0;
     final String proto = cfg.uri.contains('://') ? cfg.uri.split('://').first.toUpperCase() : '?';
+    final String engineLabel = (cfg.engineUsed != null && cfg.engineUsed!.isNotEmpty) ? cfg.engineUsed! : '';
     final Color protoColor = switch (proto) {
       'VLESS' || 'VMESS' => C.neonCyan,
       'SS' || 'SHADOWSOCKS' => C.neonPurple,
@@ -348,6 +349,7 @@ class ConfigsSection extends StatelessWidget {
     final StringBuffer tip = StringBuffer();
     if (foundAt.isNotEmpty) tip.writeln('Found: $foundAt');
     if (lastChecked.isNotEmpty) tip.writeln('Last checked: $lastChecked');
+    if (engineLabel.isNotEmpty) tip.writeln('Engine: $engineLabel');
     if (cfg.totalTests != null) tip.write('Tests: ${cfg.totalTests}');
     if (cfg.totalPasses != null) tip.write(' | Passes: ${cfg.totalPasses}');
     if (cfg.consecutiveFails != null && cfg.consecutiveFails! > 0) tip.write(' | Fails: ${cfg.consecutiveFails}');
@@ -392,6 +394,16 @@ class ConfigsSection extends StatelessWidget {
               child: Text(proto, style: TextStyle(color: protoColor, fontSize: 8, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
             ),
             const SizedBox(width: 6),
+            if (engineLabel.isNotEmpty)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                decoration: BoxDecoration(
+                  color: C.neonAmber.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(3),
+                ),
+                child: Text(engineLabel, style: const TextStyle(color: C.neonAmber, fontSize: 8, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+              ),
+            if (engineLabel.isNotEmpty) const SizedBox(width: 6),
             // Found/checked timestamps
             if (foundAt.isNotEmpty)
               Text(foundAt, style: TextStyle(color: C.txt3.withValues(alpha: 0.5), fontSize: 8, fontFamily: 'Consolas')),
@@ -457,6 +469,7 @@ class ConfigsSection extends StatelessWidget {
         ? (cfg.latencyMs! < 500 ? C.neonGreen : (cfg.latencyMs! < 2000 ? C.neonAmber : C.neonRed))
         : C.txt3;
     final String proto = cfg.uri.contains('://') ? cfg.uri.split('://').first.toUpperCase() : '?';
+    final String engineLabel = (cfg.engineUsed != null && cfg.engineUsed!.isNotEmpty) ? cfg.engineUsed! : '';
     final Color protoColor = switch (proto) {
       'VLESS' || 'VMESS' => C.neonCyan,
       'SS' || 'SHADOWSOCKS' => C.neonPurple,
@@ -489,11 +502,22 @@ class ConfigsSection extends StatelessWidget {
               ),
               child: Text(proto, style: TextStyle(color: protoColor, fontSize: 9, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
             ),
+            if (engineLabel.isNotEmpty) ...<Widget>[
+              const SizedBox(width: 6),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                decoration: BoxDecoration(
+                  color: C.neonAmber.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(4),
+                ),
+                child: Text(engineLabel, style: const TextStyle(color: C.neonAmber, fontSize: 9, fontWeight: FontWeight.w700, fontFamily: 'Consolas')),
+              ),
+            ],
             const SizedBox(width: 6),
             // Discovery time
             if (discoveredAt.isNotEmpty)
               Tooltip(
-                message: 'Found: $discoveredAt\nLast alive: $lastAliveAt\nTests: ${cfg.totalTests ?? 0}',
+                message: 'Found: $discoveredAt\nLast alive: $lastAliveAt\nEngine: ${engineLabel.isEmpty ? '--' : engineLabel}\nTests: ${cfg.totalTests ?? 0}',
                 child: Text(discoveredAt, style: TextStyle(color: C.txt3.withValues(alpha: 0.6), fontSize: 9, fontFamily: 'Consolas')),
               ),
             const SizedBox(width: 6),

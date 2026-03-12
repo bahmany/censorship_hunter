@@ -104,6 +104,7 @@ struct BenchResult {
     std::string tier;             // "gold", "silver", "dead"
     std::string ps;               // Config remark
     std::string protocol;
+    std::string engine_used;
     std::string error;
 
     bool isGold() const { return tier == "gold"; }
@@ -117,7 +118,9 @@ struct ConfigHealthRecord {
     std::string uri;
     std::string uri_hash;         // SHA1 of URI
     std::string tag;              // Source tag (scrape, github_bg, harvest)
+    std::string engine_used;
     double first_seen = 0.0;
+    double priority_boost_until = 0.0;
     double last_tested = 0.0;
     double last_alive_time = 0.0; // When config was last confirmed alive
     bool alive = false;
@@ -173,6 +176,8 @@ struct Backend {
     int consecutive_fails = 0;
     double last_check = 0.0;
     bool trusted = false;
+    std::string engine_used;
+    int local_port = 0;
 };
 
 /**
@@ -183,6 +188,10 @@ struct BalancerStatus {
     bool running = false;
     int backend_count = 0;
     int healthy_count = 0;
+    bool tcp_alive = false;
+    bool socks_ready = false;
+    bool http_ready = false;
+    double last_probe_ts = 0.0;
     std::string forced_uri;
     std::vector<Backend> backends;
 };

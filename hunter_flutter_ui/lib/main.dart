@@ -143,6 +143,15 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   final TextEditingController _cliPath = TextEditingController(text: 'bin\\hunter_cli.exe');
   final TextEditingController _configPath = TextEditingController(text: 'runtime\\hunter_config.json');
   final TextEditingController _xrayPath = TextEditingController(text: 'bin\\xray.exe');
+  final TextEditingController _singboxPath = TextEditingController(text: 'bin\\sing-box.exe');
+  final TextEditingController _mihomoPath = TextEditingController(text: 'bin\\mihomo-windows-amd64-compatible.exe');
+  final TextEditingController _torPath = TextEditingController(text: 'bin\\tor.exe');
+  final TextEditingController _multiproxyPort = TextEditingController(text: '10808');
+  final TextEditingController _geminiPort = TextEditingController(text: '10809');
+  final TextEditingController _maxTotal = TextEditingController(text: '1000');
+  final TextEditingController _maxWorkers = TextEditingController(text: '12');
+  final TextEditingController _scanLimit = TextEditingController(text: '50');
+  final TextEditingController _sleepSeconds = TextEditingController(text: '300');
   final TextEditingController _searchCtl = TextEditingController();
   final TextEditingController _tgApiId = TextEditingController();
   final TextEditingController _tgApiHash = TextEditingController();
@@ -173,7 +182,25 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   Directory? _workingDir;
   StreamSubscription<String>? _stdoutSub;
   StreamSubscription<String>? _stderrSub;
+  StreamSubscription<dynamic>? _controlWsSub;
+  StreamSubscription<dynamic>? _monitorWsSub;
+  WebSocket? _controlWs;
+  WebSocket? _monitorWs;
+  bool _realtimeDesired = false;
+  bool _realtimeConnecting = false;
+  bool _realtimeReconnectScheduled = false;
+  int _nextRealtimeRequestId = 1;
+  final Map<String, String> _pendingRealtimeCommands = <String, String>{};
+  final Map<String, Timer> _pendingRealtimeTimeouts = <String, Timer>{};
+  final Set<String> _quietRealtimeCommands = <String>{};
+  Timer? _realtimeHeartbeatTimer;
+  int _latestStatusTsMs = 0;
+  DateTime? _lastRealtimePongAt;
   String? _lastError;
+  Timer? _noticeTimer;
+  String? _noticeMessage;
+  Color _noticeColor = C.neonCyan;
+  IconData _noticeIcon = Icons.info_outline;
 
   final List<HunterLogLine> _logs = <HunterLogLine>[];
   int _logBytes = 0;
@@ -188,6 +215,8 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   int _refreshTick = 0;
   DateTime? _lastActivityAt;
   String _lastSnapshotFingerprint = '';
+  static const int _realtimeControlPort = 15491;
+  static const int _realtimeMonitorPort = 15492;
 
   // ── Runtime data ──
   List<String> _allCache = const <String>[];
@@ -257,7 +286,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _loadBundled();
     _loadDocs();
     _initTray();
-    _loadTelegramSettings();
+    _loadConfigSettings();
     _checkSystemProxy();
   }
 
@@ -267,12 +296,22 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _ignitionCtl.dispose();
     windowManager.removeListener(this);
     _refreshTimer?.cancel();
+    _realtimeHeartbeatTimer?.cancel();
+    _noticeTimer?.cancel();
     _stdoutSub?.cancel();
     _stderrSub?.cancel();
+    _realtimeDesired = false;
+    _controlWsSub?.cancel();
+    _monitorWsSub?.cancel();
+    _controlWs?.close();
+    _monitorWs?.close();
+    _clearAllRealtimePendingCommands();
     _process?.kill();
     _systemTray?.destroy();
     for (final TextEditingController c in <TextEditingController>[
-      _cliPath, _configPath, _xrayPath, _searchCtl,
+      _cliPath, _configPath, _xrayPath, _singboxPath, _mihomoPath, _torPath,
+      _multiproxyPort, _geminiPort, _maxTotal, _maxWorkers, _scanLimit, _sleepSeconds,
+      _searchCtl,
       _tgApiId, _tgApiHash, _tgPhone, _tgTargets, _tgLimit, _tgTimeout, _githubUrls,
       _manualConfigCtl,
     ]) {
@@ -336,38 +375,326 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     return fallback;
   }
 
+  int _statusTimestampMs(Map<String, dynamic>? status) {
+    if (status == null) return 0;
+    final dynamic tsMs = status['ts_ms'];
+    if (tsMs is num) return tsMs.toInt();
+    final dynamic ts = status['ts'];
+    if (ts is num) return (ts.toDouble() * 1000).round();
+    return 0;
+  }
+
+  bool _acceptStatusTimestamp(Map<String, dynamic>? status) {
+    final int incomingTs = _statusTimestampMs(status);
+    if (incomingTs > 0 && incomingTs < _latestStatusTsMs) {
+      return false;
+    }
+    if (incomingTs > _latestStatusTsMs) {
+      _latestStatusTsMs = incomingTs;
+    }
+    return true;
+  }
+
+  void _clearRealtimePendingCommand(String requestId) {
+    _pendingRealtimeTimeouts.remove(requestId)?.cancel();
+    _pendingRealtimeCommands.remove(requestId);
+    _quietRealtimeCommands.remove(requestId);
+  }
+
+  void _clearAllRealtimePendingCommands() {
+    for (final Timer timer in _pendingRealtimeTimeouts.values) {
+      timer.cancel();
+    }
+    _pendingRealtimeTimeouts.clear();
+    _pendingRealtimeCommands.clear();
+    _quietRealtimeCommands.clear();
+  }
+
+  void _registerRealtimePendingCommand(
+    String requestId,
+    String commandName, {
+    bool quiet = false,
+    Duration timeout = const Duration(seconds: 8),
+  }) {
+    _clearRealtimePendingCommand(requestId);
+    _pendingRealtimeCommands[requestId] = commandName;
+    if (quiet) {
+      _quietRealtimeCommands.add(requestId);
+    }
+    _pendingRealtimeTimeouts[requestId] = Timer(timeout, () {
+      final String? pendingCommand = _pendingRealtimeCommands.remove(requestId);
+      final bool wasQuiet = _quietRealtimeCommands.remove(requestId);
+      _pendingRealtimeTimeouts.remove(requestId);
+      if (pendingCommand == null) return;
+      if (pendingCommand == 'ping') {
+        _log('warn', 'Realtime heartbeat timed out');
+        unawaited(_disconnectRealtimeSockets().then((_) => _scheduleRealtimeReconnect()));
+        return;
+      }
+      if (!wasQuiet) {
+        _log('warn', 'CLI $pendingCommand [$requestId]: timed out');
+        if (mounted) {
+          setState(() => _lastError = 'Command timed out: $pendingCommand');
+        }
+      }
+      if (_realtimeDesired && _process != null) {
+        _sendCommand(<String, dynamic>{'command': 'get_status'}, expectResponse: false, quiet: true);
+      }
+    });
+  }
+
   // ━━━━━ Real-time status from C++ stdout ━━━━━
   void _handleStatusLine(String jsonStr) {
     try {
       final Map<String, dynamic> s = jsonDecode(jsonStr) as Map<String, dynamic>;
       if (!mounted) return;
+      if (!_acceptStatusTimestamp(s)) return;
       setState(() {
-        // Update pause state from C++ (ground truth)
+        final Map<String, dynamic> nextStatus = Map<String, dynamic>.from(_status ?? <String, dynamic>{});
         _isPaused = s['paused'] == true;
-        // Update speed controls from C++ (ground truth)
         _reconcileSpeedState(
           profile: s['speed_profile'] is String ? s['speed_profile'] as String : _speedProfile,
           threads: s['speed_threads'] is num ? (s['speed_threads'] as num).toInt() : _speedThreads,
           timeout: s['speed_timeout'] is num ? (s['speed_timeout'] as num).toInt() : _speedTimeout,
         );
-        // Update status map for dashboard gauges
-        _status ??= <String, dynamic>{};
-        _status!['phase'] = s['phase'];
-        _status!['paused'] = s['paused'];
-        _status!['uptime_s'] = s['uptime_s'];
-        _status!['db'] = <String, dynamic>{
+        nextStatus['ts'] = s['ts'];
+        nextStatus['ts_ms'] = s['ts_ms'];
+        nextStatus['phase'] = s['phase'];
+        nextStatus['paused'] = s['paused'];
+        nextStatus['uptime_s'] = s['uptime_s'];
+        nextStatus['db'] = <String, dynamic>{
           'total': s['db_total'] ?? 0,
           'alive': s['db_alive'] ?? 0,
           'tested_unique': s['db_tested'] ?? 0,
         };
-        _status!['speed'] = <String, dynamic>{
+        nextStatus['speed'] = <String, dynamic>{
           'profile': s['speed_profile'],
           'max_threads': s['speed_threads'],
           'test_timeout_s': s['speed_timeout'],
         };
+        _status = nextStatus;
+        _syncRuntimeControllers(nextStatus['runtime_config'] is Map<String, dynamic>
+            ? nextStatus['runtime_config'] as Map<String, dynamic>
+            : null);
         _lastActivityAt = DateTime.now();
       });
     } catch (_) {}
+  }
+
+  void _applyRealtimeStatusSnapshot(Map<String, dynamic> s) {
+    if (!mounted) return;
+    if (!_acceptStatusTimestamp(s)) return;
+    final Map<String, dynamic>? speed = s['speed'] is Map<String, dynamic>
+        ? s['speed'] as Map<String, dynamic>
+        : null;
+    final Map<String, dynamic>? runtime = s['runtime_config'] is Map<String, dynamic>
+        ? s['runtime_config'] as Map<String, dynamic>
+        : null;
+    setState(() {
+      _status = Map<String, dynamic>.from(s);
+      _isPaused = s['paused'] == true;
+      if (speed != null) {
+        _reconcileSpeedState(
+          profile: (speed['profile'] as String?) ?? _speedProfile,
+          threads: (speed['max_threads'] as num?)?.toInt() ?? _speedThreads,
+          timeout: (speed['test_timeout_s'] as num?)?.toInt() ?? _speedTimeout,
+          chunk: (speed['chunk_size'] as num?)?.toInt() ?? _speedChunk,
+        );
+      }
+      _syncRuntimeControllers(runtime);
+      _lastActivityAt = DateTime.now();
+    });
+  }
+
+  void _handleRealtimeEvent(String message) {
+    try {
+      final Map<String, dynamic> event = jsonDecode(message) as Map<String, dynamic>;
+      final String type = event['type'] is String ? event['type'] as String : '';
+      final dynamic payload = event['payload'];
+      if (type == 'status' && payload is Map<String, dynamic>) {
+        _applyRealtimeStatusSnapshot(Map<String, dynamic>.from(payload));
+        return;
+      }
+      if (type == 'command_result') {
+        final Map<String, dynamic> result = payload is Map<String, dynamic>
+            ? Map<String, dynamic>.from(payload)
+            : Map<String, dynamic>.from(event);
+        final String requestId = result['request_id'] is String ? result['request_id'] as String : '';
+        final bool quiet = result['quiet'] == true || (requestId.isNotEmpty && _quietRealtimeCommands.contains(requestId));
+        final Map<String, dynamic>? status = event['status'] is Map<String, dynamic>
+            ? event['status'] as Map<String, dynamic>
+            : (result['status'] is Map<String, dynamic>)
+                ? result['status'] as Map<String, dynamic>
+            : null;
+        final bool ok = result['ok'] == true;
+        final String fallbackCommand = requestId.isNotEmpty
+            ? (_pendingRealtimeCommands[requestId] ?? 'command')
+            : 'command';
+        final String command = result['command'] is String
+            ? result['command'] as String
+            : fallbackCommand;
+        if (requestId.isNotEmpty) {
+          _clearRealtimePendingCommand(requestId);
+        }
+        final String resultMessage = result['message'] is String ? result['message'] as String : '';
+        if (status != null) {
+          _applyRealtimeStatusSnapshot(Map<String, dynamic>.from(status));
+        }
+        if (command == 'ping' && ok && resultMessage == 'pong') {
+          _lastRealtimePongAt = DateTime.now();
+        }
+        if (!quiet && resultMessage.isNotEmpty) {
+          final String prefix = requestId.isEmpty ? 'CLI $command' : 'CLI $command [$requestId]';
+          _log(ok ? 'sys' : 'warn', '$prefix: $resultMessage');
+        }
+        if (!quiet && mounted && (command == 'import_config_file' || command == 'export_config_db')) {
+          _showNotice(
+            resultMessage.isEmpty ? (ok ? 'Done' : 'Operation failed') : resultMessage,
+            color: ok ? C.neonGreen : C.neonRed,
+            icon: ok
+                ? (command == 'export_config_db' ? Icons.download_done_rounded : Icons.upload_file_rounded)
+                : Icons.error_outline,
+            duration: const Duration(seconds: 5),
+          );
+        }
+        if (!quiet && !ok && mounted) {
+          setState(() => _lastError = resultMessage.isEmpty ? 'Command failed: $command' : resultMessage);
+        }
+        if (ok && (command == 'import_config_file' || command == 'add_configs')) {
+          unawaited(_refresh());
+        }
+        return;
+      }
+      if (type == 'logs' && payload is Map<String, dynamic>) {
+        final dynamic rawLines = payload['lines'];
+        if (rawLines is! List) return;
+        final List<MapEntry<String, String>> prepared = <MapEntry<String, String>>[];
+        for (final dynamic raw in rawLines) {
+          if (raw is! String) continue;
+          final MapEntry<String, String>? entry = _prepareLogEntry(_classifyRuntimeLogSource(raw, 'out'), raw);
+          if (entry != null) prepared.add(entry);
+        }
+        _appendPreparedLogEntries(prepared);
+      }
+    } catch (_) {}
+  }
+
+  void _scheduleRealtimeReconnect() {
+    if (_realtimeReconnectScheduled || !_realtimeDesired || _process == null) return;
+    _realtimeReconnectScheduled = true;
+    unawaited(Future<void>.delayed(const Duration(seconds: 1), () async {
+      _realtimeReconnectScheduled = false;
+      if (!_realtimeDesired || _process == null) return;
+      if (_monitorWs == null || _controlWs == null) {
+        await _connectRealtimeSockets();
+      }
+    }));
+  }
+
+  Future<void> _disconnectRealtimeSockets() async {
+    _realtimeReconnectScheduled = false;
+    _realtimeHeartbeatTimer?.cancel();
+    _realtimeHeartbeatTimer = null;
+    await _controlWsSub?.cancel();
+    _controlWsSub = null;
+    await _monitorWsSub?.cancel();
+    _monitorWsSub = null;
+    try { await _monitorWs?.close(); } catch (_) {}
+    try { await _controlWs?.close(); } catch (_) {}
+    _monitorWs = null;
+    _controlWs = null;
+  }
+
+  void _sendRealtimeHeartbeat() {
+    final WebSocket? ws = _controlWs;
+    if (ws == null) return;
+    final String requestId = 'hb_${DateTime.now().microsecondsSinceEpoch}';
+    _registerRealtimePendingCommand(requestId, 'ping', quiet: true);
+    try {
+      ws.add(jsonEncode(<String, dynamic>{
+        'command': 'ping',
+        'request_id': requestId,
+        'quiet': true,
+      }));
+    } catch (_) {
+      _clearRealtimePendingCommand(requestId);
+      _scheduleRealtimeReconnect();
+    }
+  }
+
+  void _startRealtimeHeartbeat() {
+    _realtimeHeartbeatTimer?.cancel();
+    _lastRealtimePongAt = DateTime.now();
+    _realtimeHeartbeatTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (!_realtimeDesired || _process == null || _controlWs == null) return;
+      final DateTime now = DateTime.now();
+      final DateTime lastPong = _lastRealtimePongAt ?? now;
+      if (now.difference(lastPong) > const Duration(seconds: 25)) {
+        _log('warn', 'Realtime heartbeat stale, reconnecting');
+        unawaited(_disconnectRealtimeSockets().then((_) => _scheduleRealtimeReconnect()));
+        return;
+      }
+      _sendRealtimeHeartbeat();
+    });
+  }
+
+  Future<void> _connectRealtimeSockets() async {
+    if (_realtimeConnecting || !_realtimeDesired || _process == null) return;
+    _realtimeConnecting = true;
+    await _disconnectRealtimeSockets();
+    for (int attempt = 0; attempt < 25; attempt++) {
+      if (!_realtimeDesired || _process == null) {
+        _realtimeConnecting = false;
+        return;
+      }
+      try {
+        _controlWs = await WebSocket.connect('ws://127.0.0.1:$_realtimeControlPort');
+        _monitorWs = await WebSocket.connect('ws://127.0.0.1:$_realtimeMonitorPort');
+        _controlWsSub = _controlWs!.listen(
+          (dynamic data) {
+            if (data is String) _handleRealtimeEvent(data);
+          },
+          onDone: () {
+            _controlWs = null;
+            _scheduleRealtimeReconnect();
+          },
+          onError: (_) {
+            _controlWs = null;
+            _scheduleRealtimeReconnect();
+          },
+          cancelOnError: false,
+        );
+        _monitorWsSub = _monitorWs!.listen(
+          (dynamic data) {
+            if (data is String) _handleRealtimeEvent(data);
+          },
+          onDone: () {
+            _monitorWs = null;
+            _scheduleRealtimeReconnect();
+          },
+          onError: (_) {
+            _monitorWs = null;
+            _scheduleRealtimeReconnect();
+          },
+          cancelOnError: false,
+        );
+        _startRealtimeHeartbeat();
+        _sendCommand(<String, dynamic>{'command': 'get_status'}, expectResponse: false, quiet: true);
+        _realtimeConnecting = false;
+        _log('sys', 'Realtime WS connected');
+        return;
+      } catch (_) {
+        await _controlWsSub?.cancel();
+        _controlWsSub = null;
+        try { await _monitorWs?.close(); } catch (_) {}
+        try { await _controlWs?.close(); } catch (_) {}
+        _monitorWs = null;
+        _controlWs = null;
+        await Future<void>.delayed(const Duration(milliseconds: 250));
+      }
+    }
+    _realtimeConnecting = false;
+    _log('warn', 'Realtime WS unavailable, using stdout/file fallback');
   }
 
   bool get _hasPendingSpeedChanges {
@@ -544,8 +871,11 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       }
 
       // Parse pause + speed from status
-      final bool paused = snap.status?['paused'] == true;
-      final Map<String, dynamic>? spd = snap.status?['speed'] as Map<String, dynamic>?;
+      final Map<String, dynamic>? snapshotStatus = snap.status;
+      final bool shouldApplySnapshotStatus = snapshotStatus != null && _acceptStatusTimestamp(snapshotStatus);
+      final bool paused = shouldApplySnapshotStatus ? (snapshotStatus['paused'] == true) : _isPaused;
+      final Map<String, dynamic>? spd = shouldApplySnapshotStatus ? snapshotStatus['speed'] as Map<String, dynamic>? : null;
+      final Map<String, dynamic>? runtime = shouldApplySnapshotStatus ? snapshotStatus['runtime_config'] as Map<String, dynamic>? : null;
 
       setState(() {
         _allCache = snap.allCache;
@@ -555,12 +885,16 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         _balancerConfigs = snap.balancerConfigs;
         _geminiConfigs = snap.geminiConfigs;
         _allRecords = snap.allRecords;
-        _status = snap.status;
+        if (shouldApplySnapshotStatus) {
+          _status = snap.status;
+        }
         _history = nextHistory;
         _engines = eng;
         _lastRefresh = now;
         _refreshTick += 1;
-        _isPaused = paused;
+        if (shouldApplySnapshotStatus) {
+          _isPaused = paused;
+        }
         if (spd != null) {
           _reconcileSpeedState(
             profile: (spd['profile'] as String?) ?? _speedProfile,
@@ -569,6 +903,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
             chunk: (spd['chunk_size'] as num?)?.toInt() ?? _speedChunk,
           );
         }
+        _syncRuntimeControllers(runtime);
         if (sawNewLogs || snapshotChanged) {
           _lastActivityAt = now;
         }
@@ -663,12 +998,15 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       final Process p = await Process.start(cliAbs, args, workingDirectory: wd.path, runInShell: false);
       _process = p;
       _workingDir = wd;
+      _realtimeDesired = true;
       unawaited(_loadDocs());
 
       _stdoutSub = p.stdout.transform(utf8.decoder).transform(const LineSplitter())
           .listen((String line) {
         if (line.startsWith('##STATUS##')) {
           _handleStatusLine(line.substring(10));
+        } else if (line.startsWith('##CMD##')) {
+          _handleRealtimeEvent(line.substring(7));
         } else {
           _log('out', line);
         }
@@ -678,8 +1016,12 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
 
       unawaited(p.exitCode.then((int code) {
         _log('sys', 'Process exited: $code');
+        _realtimeDesired = false;
+        unawaited(_disconnectRealtimeSockets());
+        _clearAllRealtimePendingCommands();
         if (mounted) setState(() { _process = null; _workingDir = null; _state = HunterRunState.stopped; });
       }));
+      unawaited(_connectRealtimeSockets());
       setState(() => _state = HunterRunState.running);
     } catch (e) {
       _pulseCtl.stop();
@@ -699,6 +1041,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     });
     _ignitionCtl.forward(from: 0);
     try {
+      _realtimeDesired = false;
       // Send stop via stdin for instant response
       _sendCommand({'command': 'stop'});
       final Directory wd = _effectiveWd();
@@ -714,6 +1057,8 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
           return -1;
         });
       }
+      await _disconnectRealtimeSockets();
+      _clearAllRealtimePendingCommands();
       setState(() { _process = null; _workingDir = null; _state = HunterRunState.stopped; });
     } catch (e) {
       setState(() { _state = HunterRunState.stopped; _workingDir = null; _lastError = '$e'; });
@@ -726,23 +1071,13 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     if (text.trim().isEmpty) return;
     await Clipboard.setData(ClipboardData(text: text.trim()));
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(label ?? 'Copied!', style: const TextStyle(fontSize: 12)),
-        backgroundColor: C.card,
-        behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
-        duration: const Duration(seconds: 2),
-      ),
-    );
+    _showNotice(label ?? 'Copied!', color: C.neonCyan, icon: Icons.content_copy_rounded, duration: const Duration(seconds: 2));
   }
 
   Future<void> _copyLines(List<String> lines, {String? label}) async {
     if (lines.isEmpty) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Nothing to copy')),
-      );
+      _showNotice('Nothing to copy', color: C.neonAmber, icon: Icons.info_outline);
       return;
     }
     await _copyText(lines.join('\n'), label: label ?? 'Copied ${lines.length} configs');
@@ -763,6 +1098,72 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _recentLogKeys.clear();
     _recentLogOrder.clear();
   });
+
+  void _showNotice(
+    String message, {
+    Color color = C.neonCyan,
+    IconData icon = Icons.info_outline,
+    Duration duration = const Duration(seconds: 3),
+  }) {
+    _noticeTimer?.cancel();
+    if (!mounted) return;
+    setState(() {
+      _noticeMessage = message;
+      _noticeColor = color;
+      _noticeIcon = icon;
+    });
+    _noticeTimer = Timer(duration, () {
+      if (!mounted) return;
+      setState(() {
+        if (_noticeMessage == message) {
+          _noticeMessage = null;
+        }
+      });
+    });
+  }
+
+  Widget _buildNoticeBanner() {
+    if (_noticeMessage == null || _noticeMessage!.trim().isEmpty) {
+      return const SizedBox.shrink();
+    }
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 0),
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        decoration: BoxDecoration(
+          color: _noticeColor.withValues(alpha: 0.12),
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: _noticeColor.withValues(alpha: 0.35)),
+        ),
+        child: Row(
+          children: <Widget>[
+            Icon(_noticeIcon, color: _noticeColor, size: 18),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _noticeMessage!,
+                style: TextStyle(color: _noticeColor, fontSize: 12, fontWeight: FontWeight.w700),
+              ),
+            ),
+            const SizedBox(width: 8),
+            InkWell(
+              onTap: () {
+                _noticeTimer?.cancel();
+                if (!mounted) return;
+                setState(() => _noticeMessage = null);
+              },
+              borderRadius: BorderRadius.circular(12),
+              child: Padding(
+                padding: const EdgeInsets.all(2),
+                child: Icon(Icons.close, color: _noticeColor, size: 16),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 
   void _resetFindingsState() {
     _silverConfigs = const <String>[];
@@ -858,7 +1259,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   }
 
   // ━━━━━ Telegram settings ━━━━━
-  Future<void> _loadTelegramSettings() async {
+  Future<void> _loadConfigSettings() async {
     try {
       final Directory wd = _effectiveWd();
       final String path = absPathInWorkingDir(wd, _configPath.text);
@@ -869,6 +1270,16 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       if (decoded is! Map<String, dynamic>) return;
       if (!mounted) return;
       setState(() {
+        _xrayPath.text = (decoded['xray_path'] ?? 'bin\\xray.exe').toString();
+        _singboxPath.text = (decoded['singbox_path'] ?? 'bin\\sing-box.exe').toString();
+        _mihomoPath.text = (decoded['mihomo_path'] ?? 'bin\\mihomo-windows-amd64-compatible.exe').toString();
+        _torPath.text = (decoded['tor_path'] ?? 'bin\\tor.exe').toString();
+        _multiproxyPort.text = (decoded['multiproxy_port'] ?? '10808').toString();
+        _geminiPort.text = (decoded['gemini_port'] ?? '10809').toString();
+        _maxTotal.text = (decoded['max_total'] ?? '1000').toString();
+        _maxWorkers.text = (decoded['max_workers'] ?? '12').toString();
+        _scanLimit.text = (decoded['scan_limit'] ?? '50').toString();
+        _sleepSeconds.text = (decoded['sleep_seconds'] ?? '300').toString();
         _tgEnabled = decoded['telegram_enabled'] == true;
         _tgApiId.text = (decoded['telegram_api_id'] ?? '').toString();
         _tgApiHash.text = (decoded['telegram_api_hash'] ?? '').toString();
@@ -913,6 +1324,16 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   }
 
   Future<void> _saveTelegramSettings() async {
+    _sendCommand(<String, dynamic>{
+      'command': 'update_runtime_settings',
+      'telegram_enabled': _tgEnabled,
+      'telegram_api_id': _tgApiId.text.trim(),
+      'telegram_api_hash': _tgApiHash.text.trim(),
+      'telegram_phone': _tgPhone.text.trim(),
+      'telegram_limit': int.tryParse(_tgLimit.text.trim()) ?? 50,
+      'telegram_timeout_ms': int.tryParse(_tgTimeout.text.trim()) ?? 12000,
+      'targets_text': _tgTargets.text,
+    });
     final Directory wd = _effectiveWd();
     final String path = absPathInWorkingDir(wd, _configPath.text);
     if (path.isEmpty) return;
@@ -934,11 +1355,57 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     await f.parent.create(recursive: true);
     await f.writeAsString(jsonEncode(root), flush: true);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Telegram settings saved')));
+      _showNotice('Telegram settings saved', color: C.neonGreen, icon: Icons.save_outlined);
+    }
+  }
+
+  Future<void> _saveRuntimeSettings() async {
+    _sendCommand(<String, dynamic>{
+      'command': 'update_runtime_settings',
+      'xray_path': _xrayPath.text.trim().isEmpty ? 'bin\\xray.exe' : _xrayPath.text.trim(),
+      'singbox_path': _singboxPath.text.trim().isEmpty ? 'bin\\sing-box.exe' : _singboxPath.text.trim(),
+      'mihomo_path': _mihomoPath.text.trim().isEmpty ? 'bin\\mihomo-windows-amd64-compatible.exe' : _mihomoPath.text.trim(),
+      'tor_path': _torPath.text.trim().isEmpty ? 'bin\\tor.exe' : _torPath.text.trim(),
+      'multiproxy_port': int.tryParse(_multiproxyPort.text.trim()) ?? 10808,
+      'gemini_port': int.tryParse(_geminiPort.text.trim()) ?? 10809,
+      'max_total': int.tryParse(_maxTotal.text.trim()) ?? 1000,
+      'max_workers': int.tryParse(_maxWorkers.text.trim()) ?? 12,
+      'scan_limit': int.tryParse(_scanLimit.text.trim()) ?? 50,
+      'sleep_seconds': int.tryParse(_sleepSeconds.text.trim()) ?? 300,
+    });
+    final Directory wd = _effectiveWd();
+    final String path = absPathInWorkingDir(wd, _configPath.text);
+    if (path.isEmpty) return;
+    Map<String, dynamic> root = <String, dynamic>{};
+    final File f = File(path);
+    try {
+      if (f.existsSync()) {
+        final dynamic d = jsonDecode(await f.readAsString());
+        if (d is Map<String, dynamic>) root = d;
+      }
+    } catch (_) {}
+    root['xray_path'] = _xrayPath.text.trim().isEmpty ? 'bin\\xray.exe' : _xrayPath.text.trim();
+    root['singbox_path'] = _singboxPath.text.trim().isEmpty ? 'bin\\sing-box.exe' : _singboxPath.text.trim();
+    root['mihomo_path'] = _mihomoPath.text.trim().isEmpty ? 'bin\\mihomo-windows-amd64-compatible.exe' : _mihomoPath.text.trim();
+    root['tor_path'] = _torPath.text.trim().isEmpty ? 'bin\\tor.exe' : _torPath.text.trim();
+    root['multiproxy_port'] = int.tryParse(_multiproxyPort.text.trim()) ?? 10808;
+    root['gemini_port'] = int.tryParse(_geminiPort.text.trim()) ?? 10809;
+    root['max_total'] = int.tryParse(_maxTotal.text.trim()) ?? 1000;
+    root['max_workers'] = int.tryParse(_maxWorkers.text.trim()) ?? 12;
+    root['scan_limit'] = int.tryParse(_scanLimit.text.trim()) ?? 50;
+    root['sleep_seconds'] = int.tryParse(_sleepSeconds.text.trim()) ?? 300;
+    await f.parent.create(recursive: true);
+    await f.writeAsString(jsonEncode(root), flush: true);
+    if (mounted) {
+      _showNotice('Runtime settings saved', color: C.neonGreen, icon: Icons.save_outlined);
     }
   }
 
   Future<void> _saveGithubUrls() async {
+    _sendCommand(<String, dynamic>{
+      'command': 'update_runtime_settings',
+      'github_urls_text': _githubUrls.text,
+    });
     final Directory wd = _effectiveWd();
     final String path = absPathInWorkingDir(wd, _configPath.text);
     if (path.isEmpty) return;
@@ -958,7 +1425,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     await f.parent.create(recursive: true);
     await f.writeAsString(jsonEncode(root), flush: true);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Saved ${(root['github_urls'] as List).length} GitHub URLs')));
+      _showNotice('Saved ${(root['github_urls'] as List).length} GitHub URLs', color: C.neonGreen, icon: Icons.link);
     }
   }
 
@@ -966,6 +1433,54 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     setState(() {
       _githubUrls.text = _defaultGithubUrls().join('\n');
     });
+  }
+
+  void _runCycleNow() {
+    _sendCommand(<String, dynamic>{'command': 'run_cycle'});
+  }
+
+  void _refreshProvisionedPortsNow() {
+    _sendCommand(<String, dynamic>{'command': 'refresh_ports'});
+  }
+
+  void _reprovisionPortsNow() {
+    _sendCommand(<String, dynamic>{'command': 'reprovision_ports'});
+  }
+
+  void _loadRawFilesNow() {
+    _sendCommand(<String, dynamic>{'command': 'load_raw_files'});
+  }
+
+  void _loadBundleFilesNow() {
+    _sendCommand(<String, dynamic>{'command': 'load_bundle_files'});
+  }
+
+  void _detectCensorshipNow() {
+    _sendCommand(<String, dynamic>{'command': 'detect_censorship'});
+  }
+
+  void _syncRuntimeControllers(Map<String, dynamic>? runtime) {
+    if (runtime == null) return;
+    final String xrayPath = (runtime['xray_path'] ?? '').toString();
+    final String singboxPath = (runtime['singbox_path'] ?? '').toString();
+    final String mihomoPath = (runtime['mihomo_path'] ?? '').toString();
+    final String torPath = (runtime['tor_path'] ?? '').toString();
+    final String multiproxyPort = (runtime['multiproxy_port'] ?? '').toString();
+    final String geminiPort = (runtime['gemini_port'] ?? '').toString();
+    final String maxTotal = (runtime['max_total'] ?? '').toString();
+    final String maxWorkers = (runtime['max_workers'] ?? '').toString();
+    final String scanLimit = (runtime['scan_limit'] ?? '').toString();
+    final String sleepSeconds = (runtime['sleep_seconds'] ?? '').toString();
+    if (xrayPath.isNotEmpty) _xrayPath.text = xrayPath;
+    if (singboxPath.isNotEmpty) _singboxPath.text = singboxPath;
+    if (mihomoPath.isNotEmpty) _mihomoPath.text = mihomoPath;
+    if (torPath.isNotEmpty) _torPath.text = torPath;
+    if (multiproxyPort.isNotEmpty) _multiproxyPort.text = multiproxyPort;
+    if (geminiPort.isNotEmpty) _geminiPort.text = geminiPort;
+    if (maxTotal.isNotEmpty) _maxTotal.text = maxTotal;
+    if (maxWorkers.isNotEmpty) _maxWorkers.text = maxWorkers;
+    if (scanLimit.isNotEmpty) _scanLimit.text = scanLimit;
+    if (sleepSeconds.isNotEmpty) _sleepSeconds.text = sleepSeconds;
   }
 
   // ━━━━━ Sound Notification ━━━━━
@@ -976,8 +1491,29 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   }
 
   // ━━━━━ Command Sending (to C++ orchestrator via stdin, file fallback) ━━━━━
-  void _sendCommand(Map<String, dynamic> cmd) {
-    final String json = jsonEncode(cmd);
+  void _sendCommand(Map<String, dynamic> cmd, {bool expectResponse = true, bool quiet = false}) {
+    final Map<String, dynamic> enriched = Map<String, dynamic>.from(cmd);
+    final String requestId;
+    if (enriched['request_id'] is String && (enriched['request_id'] as String).isNotEmpty) {
+      requestId = enriched['request_id'] as String;
+    } else {
+      requestId = 'cmd_${_nextRealtimeRequestId++}';
+      enriched['request_id'] = requestId;
+    }
+    if (quiet) {
+      enriched['quiet'] = true;
+    }
+    final String commandName = enriched['command'] is String ? enriched['command'] as String : 'command';
+    if (expectResponse) {
+      _registerRealtimePendingCommand(requestId, commandName, quiet: quiet);
+    }
+    final String json = jsonEncode(enriched);
+    if (_controlWs != null) {
+      try {
+        _controlWs!.add(json);
+        return;
+      } catch (_) {}
+    }
     if (_process != null) {
       try {
         _process!.stdin.writeln(json);
@@ -988,7 +1524,9 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     try {
       final Directory wd = _effectiveWd();
       File('${wd.path}\\runtime\\hunter_command.json').writeAsStringSync(json);
-    } catch (_) {}
+    } catch (_) {
+      _clearRealtimePendingCommand(requestId);
+    }
   }
 
   void _togglePause() {
@@ -997,7 +1535,6 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     } else {
       _sendCommand({'command': 'pause'});
     }
-    setState(() => _isPaused = !_isPaused);
   }
 
   void _setSpeedProfile(String profile) {
@@ -1033,24 +1570,23 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     if (applyPreset) {
       _sendCommand({'command': 'speed_profile', 'value': draftProfile});
     } else {
-      _sendCommand({'command': 'set_threads', 'value': draftThreads});
-      _sendCommand({'command': 'set_timeout', 'value': draftTimeout});
+      _sendCommand({
+        'command': 'set_speed',
+        'threads': draftThreads,
+        'timeout': draftTimeout,
+        'chunk_size': _projectedChunkForDraft(),
+      });
     }
-    _sendCommand({'command': 'get_status'});
     setState(() => _speedApplyInFlight = true);
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Applying speed changes, please wait...')),
-      );
+      _showNotice('Applying speed changes in CLI...', color: C.neonAmber, icon: Icons.tune);
     }
   }
 
   void _clearOldConfigs() {
     _sendCommand({'command': 'clear_old', 'hours': _clearAgeHours});
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Clearing configs older than $_clearAgeHours hours...')),
-      );
+      _showNotice('Clearing configs older than $_clearAgeHours hours...', color: C.neonAmber, icon: Icons.cleaning_services_outlined);
     }
   }
 
@@ -1060,9 +1596,85 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _sendCommand({'command': 'add_configs', 'configs': text});
     _manualConfigCtl.clear();
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Manual configs submitted for testing')),
-      );
+      _showNotice('Manual configs submitted for testing', color: C.neonGreen, icon: Icons.playlist_add_check_circle_outlined);
+    }
+  }
+
+  Future<String?> _promptForPath({
+    required String title,
+    required String label,
+    required String hint,
+    required String initialValue,
+    required String actionLabel,
+  }) async {
+    final TextEditingController ctl = TextEditingController(text: initialValue);
+    final String? result = await showDialog<String>(
+      context: context,
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: C.card,
+          title: Text(title, style: const TextStyle(color: C.txt1, fontSize: 16, fontWeight: FontWeight.w700)),
+          content: SizedBox(
+            width: 640,
+            child: TextField(
+              controller: ctl,
+              autofocus: true,
+              style: const TextStyle(color: C.txt1, fontSize: 12, fontFamily: 'Consolas'),
+              decoration: InputDecoration(
+                labelText: label,
+                hintText: hint,
+                labelStyle: const TextStyle(color: C.txt3),
+                hintStyle: TextStyle(color: C.txt3.withValues(alpha: 0.5)),
+                filled: true,
+                fillColor: C.surface,
+                border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: C.border)),
+                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: C.border)),
+                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: const BorderSide(color: C.neonCyan)),
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(ctl.text.trim()),
+              style: FilledButton.styleFrom(backgroundColor: C.neonCyan, foregroundColor: C.bg),
+              child: Text(actionLabel),
+            ),
+          ],
+        );
+      },
+    );
+    ctl.dispose();
+    if (result == null || result.trim().isEmpty) return null;
+    return result.trim();
+  }
+
+  Future<void> _importConfigFile() async {
+    final Directory wd = _effectiveWd();
+    final String? path = await pickImportTextFile(initialDirectory: '${wd.path}\\config');
+    if (path == null) return;
+    _sendCommand(<String, dynamic>{'command': 'import_config_file', 'path': path});
+    if (mounted) {
+      _showNotice('Importing config file into the database...', color: C.neonAmber, icon: Icons.upload_file_rounded);
+    }
+  }
+
+  Future<void> _exportConfigDb() async {
+    final Directory wd = _effectiveWd();
+    final String? path = await _promptForPath(
+      title: 'Export Config Database',
+      label: 'Destination path',
+      hint: '${wd.path}\\runtime\\HUNTER_config_db_export.txt',
+      initialValue: '${wd.path}\\runtime\\HUNTER_config_db_export.txt',
+      actionLabel: 'Export',
+    );
+    if (path == null) return;
+    _sendCommand(<String, dynamic>{'command': 'export_config_db', 'path': path});
+    if (mounted) {
+      _showNotice('Exporting full config database...', color: C.neonAmber, icon: Icons.file_download_outlined);
     }
   }
 
@@ -1082,13 +1694,15 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         break;
       }
     }
+    if (httpPort <= 0) httpPort = port;
     final bool ok = await setWindowsSystemProxy(port, httpPort: httpPort);
     if (ok && mounted) {
       setState(() => _activeSystemProxyPort = port);
-      final String msg = httpPort > 0
-          ? 'System proxy: HTTP :$httpPort + SOCKS5 :$port'
-          : 'System proxy: SOCKS5 :$port';
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+      final bool mixedPort = httpPort <= 0 || httpPort == port;
+      final String msg = mixedPort
+          ? 'System proxy: MIXED :$port'
+          : 'System proxy: HTTP :$httpPort + SOCKS5 :$port';
+      _showNotice(msg, color: C.neonGreen, icon: Icons.vpn_lock_outlined);
     }
   }
 
@@ -1096,9 +1710,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     final bool ok = await clearWindowsSystemProxy();
     if (ok && mounted) {
       setState(() => _activeSystemProxyPort = null);
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('System proxy cleared')),
-      );
+      _showNotice('System proxy cleared', color: C.neonAmber, icon: Icons.clear_all_rounded);
     }
   }
 
@@ -1185,6 +1797,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
             return Column(
               children: <Widget>[
                 _buildTopBar(context),
+                AnimatedSwitcher(duration: const Duration(milliseconds: 180), child: _buildNoticeBanner()),
                 Expanded(child: _buildContent(context, 0.0)),
                 _buildCompactNavBar(context),
               ],
@@ -1197,6 +1810,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
                 child: Column(
                   children: <Widget>[
                     _buildTopBar(context),
+                    AnimatedSwitcher(duration: const Duration(milliseconds: 180), child: _buildNoticeBanner()),
                     Expanded(child: _buildContent(context, 0.0)),
                   ],
                 ),
@@ -1646,6 +2260,12 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         onClearOldConfigs: _clearOldConfigs,
         manualConfigCtl: _manualConfigCtl,
         onAddManualConfigs: _addManualConfigs,
+        onRunCycle: _runCycleNow,
+        onRefreshProvisionedPorts: _refreshProvisionedPortsNow,
+        onReprovisionPorts: _reprovisionPortsNow,
+        onLoadRawFiles: _loadRawFilesNow,
+        onLoadBundleFiles: _loadBundleFilesNow,
+        onDetectCensorship: _detectCensorshipNow,
       ),
       HunterNavSection.configs => ConfigsSection(
         listKind: _configKind,
@@ -1688,6 +2308,15 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         cliPathController: _cliPath,
         configPathController: _configPath,
         xrayPathController: _xrayPath,
+        singboxPathController: _singboxPath,
+        mihomoPathController: _mihomoPath,
+        torPathController: _torPath,
+        multiproxyPortController: _multiproxyPort,
+        geminiPortController: _geminiPort,
+        maxTotalController: _maxTotal,
+        maxWorkersController: _maxWorkers,
+        scanLimitController: _scanLimit,
+        sleepSecondsController: _sleepSeconds,
         tgEnabled: _tgEnabled,
         tgApiIdController: _tgApiId,
         tgApiHashController: _tgApiHash,
@@ -1699,12 +2328,15 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         processInfo: _process == null ? 'Not running' : 'PID ${_process!.pid}',
         engines: _engines,
         onTgEnabledChanged: (bool v) => setState(() => _tgEnabled = v),
+        onSaveRuntimeSettings: _saveRuntimeSettings,
         onSaveTelegram: _saveTelegramSettings,
         onRefresh: _refresh,
         onCopyText: _copyText,
         githubUrlsController: _githubUrls,
         onSaveGithubUrls: _saveGithubUrls,
         onResetGithubUrls: _resetGithubUrls,
+        onImportConfigFile: _importConfigFile,
+        onExportConfigDb: _exportConfigDb,
       ),
       HunterNavSection.about => AboutSection(bundledConfigsCount: _bundledCount),
     };
@@ -1713,7 +2345,20 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   List<Map<String, dynamic>> _parseProvisionedPorts() {
     final dynamic raw = _status?['provisioned_ports'];
     if (raw is List) {
-      return raw.whereType<Map<String, dynamic>>().toList();
+      return raw.whereType<Map<String, dynamic>>().map((Map<String, dynamic> item) {
+        final Map<String, dynamic> normalized = Map<String, dynamic>.from(item);
+        final int port = (normalized['port'] as num?)?.toInt() ?? 0;
+        int httpPort = (normalized['http_port'] as num?)?.toInt() ?? 0;
+        if (port > 0) {
+          if (httpPort <= 0 || httpPort != port) {
+            httpPort = port;
+          }
+          normalized['port'] = port;
+          normalized['http_port'] = httpPort;
+          normalized['mixed'] = true;
+        }
+        return normalized;
+      }).where((Map<String, dynamic> item) => ((item['port'] as num?)?.toInt() ?? 0) > 0).toList(growable: false);
     }
     return const <Map<String, dynamic>>[];
   }

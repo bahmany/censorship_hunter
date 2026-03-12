@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import 'models.dart';
 
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Binary paths for engines
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -60,12 +61,13 @@ Future<List<HunterLatencyConfig>> readLatencyConfigsFromJson(String absPath) asy
       final dynamic uri = row['uri'];
       if (uri is! String || uri.trim().isEmpty) continue;
       final dynamic latencyRaw = row['latency_ms'];
+      final String? engineUsed = row['engine_used'] is String ? row['engine_used'] as String : null;
       final double? latency = switch (latencyRaw) {
         num v => v.toDouble(),
         String s => double.tryParse(s),
         _ => null,
       };
-      out.add(HunterLatencyConfig(uri: uri.trim(), latencyMs: latency));
+      out.add(HunterLatencyConfig(uri: uri.trim(), latencyMs: latency, engineUsed: engineUsed));
     }
     return out;
   } catch (_) {
@@ -88,6 +90,35 @@ Future<int> loadBundledConfigsCount() async {
     } catch (_) {}
   }
   return count;
+}
+
+Future<String?> pickImportTextFile({String? initialDirectory}) async {
+  if (!Platform.isWindows) return null;
+  try {
+    final String exePath = Platform.resolvedExecutable;
+    final String exeDir = File(exePath).parent.path;
+    String scriptPath = '$exeDir\\data\\flutter_assets\\assets\\pick_file.ps1';
+    if (!File(scriptPath).existsSync()) {
+      scriptPath = '$exeDir\\..\\..\\..\\..\\assets\\pick_file.ps1';
+    }
+    if (!File(scriptPath).existsSync()) return null;
+    final List<String> psArgs = <String>[
+      '-NoProfile',
+      '-STA',
+      '-ExecutionPolicy', 'Bypass',
+      '-File', scriptPath,
+    ];
+    if (initialDirectory != null && initialDirectory.trim().isNotEmpty) {
+      psArgs.add(initialDirectory.trim());
+    }
+    final ProcessResult result = await Process.run('powershell', psArgs);
+    if (result.exitCode != 0) return null;
+    final String path = result.stdout.toString().trim();
+    if (path.isEmpty) return null;
+    return path;
+  } catch (_) {
+    return null;
+  }
 }
 
 class ProjectDocFile {
@@ -305,8 +336,9 @@ Future<RuntimeSnapshot> loadRuntimeSnapshot(String runtimeDir) async {
             final int? consecutiveFails = (row['consecutive_fails'] is num) ? (row['consecutive_fails'] as num).toInt() : null;
             final bool? alive = (row['alive'] is bool) ? row['alive'] as bool : null;
             final String? tag = (row['tag'] is String) ? row['tag'] as String : null;
+            final String? engineUsed = (row['engine_used'] is String) ? row['engine_used'] as String : null;
             final HunterLatencyConfig cfg = HunterLatencyConfig(
-              uri: uri, latencyMs: latency, firstSeen: firstSeen,
+              uri: uri, latencyMs: latency, engineUsed: engineUsed, firstSeen: firstSeen,
               lastAlive: lastAlive, lastTested: lastTested,
               totalTests: totalTests, totalPasses: totalPasses,
               consecutiveFails: consecutiveFails, alive: alive, tag: tag,
@@ -831,6 +863,7 @@ double? minLatencyMs(List<HunterLatencyConfig> items) {
 Future<bool> setWindowsSystemProxy(int socksPort, {int httpPort = 0}) async {
   if (!Platform.isWindows) return false;
   try {
+    if (httpPort <= 0) httpPort = socksPort;
     // Build proxy string: prefer HTTP (universally supported by Windows apps)
     // with SOCKS fallback for apps that support it
     final String proxyValue = httpPort > 0

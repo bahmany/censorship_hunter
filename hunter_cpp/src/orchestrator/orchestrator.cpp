@@ -8,13 +8,92 @@
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
+#include <cctype>
 #include <set>
 #include <sstream>
 #include <chrono>
 #include <thread>
 #include <filesystem>
+#include <fstream>
 
 namespace hunter {
+
+namespace {
+
+bool isImportableProxyUri(const std::string& uri) {
+    if (uri.size() < 10) return false;
+    static const std::vector<std::string> schemes = {
+        "vmess://", "vless://", "trojan://", "ss://", "ssr://",
+        "hysteria2://", "hy2://", "tuic://"
+    };
+    bool has_scheme = false;
+    for (const auto& s : schemes) {
+        if (uri.compare(0, s.size(), s) == 0) {
+            has_scheme = true;
+            break;
+        }
+    }
+    if (!has_scheme) return false;
+    if (uri.compare(0, 8, "vmess://") == 0) {
+        std::string payload = uri.substr(8);
+        auto hash = payload.find('#');
+        if (hash != std::string::npos) payload = payload.substr(0, hash);
+        if (payload.size() < 10) return false;
+        std::string decoded = utils::base64Decode(payload);
+        if (decoded.empty() || decoded.find('{') == std::string::npos) return false;
+        return decoded.find("\"add\"") != std::string::npos;
+    }
+    auto sep = uri.find("://");
+    if (sep == std::string::npos) return false;
+    std::string payload = uri.substr(sep + 3);
+    auto hash = payload.find('#');
+    if (hash != std::string::npos) payload = payload.substr(0, hash);
+    if (payload.size() < 3) return false;
+    if (uri.compare(0, 8, "vless://") == 0 || uri.compare(0, 9, "trojan://") == 0) {
+        if (payload.find('@') == std::string::npos) return false;
+    }
+    if (uri.compare(0, 5, "ss://") == 0 && payload.find('@') == std::string::npos) {
+        std::string decoded = utils::base64Decode(payload);
+        if (decoded.empty() || decoded.find(':') == std::string::npos) return false;
+    }
+    return true;
+}
+
+bool loadImportCandidates(const std::string& file_path, std::set<std::string>& valid_configs, int& invalid_count) {
+    std::ifstream input(file_path, std::ios::binary);
+    if (!input.is_open()) return false;
+
+    std::ostringstream raw_stream;
+    raw_stream << input.rdbuf();
+    const std::string raw = raw_stream.str();
+
+    std::set<std::string> extracted = utils::extractRawUrisFromText(raw);
+    const auto decoded_whole = utils::tryDecodeAndExtract(raw);
+    extracted.insert(decoded_whole.begin(), decoded_whole.end());
+
+    const auto lines = utils::readLines(file_path);
+    for (const auto& line : lines) {
+        const std::string trimmed = utils::trim(line);
+        if (trimmed.empty()) continue;
+        if (trimmed.find("://") != std::string::npos) {
+            extracted.insert(trimmed);
+        } else {
+            const auto decoded = utils::tryDecodeAndExtract(trimmed);
+            extracted.insert(decoded.begin(), decoded.end());
+        }
+    }
+
+    for (const auto& uri : extracted) {
+        if (isImportableProxyUri(uri)) {
+            valid_configs.insert(uri);
+        } else {
+            invalid_count++;
+        }
+    }
+    return true;
+}
+
+} 
 
 HunterOrchestrator::HunterOrchestrator(HunterConfig& config)
     : config_(config),
@@ -32,6 +111,9 @@ HunterOrchestrator::~HunterOrchestrator() {
 void HunterOrchestrator::initComponents() {
     // XRay path
     xray_manager_.setXRayPath(config_.xrayPath());
+    runtime_engine_manager_.setXRayPath(config_.xrayPath());
+    runtime_engine_manager_.setSingBoxPath(config_.singBoxPath());
+    runtime_engine_manager_.setMihomoPath(config_.mihomoPath());
 
     // Config database
     config_db_ = std::make_unique<network::ConfigDatabase>(constants::CONFIG_DB_MAX_SIZE);
@@ -45,6 +127,23 @@ void HunterOrchestrator::initComponents() {
     // Load balancer
     balancer_ = std::make_unique<proxy::MultiProxyServer>(config_.multiproxyPort());
     gemini_balancer_ = std::make_unique<proxy::MultiProxyServer>(config_.geminiPort());
+    balancer_->setXRayPath(config_.xrayPath());
+    balancer_->setSingBoxPath(config_.singBoxPath());
+    balancer_->setMihomoPath(config_.mihomoPath());
+    gemini_balancer_->setXRayPath(config_.xrayPath());
+    gemini_balancer_->setSingBoxPath(config_.singBoxPath());
+    gemini_balancer_->setMihomoPath(config_.mihomoPath());
+    auto engine_hint_cb = [this](const std::string& uri) -> std::string {
+        if (config_db_) {
+            const std::string db_hint = config_db_->getPreferredEngine(uri);
+            if (!db_hint.empty()) return db_hint;
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        auto it = cached_engine_hints_.find(uri);
+        return it != cached_engine_hints_.end() ? it->second : "";
+    };
+    balancer_->setEngineHintCallback(engine_hint_cb);
+    gemini_balancer_->setEngineHintCallback(engine_hint_cb);
 
     // Load balancer caches
     loadBalancerCache("HUNTER_balancer_cache.json", balancer_.get());
@@ -144,13 +243,21 @@ void HunterOrchestrator::start() {
     // Start main balancer with cached configs
     if (balancer_) {
         if (main_cached != cached_configs_.end() && !main_cached->second.empty()) {
-            balancer_->start(main_cached->second);
-            std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
-                      << " <- " << main_cached->second.size() << " cached configs" << std::endl;
+            if (balancer_->start(main_cached->second)) {
+                std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
+                          << " <- " << main_cached->second.size() << " cached configs" << std::endl;
+            } else {
+                utils::LogRingBuffer::instance().push(
+                    "[Startup] Main balancer failed on port " + std::to_string(config_.multiproxyPort()));
+            }
         } else if (!fallback_configs.empty()) {
-            balancer_->start(fallback_configs);
-            std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
-                      << " <- " << fallback_configs.size() << " fallback configs" << std::endl;
+            if (balancer_->start(fallback_configs)) {
+                std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
+                          << " <- " << fallback_configs.size() << " fallback configs" << std::endl;
+            } else {
+                utils::LogRingBuffer::instance().push(
+                    "[Startup] Main balancer failed on port " + std::to_string(config_.multiproxyPort()));
+            }
         } else {
             balancer_->start();
             std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
@@ -161,14 +268,23 @@ void HunterOrchestrator::start() {
     // Start gemini balancer with cached configs
     if (gemini_balancer_) {
         if (gemini_cached != cached_configs_.end() && !gemini_cached->second.empty()) {
-            gemini_balancer_->start(gemini_cached->second);
-            std::cout << "[Startup] Gemini balancer :" << config_.geminiPort()
-                      << " <- " << gemini_cached->second.size() << " cached configs" << std::endl;
+            if (gemini_balancer_->start(gemini_cached->second)) {
+                std::cout << "[Startup] Gemini balancer :" << config_.geminiPort()
+                          << " <- " << gemini_cached->second.size() << " cached configs" << std::endl;
+            } else {
+                utils::LogRingBuffer::instance().push(
+                    "[Startup] Gemini balancer failed on port " + std::to_string(config_.geminiPort()));
+            }
         } else if (!fallback_configs.empty()) {
             int half = std::max(1, (int)fallback_configs.size() / 2);
             std::vector<std::pair<std::string, float>> gemini_fb(
                 fallback_configs.begin() + half, fallback_configs.end());
-            if (!gemini_fb.empty()) gemini_balancer_->start(gemini_fb);
+            if (!gemini_fb.empty()) {
+                if (!gemini_balancer_->start(gemini_fb)) {
+                    utils::LogRingBuffer::instance().push(
+                        "[Startup] Gemini balancer failed on port " + std::to_string(config_.geminiPort()));
+                }
+            }
             else gemini_balancer_->start();
         } else {
             gemini_balancer_->start();
@@ -287,6 +403,7 @@ void HunterOrchestrator::stop() {
     if (dpi_evasion_) dpi_evasion_->stop();
     if (balancer_) balancer_->stop();
     if (gemini_balancer_) gemini_balancer_->stop();
+    runtime_engine_manager_.stopAll();
     xray_manager_.stopAll();
 }
 
@@ -369,73 +486,512 @@ void HunterOrchestrator::addManualConfigs(const std::vector<std::string>& uris) 
         }
     }
     if (valid_set.empty()) return;
-    int added = config_db_->addConfigs(valid_set, "manual");
+    int promoted = 0;
+    int added = config_db_->addConfigsWithPriority(valid_set, "manual", &promoted);
     utils::LogRingBuffer::instance().push(
-        "[Cmd] Added " + std::to_string(added) + " manual configs (" +
-        std::to_string(valid_set.size()) + " submitted)");
+        "[Cmd] Added " + std::to_string(added) + " manual configs, promoted " +
+        std::to_string(promoted) + " existing (" + std::to_string(valid_set.size()) + " submitted)");
 }
 
 // ─── Real-time UI Communication ───
 
+std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_line) {
+    const double received_ts = utils::nowTimestamp();
+    const double received_ts_ms = received_ts * 1000.0;
+    auto decodeJsonString = [](const std::string& encoded) -> std::string {
+        std::string out;
+        out.reserve(encoded.size());
+        bool escape = false;
+        for (size_t i = 0; i < encoded.size(); ++i) {
+            const char ch = encoded[i];
+            if (!escape) {
+                if (ch == '\\') {
+                    escape = true;
+                } else {
+                    out.push_back(ch);
+                }
+                continue;
+            }
+
+            switch (ch) {
+                case '\\': out.push_back('\\'); break;
+                case '"': out.push_back('"'); break;
+                case 'n': out.push_back('\n'); break;
+                case 'r': out.push_back('\r'); break;
+                case 't': out.push_back('\t'); break;
+                default: out.push_back(ch); break;
+            }
+            escape = false;
+        }
+        if (escape) out.push_back('\\');
+        return out;
+    };
+    auto extractString = [&](const std::string& key) -> std::string {
+        const std::string needle = "\"" + key + "\"";
+        auto key_pos = json_line.find(needle);
+        if (key_pos == std::string::npos) return "";
+        auto colon = json_line.find(':', key_pos + needle.size());
+        if (colon == std::string::npos) return "";
+        size_t pos = colon + 1;
+        while (pos < json_line.size() && std::isspace(static_cast<unsigned char>(json_line[pos]))) pos++;
+        auto first_quote = json_line.find('"', pos);
+        if (first_quote == std::string::npos) return "";
+        std::string encoded;
+        bool escape = false;
+        for (size_t i = first_quote + 1; i < json_line.size(); ++i) {
+            const char ch = json_line[i];
+            if (!escape && ch == '"') {
+                return decodeJsonString(encoded);
+            }
+            encoded.push_back(ch);
+            if (!escape && ch == '\\') escape = true;
+            else escape = false;
+        }
+        return "";
+    };
+    auto extractInt = [&](const std::string& key, int def) -> int {
+        const std::string needle = "\"" + key + "\"";
+        auto key_pos = json_line.find(needle);
+        if (key_pos == std::string::npos) return def;
+        auto colon = json_line.find(':', key_pos + needle.size());
+        if (colon == std::string::npos) return def;
+        size_t pos = colon + 1;
+        while (pos < json_line.size() && std::isspace(static_cast<unsigned char>(json_line[pos]))) pos++;
+        return std::atoi(json_line.c_str() + pos);
+    };
+    auto extractBool = [&](const std::string& key, bool def) -> bool {
+        const std::string needle = "\"" + key + "\"";
+        auto key_pos = json_line.find(needle);
+        if (key_pos == std::string::npos) return def;
+        auto colon = json_line.find(':', key_pos + needle.size());
+        if (colon == std::string::npos) return def;
+        size_t pos = colon + 1;
+        while (pos < json_line.size() && std::isspace(static_cast<unsigned char>(json_line[pos]))) pos++;
+        if (json_line.compare(pos, 4, "true") == 0) return true;
+        if (json_line.compare(pos, 5, "false") == 0) return false;
+        return def;
+    };
+
+    auto hasKey = [&](const std::string& key) -> bool {
+        return json_line.find("\"" + key + "\"") != std::string::npos;
+    };
+    auto splitTextLines = [](const std::string& raw) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        std::istringstream ss(raw);
+        std::string line;
+        while (std::getline(ss, line)) {
+            std::string trimmed = utils::trim(line);
+            if (!trimmed.empty()) out.push_back(trimmed);
+        }
+        return out;
+    };
+    auto applyRuntimeEnginePaths = [this]() {
+        xray_manager_.setXRayPath(config_.xrayPath());
+        runtime_engine_manager_.setXRayPath(config_.xrayPath());
+        runtime_engine_manager_.setSingBoxPath(config_.singBoxPath());
+        runtime_engine_manager_.setMihomoPath(config_.mihomoPath());
+        if (balancer_) {
+            balancer_->setXRayPath(config_.xrayPath());
+            balancer_->setSingBoxPath(config_.singBoxPath());
+            balancer_->setMihomoPath(config_.mihomoPath());
+        }
+        if (gemini_balancer_) {
+            gemini_balancer_->setXRayPath(config_.xrayPath());
+            gemini_balancer_->setSingBoxPath(config_.singBoxPath());
+            gemini_balancer_->setMihomoPath(config_.mihomoPath());
+        }
+    };
+
+    const std::string request_id = extractString("request_id");
+    const bool quiet = extractBool("quiet", false);
+    std::string command = extractString("command");
+    if (command.empty()) {
+        if (json_line.find("\"pause\"") != std::string::npos) command = "pause";
+        else if (json_line.find("\"resume\"") != std::string::npos) command = "resume";
+        else if (json_line.find("\"speed_profile\"") != std::string::npos) command = "speed_profile";
+        else if (json_line.find("\"set_speed\"") != std::string::npos) command = "set_speed";
+        else if (json_line.find("\"set_threads\"") != std::string::npos) command = "set_threads";
+        else if (json_line.find("\"set_timeout\"") != std::string::npos) command = "set_timeout";
+        else if (json_line.find("\"clear_old\"") != std::string::npos) command = "clear_old";
+        else if (json_line.find("\"add_configs\"") != std::string::npos) command = "add_configs";
+        else if (json_line.find("\"import_config_file\"") != std::string::npos) command = "import_config_file";
+        else if (json_line.find("\"export_config_db\"") != std::string::npos) command = "export_config_db";
+        else if (json_line.find("\"run_cycle\"") != std::string::npos) command = "run_cycle";
+        else if (json_line.find("\"refresh_ports\"") != std::string::npos) command = "refresh_ports";
+        else if (json_line.find("\"reprovision_ports\"") != std::string::npos) command = "reprovision_ports";
+        else if (json_line.find("\"load_raw_files\"") != std::string::npos) command = "load_raw_files";
+        else if (json_line.find("\"load_bundle_files\"") != std::string::npos) command = "load_bundle_files";
+        else if (json_line.find("\"detect_censorship\"") != std::string::npos) command = "detect_censorship";
+        else if (json_line.find("\"update_runtime_settings\"") != std::string::npos) command = "update_runtime_settings";
+        else if (json_line.find("\"stop\"") != std::string::npos) command = "stop";
+        else if (json_line.find("\"get_status\"") != std::string::npos) command = "get_status";
+        else if (json_line.find("\"ping\"") != std::string::npos) command = "ping";
+    }
+
+    bool ok = true;
+    std::string message = "ok";
+
+    try {
+        if (command == "pause") {
+            pause();
+            message = "paused";
+        } else if (command == "resume") {
+            resume();
+            message = "resumed";
+        } else if (command == "speed_profile") {
+            std::string value = extractString("value");
+            if (value.empty()) value = "medium";
+            applyAutoProfile(value);
+            message = "speed_profile_applied";
+        } else if (command == "set_speed") {
+            int threads = extractInt("threads", speed_max_threads_.load());
+            int timeout = extractInt("timeout", speed_test_timeout_.load());
+            int chunk = extractInt("chunk_size", threads);
+            if (threads < 1 || threads > 50) {
+                ok = false;
+                message = "invalid_threads";
+            } else if (timeout < 1 || timeout > 10) {
+                ok = false;
+                message = "invalid_timeout";
+            } else {
+                if (chunk < 1) chunk = threads;
+                chunk = std::max(1, std::min(50, chunk));
+                speed_max_threads_ = threads;
+                speed_test_timeout_ = timeout;
+                speed_chunk_size_ = chunk;
+                std::lock_guard<std::mutex> lock(speed_mutex_);
+                speed_profile_name_ = "custom";
+                message = "speed_updated";
+            }
+        } else if (command == "set_threads") {
+            int val = extractInt("value", speed_max_threads_.load());
+            if (val >= 1 && val <= 50) {
+                speed_max_threads_ = val;
+                speed_chunk_size_ = std::max(1, std::min(50, val));
+                std::lock_guard<std::mutex> lock(speed_mutex_);
+                speed_profile_name_ = "custom";
+                message = "threads_updated";
+            } else {
+                ok = false;
+                message = "invalid_threads";
+            }
+        } else if (command == "set_timeout") {
+            int val = extractInt("value", speed_test_timeout_.load());
+            if (val >= 1 && val <= 10) {
+                speed_test_timeout_ = val;
+                std::lock_guard<std::mutex> lock(speed_mutex_);
+                speed_profile_name_ = "custom";
+                message = "timeout_updated";
+            } else {
+                ok = false;
+                message = "invalid_timeout";
+            }
+        } else if (command == "clear_old") {
+            int hours = extractInt("hours", 168);
+            if (hours < 1) hours = 1;
+            int removed = clearOldConfigs(hours);
+            message = "cleared_" + std::to_string(removed);
+        } else if (command == "add_configs") {
+            const std::string configs = extractString("configs");
+            if (!configs.empty()) {
+                addManualConfigs(utils::split(configs, '\n'));
+                message = "configs_added";
+            } else {
+                ok = false;
+                message = "invalid_configs_payload";
+            }
+        } else if (command == "import_config_file") {
+            const std::string import_path = utils::trim(extractString("path"));
+            if (import_path.empty()) {
+                ok = false;
+                message = "invalid_import_path";
+            } else if (!config_db_) {
+                ok = false;
+                message = "config_db_unavailable";
+            } else {
+                std::set<std::string> valid_configs;
+                int invalid_count = 0;
+                if (!loadImportCandidates(import_path, valid_configs, invalid_count)) {
+                    ok = false;
+                    message = "import_file_not_found";
+                } else if (valid_configs.empty()) {
+                    ok = false;
+                    message = invalid_count > 0 ? "no_valid_configs_in_file" : "empty_import_file";
+                } else {
+                    int promoted = 0;
+                    const int added = config_db_->addConfigsWithPriority(valid_configs, "user_import", &promoted);
+                    utils::LogRingBuffer::instance().push(
+                        "[Import] File " + import_path + ": added " + std::to_string(added) +
+                        ", promoted " + std::to_string(promoted) +
+                        ", invalid " + std::to_string(invalid_count));
+                    message = "imported " + std::to_string(added) + " new, reprioritized " +
+                              std::to_string(promoted) + " existing, invalid " + std::to_string(invalid_count);
+                }
+            }
+        } else if (command == "export_config_db") {
+            if (!config_db_) {
+                ok = false;
+                message = "config_db_unavailable";
+            } else {
+                std::string export_path = utils::trim(extractString("path"));
+                std::string base = utils::dirName(config_.stateFile());
+                if (base.empty()) base = "runtime";
+                if (export_path.empty()) export_path = base + "/HUNTER_config_db_export.txt";
+                const std::set<std::string> all_uris = config_db_->getAllUris();
+                const std::vector<std::string> lines(all_uris.begin(), all_uris.end());
+                if (utils::writeLines(export_path, lines)) {
+                    utils::LogRingBuffer::instance().push(
+                        "[Export] Wrote " + std::to_string(lines.size()) + " configs to " + export_path);
+                    message = "exported " + std::to_string(lines.size()) + " configs to " + export_path;
+                } else {
+                    ok = false;
+                    message = "export_failed";
+                }
+            }
+        } else if (command == "run_cycle") {
+            message = runCycle() ? "cycle_completed" : "cycle_skipped";
+        } else if (command == "refresh_ports") {
+            refreshProvisionedPorts();
+            message = "ports_refreshed";
+        } else if (command == "reprovision_ports") {
+            stopProvisionedPorts();
+            provisionPorts();
+            message = "ports_reprovisioned";
+        } else if (command == "load_raw_files") {
+            message = "raw_loaded_" + std::to_string(loadRawConfigFiles());
+        } else if (command == "load_bundle_files") {
+            message = "bundle_loaded_" + std::to_string(loadBundleConfigs());
+        } else if (command == "detect_censorship") {
+            message = detectCensorship() ? "censored" : "open";
+        } else if (command == "update_runtime_settings") {
+            bool any_change = false;
+            bool engine_paths_changed = false;
+            bool restart_required = false;
+
+            if (hasKey("xray_path")) {
+                const std::string value = utils::trim(extractString("xray_path"));
+                if (value.empty()) {
+                    ok = false;
+                    message = "invalid_xray_path";
+                } else {
+                    engine_paths_changed = engine_paths_changed || value != config_.xrayPath();
+                    config_.set("xray_path", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("singbox_path")) {
+                const std::string value = utils::trim(extractString("singbox_path"));
+                if (value.empty()) {
+                    ok = false;
+                    message = "invalid_singbox_path";
+                } else {
+                    engine_paths_changed = engine_paths_changed || value != config_.singBoxPath();
+                    config_.set("singbox_path", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("mihomo_path")) {
+                const std::string value = utils::trim(extractString("mihomo_path"));
+                if (value.empty()) {
+                    ok = false;
+                    message = "invalid_mihomo_path";
+                } else {
+                    engine_paths_changed = engine_paths_changed || value != config_.mihomoPath();
+                    config_.set("mihomo_path", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("tor_path")) {
+                const std::string value = utils::trim(extractString("tor_path"));
+                if (value.empty()) {
+                    ok = false;
+                    message = "invalid_tor_path";
+                } else {
+                    config_.set("tor_path", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("max_total")) {
+                const int value = extractInt("max_total", config_.maxTotal());
+                if (value < 1 || value > 100000) {
+                    ok = false;
+                    message = "invalid_max_total";
+                } else {
+                    config_.set("max_total", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("max_workers")) {
+                const int value = extractInt("max_workers", config_.maxWorkers());
+                if (value < 1 || value > 256) {
+                    ok = false;
+                    message = "invalid_max_workers";
+                } else {
+                    config_.set("max_workers", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("scan_limit")) {
+                const int value = extractInt("scan_limit", config_.scanLimit());
+                if (value < 1 || value > 10000) {
+                    ok = false;
+                    message = "invalid_scan_limit";
+                } else {
+                    config_.set("scan_limit", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("sleep_seconds")) {
+                const int value = extractInt("sleep_seconds", config_.sleepSeconds());
+                if (value < 1 || value > 86400) {
+                    ok = false;
+                    message = "invalid_sleep_seconds";
+                } else {
+                    config_.set("sleep_seconds", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("multiproxy_port")) {
+                const int value = extractInt("multiproxy_port", config_.multiproxyPort());
+                if (value < 1 || value > 65535) {
+                    ok = false;
+                    message = "invalid_multiproxy_port";
+                } else {
+                    restart_required = restart_required || value != config_.multiproxyPort();
+                    config_.set("multiproxy_port", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("gemini_port")) {
+                const int value = extractInt("gemini_port", config_.geminiPort());
+                if (value < 1 || value > 65535) {
+                    ok = false;
+                    message = "invalid_gemini_port";
+                } else {
+                    restart_required = restart_required || value != config_.geminiPort();
+                    config_.set("gemini_port", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("telegram_enabled")) {
+                config_.set("telegram_enabled", extractBool("telegram_enabled", config_.getBool("telegram_enabled", false)));
+                any_change = true;
+            }
+            if (ok && hasKey("telegram_api_id")) {
+                config_.set("telegram_api_id", extractString("telegram_api_id"));
+                any_change = true;
+            }
+            if (ok && hasKey("telegram_api_hash")) {
+                config_.set("telegram_api_hash", extractString("telegram_api_hash"));
+                any_change = true;
+            }
+            if (ok && hasKey("telegram_phone")) {
+                config_.set("telegram_phone", extractString("telegram_phone"));
+                any_change = true;
+            }
+            if (ok && hasKey("telegram_limit")) {
+                const int value = extractInt("telegram_limit", config_.telegramLimit());
+                if (value < 0 || value > 10000) {
+                    ok = false;
+                    message = "invalid_telegram_limit";
+                } else {
+                    config_.set("telegram_limit", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("telegram_timeout_ms")) {
+                const int value = extractInt("telegram_timeout_ms", config_.getInt("telegram_timeout_ms", 12000));
+                if (value < 1000 || value > 120000) {
+                    ok = false;
+                    message = "invalid_telegram_timeout_ms";
+                } else {
+                    config_.set("telegram_timeout_ms", value);
+                    any_change = true;
+                }
+            }
+            if (ok && hasKey("targets_text")) {
+                const std::vector<std::string> targets = splitTextLines(extractString("targets_text"));
+                std::ostringstream raw;
+                raw << "[";
+                bool first = true;
+                for (const auto& item : targets) {
+                    if (!first) raw << ",";
+                    first = false;
+                    raw << "\"" << item << "\"";
+                }
+                raw << "]";
+                config_.set("targets", raw.str());
+                any_change = true;
+            }
+            if (ok && hasKey("github_urls_text")) {
+                config_.setGithubUrls(splitTextLines(extractString("github_urls_text")));
+                any_change = true;
+            }
+            if (ok && engine_paths_changed) {
+                applyRuntimeEnginePaths();
+                if (balancer_) {
+                    const auto pool = balancer_->getAvailableConfigsList();
+                    std::vector<std::pair<std::string, float>> configs;
+                    configs.reserve(pool.size());
+                    for (const auto& entry : pool) configs.emplace_back(entry.uri, entry.latency);
+                    balancer_->updateAvailableConfigs(configs, true);
+                }
+                if (gemini_balancer_) {
+                    const auto pool = gemini_balancer_->getAvailableConfigsList();
+                    std::vector<std::pair<std::string, float>> configs;
+                    configs.reserve(pool.size());
+                    for (const auto& entry : pool) configs.emplace_back(entry.uri, entry.latency);
+                    gemini_balancer_->updateAvailableConfigs(configs, true);
+                }
+                stopProvisionedPorts();
+                provisionPorts();
+            }
+            if (ok) {
+                message = restart_required
+                    ? (any_change ? "runtime_settings_applied_restart_required_for_ports" : "restart_required_for_ports")
+                    : (any_change ? "runtime_settings_applied" : "no_runtime_changes");
+            }
+        } else if (command == "stop") {
+            stop_requested_ = true;
+            message = "stop_requested";
+        } else if (command == "get_status") {
+            message = "status";
+        } else if (command == "ping") {
+            message = "pong";
+        } else {
+            ok = false;
+            message = "unknown_command";
+        }
+    } catch (const std::exception& e) {
+        ok = false;
+        message = e.what();
+    } catch (...) {
+        ok = false;
+        message = "unknown_exception";
+    }
+
+    const double response_ts = utils::nowTimestamp();
+    const double response_ts_ms = response_ts * 1000.0;
+    utils::JsonBuilder jb;
+    jb.add("type", "command_result")
+      .add("ok", ok)
+      .add("request_id", request_id)
+      .add("command", command)
+      .add("quiet", quiet)
+      .add("message", message)
+      .add("received_ts", received_ts)
+      .add("received_ts_ms", received_ts_ms)
+      .add("response_ts", response_ts)
+      .add("response_ts_ms", response_ts_ms)
+      .addRaw("status", buildStatusJson(paused_.load() ? "paused" : "running"));
+    return jb.build();
+}
+
 void HunterOrchestrator::processStdinCommand(const std::string& json_line) {
     try {
-        std::string cmd = utils::trim(json_line);
-        if (cmd.empty()) return;
-        if (cmd.find("\"pause\"") != std::string::npos) {
-            pause();
-        } else if (cmd.find("\"resume\"") != std::string::npos) {
-            resume();
-        } else if (cmd.find("\"speed_profile\"") != std::string::npos) {
-            auto pos = cmd.find("\"value\":");
-            if (pos != std::string::npos) {
-                auto vs = cmd.find('"', pos + 8);
-                auto ve = cmd.find('"', vs + 1);
-                if (vs != std::string::npos && ve != std::string::npos)
-                    applyAutoProfile(cmd.substr(vs + 1, ve - vs - 1));
-            }
-        } else if (cmd.find("\"set_threads\"") != std::string::npos) {
-            auto pos = cmd.find("\"value\":");
-            if (pos != std::string::npos) {
-                int val = std::atoi(cmd.c_str() + pos + 8);
-                if (val >= 1 && val <= 50) {
-                    speed_max_threads_ = val;
-                    speed_chunk_size_ = std::max(1, std::min(50, val));
-                    std::lock_guard<std::mutex> lock(speed_mutex_);
-                    speed_profile_name_ = "custom";
-                }
-            }
-        } else if (cmd.find("\"set_timeout\"") != std::string::npos) {
-            auto pos = cmd.find("\"value\":");
-            if (pos != std::string::npos) {
-                int val = std::atoi(cmd.c_str() + pos + 8);
-                if (val >= 1 && val <= 10) {
-                    speed_test_timeout_ = val;
-                    std::lock_guard<std::mutex> lock(speed_mutex_);
-                    speed_profile_name_ = "custom";
-                }
-            }
-        } else if (cmd.find("\"clear_old\"") != std::string::npos) {
-            auto pos = cmd.find("\"hours\":");
-            int hours = 168;
-            if (pos != std::string::npos) {
-                hours = std::atoi(cmd.c_str() + pos + 8);
-                if (hours < 1) hours = 1;
-            }
-            clearOldConfigs(hours);
-        } else if (cmd.find("\"add_configs\"") != std::string::npos) {
-            auto pos = cmd.find("\"configs\":");
-            if (pos != std::string::npos) {
-                auto vs = cmd.find('"', pos + 10);
-                auto ve = cmd.rfind('"');
-                if (vs != std::string::npos && ve > vs) {
-                    auto lines = utils::split(cmd.substr(vs+1, ve-vs-1), '\n');
-                    addManualConfigs(lines);
-                }
-            }
-        } else if (cmd.find("\"stop\"") != std::string::npos) {
-            stop_requested_ = true;
-        } else if (cmd.find("\"get_status\"") != std::string::npos) {
-            emitStatusJson(paused_.load() ? "paused" : "running");
+        const std::string response = processRealtimeCommand(json_line);
+        if (!response.empty()) {
+            std::cout << "##CMD##" << response << std::endl;
         }
     } catch (...) {}
 }
@@ -451,9 +1007,13 @@ void HunterOrchestrator::emitStatusJson(const std::string& phase) {
     }
     auto sp = getSpeedProfile();
     double uptime = utils::nowTimestamp() - start_time_;
+    const double ts = utils::nowTimestamp();
+    const double ts_ms = ts * 1000.0;
     // Emit compact status line
     std::ostringstream ss;
-    ss << "##STATUS##{\"phase\":\"" << phase
+    ss << "##STATUS##{\"ts\":" << ts
+       << ",\"ts_ms\":" << ts_ms
+       << ",\"phase\":\"" << phase
        << "\",\"paused\":" << (paused_.load() ? "true" : "false")
        << ",\"uptime_s\":" << (int)uptime
        << ",\"db_total\":" << db_total
@@ -848,11 +1408,14 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
                 try {
                     network::ProxyTester tester;
                     tester.setXrayPath("bin/xray.exe");
+                    tester.setSingBoxPath("bin/sing-box.exe");
+                    tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
                     auto result = tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", timeout_s);
 
                     br.success = result.success && !result.telegram_only;
                     br.latency_ms = br.success ? (result.download_speed_kbps > 0 ? 1000.0f / result.download_speed_kbps : 5000.0f) : 0;
                     br.tier = br.success ? (br.latency_ms <= 3000 ? "gold" : "silver") : "dead";
+                    br.engine_used = result.engine_used;
                     br.error = result.error_message;
                     if (result.telegram_only) br.error = "Telegram-only (no HTTP download)";
                 } catch (const std::exception& ex) {
@@ -897,7 +1460,7 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
     // Update ConfigDB with results
     if (config_db_) {
         for (auto& r : results) {
-            config_db_->updateHealth(r.uri, r.success, r.latency_ms);
+            config_db_->updateHealth(r.uri, r.success, r.latency_ms, r.engine_used);
         }
     }
 
@@ -972,8 +1535,22 @@ void HunterOrchestrator::loadBalancerCache(const std::string& name, proxy::Multi
             try { latency = std::stof(json.substr(lat_pos, 20)); } catch (...) {}
         }
 
+        std::string engine_used;
+        size_t eng_pos = json.find("\"engine_used\":\"", pos);
+        if (eng_pos != std::string::npos && eng_pos < pos + 160) {
+            eng_pos += 15;
+            size_t eng_end = json.find('"', eng_pos);
+            if (eng_end != std::string::npos) {
+                engine_used = json.substr(eng_pos, eng_end - eng_pos);
+            }
+        }
+
         if (!uri.empty() && uri.find("://") != std::string::npos) {
             configs.emplace_back(uri, latency);
+            if (!engine_used.empty()) {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                cached_engine_hints_[uri] = engine_used;
+            }
         }
     }
 
@@ -996,7 +1573,20 @@ void HunterOrchestrator::saveBalancerCache(const std::string& name,
         if (count >= 1000) break;
         if (!first) ss << ",";
         first = false;
-        ss << "{\"uri\":\"" << uri << "\",\"latency_ms\":" << lat << "}";
+        std::string engine_used;
+        if (config_db_) engine_used = config_db_->getPreferredEngine(uri);
+        if (engine_used.empty()) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            auto hint_it = cached_engine_hints_.find(uri);
+            if (hint_it != cached_engine_hints_.end()) engine_used = hint_it->second;
+        }
+        ss << "{\"uri\":\"" << uri << "\",\"latency_ms\":" << lat;
+        if (!engine_used.empty()) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            cached_engine_hints_[uri] = engine_used;
+            ss << ",\"engine_used\":\"" << engine_used << "\"";
+        }
+        ss << "}";
         count++;
     }
     ss << "]}";
@@ -1014,9 +1604,24 @@ int HunterOrchestrator::computeAdaptiveSleep() {
 void HunterOrchestrator::provisionPorts() {
     // Get best configs from balancer or cached configs
     std::vector<std::pair<std::string, float>> best;
+    auto resolve_engine_hint = [this](const std::string& uri) -> std::string {
+        if (config_db_) {
+            std::string engine = config_db_->getPreferredEngine(uri);
+            if (!engine.empty()) return engine;
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        auto it = cached_engine_hints_.find(uri);
+        return it != cached_engine_hints_.end() ? it->second : "";
+    };
     if (balancer_) {
         auto pool = balancer_->getAvailableConfigsList();
-        for (auto& e : pool) best.emplace_back(e.uri, e.latency);
+        for (auto& e : pool) {
+            best.emplace_back(e.uri, e.latency);
+            if (!e.engine_used.empty()) {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                cached_engine_hints_[e.uri] = e.engine_used;
+            }
+        }
     }
     if (best.empty() && config_db_) {
         best = config_db_->getHealthyConfigs(PROVISION_PORT_COUNT);
@@ -1039,47 +1644,76 @@ void HunterOrchestrator::provisionPorts() {
     // Stop existing processes
     for (auto& slot : provisioned_ports_) {
         if (slot.pid > 0) {
-            xray_manager_.stopProcess(slot.pid);
+            runtime_engine_manager_.stopProcess(slot.pid);
         }
     }
     provisioned_ports_.clear();
 
-    // Start individual XRay processes on ports 2901+ (SOCKS) with HTTP on port+100
+    // Start individual engine-specific processes on ports 2901+
     double now = utils::nowTimestamp();
     for (int i = 0; i < count; i++) {
         int socks_port = PROVISION_PORT_BASE + i;
-        int http_port = socks_port + 100;  // HTTP on port+100 (e.g., 3001 for SOCKS 2901)
+        int http_port = socks_port;
         auto& [uri, latency] = best[i];
 
         auto parsed = network::UriParser::parse(uri);
         if (!parsed.has_value() || !parsed->isValid()) continue;
 
-        std::string config_json = proxy::XRayManager::generateConfig(*parsed, socks_port, http_port);
-        std::string config_path = xray_manager_.writeConfigFile(config_json);
-        int pid = xray_manager_.startProcess(config_path);
+        const std::string preferred_engine = resolve_engine_hint(uri);
+        const std::string engine_used = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
+        if (engine_used.empty()) continue;
+        std::string config_text = runtime_engine_manager_.generateConfig(*parsed, socks_port, engine_used);
+        std::string config_path = runtime_engine_manager_.writeConfigFile(engine_used, config_text);
+        int pid = runtime_engine_manager_.startProcess(engine_used, config_path);
+        utils::LocalProxyProbeResult probe;
+        bool ready = false;
+        if (pid > 0 && utils::waitForPortAlive(socks_port, 5000, 100)) {
+            probe = utils::probeLocalMixedPort(socks_port, 2000);
+            ready = probe.mixed_ready();
+        }
+        if (pid > 0 && !ready) {
+            runtime_engine_manager_.stopProcess(pid);
+            pid = -1;
+        }
 
         PortSlot slot;
         slot.port = socks_port;
         slot.http_port = http_port;
         slot.uri = uri;
+        slot.engine_used = engine_used;
         slot.pid = pid;
-        slot.alive = (pid > 0);
+        slot.alive = ready;
+        slot.tcp_alive = probe.tcp_alive;
+        slot.socks_ready = probe.socks_ready;
+        slot.http_ready = probe.http_ready;
         slot.latency_ms = latency;
         slot.last_health_check = now;
+        slot.last_probe_ts = utils::nowTimestamp();
         slot.consecutive_failures = 0;
         provisioned_ports_.push_back(slot);
+        if (!engine_used.empty()) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            cached_engine_hints_[uri] = engine_used;
+        }
 
-        if (pid > 0) {
-            std::cout << "[Provision] SOCKS:" << socks_port << " HTTP:" << http_port << " <- "
+        if (ready) {
+            std::cout << "[Provision] MIXED:" << socks_port << " <- "
                       << uri.substr(0, std::min((int)uri.size(), 50)) << "..."
-                      << " (latency=" << latency << "ms)" << std::endl;
+                      << " (engine=" << engine_used << ", latency=" << latency << "ms)" << std::endl;
+        } else {
+            utils::LogRingBuffer::instance().push(
+                "[Provision] Failed to start MIXED:" + std::to_string(socks_port) +
+                " for " + uri.substr(0, std::min((int)uri.size(), 60)) +
+                " engine=" + engine_used +
+                " tcp=" + std::string(slot.tcp_alive ? "1" : "0") +
+                " socks=" + std::string(slot.socks_ready ? "1" : "0") +
+                " http=" + std::string(slot.http_ready ? "1" : "0"));
         }
     }
 
     if (count > 0) {
-        std::cout << "[Provision] " << count << " dual-protocol ports provisioned (SOCKS "
+        std::cout << "[Provision] " << count << " mixed ports provisioned (HTTP+SOCKS on "
                   << PROVISION_PORT_BASE << "-" << (PROVISION_PORT_BASE + count - 1)
-                  << ", HTTP " << (PROVISION_PORT_BASE + 100) << "-" << (PROVISION_PORT_BASE + 100 + count - 1)
                   << ")" << std::endl;
     }
 }
@@ -1100,23 +1734,31 @@ void HunterOrchestrator::refreshProvisionedPorts() {
         if (now - slot.last_health_check < 30.0) continue;
         slot.last_health_check = now;
 
-        bool port_ok = utils::isPortAlive(slot.port, 2000);
-        if (port_ok) {
+        const auto probe = utils::probeLocalMixedPort(slot.port, 1500);
+        slot.tcp_alive = probe.tcp_alive;
+        slot.socks_ready = probe.socks_ready;
+        slot.http_ready = probe.http_ready;
+        slot.last_probe_ts = utils::nowTimestamp();
+        if (probe.mixed_ready()) {
             slot.alive = true;
             slot.consecutive_failures = 0;
         } else {
+            slot.alive = false;
             slot.consecutive_failures++;
             if (slot.consecutive_failures >= 3) {
                 // Port is dead — kill and mark for replacement
                 if (slot.pid > 0) {
-                    xray_manager_.stopProcess(slot.pid);
+                    runtime_engine_manager_.stopProcess(slot.pid);
                 }
                 slot.alive = false;
                 slot.pid = -1;
                 dead_indices.push_back(i);
                 utils::LogRingBuffer::instance().push(
                     "[Provision] Dead proxy on port " + std::to_string(slot.port) +
-                    " (failures=" + std::to_string(slot.consecutive_failures) + ")");
+                    " (failures=" + std::to_string(slot.consecutive_failures) +
+                    ", tcp=" + std::string(slot.tcp_alive ? "1" : "0") +
+                    ", socks=" + std::string(slot.socks_ready ? "1" : "0") +
+                    ", http=" + std::string(slot.http_ready ? "1" : "0") + ")");
             }
         }
     }
@@ -1125,6 +1767,15 @@ void HunterOrchestrator::refreshProvisionedPorts() {
 
     // Get replacement configs
     std::set<std::string> existing_uris;
+    auto resolve_engine_hint = [this](const std::string& uri) -> std::string {
+        if (config_db_) {
+            std::string engine = config_db_->getPreferredEngine(uri);
+            if (!engine.empty()) return engine;
+        }
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        auto it = cached_engine_hints_.find(uri);
+        return it != cached_engine_hints_.end() ? it->second : "";
+    };
     for (auto& slot : provisioned_ports_) {
         if (slot.alive && slot.pid > 0) existing_uris.insert(slot.uri);
     }
@@ -1141,6 +1792,10 @@ void HunterOrchestrator::refreshProvisionedPorts() {
     if (replacements.empty() && balancer_) {
         auto pool = balancer_->getAvailableConfigsList();
         for (auto& e : pool) {
+            if (!e.engine_used.empty()) {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                cached_engine_hints_[e.uri] = e.engine_used;
+            }
             if (existing_uris.find(e.uri) == existing_uris.end()) {
                 replacements.emplace_back(e.uri, e.latency);
             }
@@ -1163,24 +1818,57 @@ void HunterOrchestrator::refreshProvisionedPorts() {
 
         int socks_port = provisioned_ports_[idx].port;
         int h_port = provisioned_ports_[idx].http_port;
-        if (h_port <= 0) h_port = socks_port + 100;  // ensure http_port is set
-        std::string config_json = proxy::XRayManager::generateConfig(*parsed, socks_port, h_port);
-        std::string config_path = xray_manager_.writeConfigFile(config_json);
-        int pid = xray_manager_.startProcess(config_path);
+        if (h_port <= 0) h_port = socks_port;
+        const std::string preferred_engine = resolve_engine_hint(uri);
+        const std::string engine_used = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
+        if (engine_used.empty()) {
+            replaced++;
+            continue;
+        }
+        std::string config_text = runtime_engine_manager_.generateConfig(*parsed, socks_port, engine_used);
+        std::string config_path = runtime_engine_manager_.writeConfigFile(engine_used, config_text);
+        int pid = runtime_engine_manager_.startProcess(engine_used, config_path);
+        utils::LocalProxyProbeResult probe;
+        bool ready = false;
+        if (pid > 0 && utils::waitForPortAlive(socks_port, 5000, 100)) {
+            probe = utils::probeLocalMixedPort(socks_port, 2000);
+            ready = probe.mixed_ready();
+        }
+        if (pid > 0 && !ready) {
+            runtime_engine_manager_.stopProcess(pid);
+            pid = -1;
+        }
 
         provisioned_ports_[idx].uri = uri;
+        provisioned_ports_[idx].engine_used = engine_used;
         provisioned_ports_[idx].http_port = h_port;
         provisioned_ports_[idx].pid = pid;
-        provisioned_ports_[idx].alive = (pid > 0);
+        provisioned_ports_[idx].alive = ready;
+        provisioned_ports_[idx].tcp_alive = probe.tcp_alive;
+        provisioned_ports_[idx].socks_ready = probe.socks_ready;
+        provisioned_ports_[idx].http_ready = probe.http_ready;
         provisioned_ports_[idx].latency_ms = latency;
         provisioned_ports_[idx].last_health_check = now;
+        provisioned_ports_[idx].last_probe_ts = utils::nowTimestamp();
         provisioned_ports_[idx].consecutive_failures = 0;
+        if (!engine_used.empty()) {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            cached_engine_hints_[uri] = engine_used;
+        }
 
-        if (pid > 0) {
+        if (ready) {
             utils::LogRingBuffer::instance().push(
                 "[Provision] Replaced dead SOCKS:" + std::to_string(socks_port) +
                 " HTTP:" + std::to_string(h_port) +
+                " engine=" + engine_used +
                 " with new config (latency=" + std::to_string((int)latency) + "ms)");
+        } else {
+            utils::LogRingBuffer::instance().push(
+                "[Provision] Failed to replace MIXED:" + std::to_string(socks_port) +
+                " engine=" + engine_used +
+                " using new config tcp=" + std::string(provisioned_ports_[idx].tcp_alive ? "1" : "0") +
+                " socks=" + std::string(provisioned_ports_[idx].socks_ready ? "1" : "0") +
+                " http=" + std::string(provisioned_ports_[idx].http_ready ? "1" : "0"));
         }
         replaced++;
     }
@@ -1190,9 +1878,13 @@ void HunterOrchestrator::stopProvisionedPorts() {
     std::lock_guard<std::mutex> lock(provision_mutex_);
     for (auto& slot : provisioned_ports_) {
         if (slot.pid > 0) {
-            xray_manager_.stopProcess(slot.pid);
+            runtime_engine_manager_.stopProcess(slot.pid);
             slot.pid = -1;
             slot.alive = false;
+            slot.tcp_alive = false;
+            slot.socks_ready = false;
+            slot.http_ready = false;
+            slot.last_probe_ts = utils::nowTimestamp();
         }
     }
     provisioned_ports_.clear();
@@ -1346,21 +2038,23 @@ void HunterOrchestrator::printDashboard() {
     }
 
     // Balancer status
+    BalancerStatus bal_status;
     int bal_backends = 0, bal_healthy = 0;
     bool bal_running = false;
     if (balancer_) {
-        auto bs = balancer_->getStatus();
-        bal_backends = bs.backend_count;
-        bal_healthy = bs.healthy_count;
-        bal_running = bs.running;
+        bal_status = balancer_->getStatus();
+        bal_backends = bal_status.backend_count;
+        bal_healthy = bal_status.healthy_count;
+        bal_running = bal_status.running;
     }
+    BalancerStatus gem_status;
     int gem_backends = 0, gem_healthy = 0;
     bool gem_running = false;
     if (gemini_balancer_) {
-        auto gs = gemini_balancer_->getStatus();
-        gem_backends = gs.backend_count;
-        gem_healthy = gs.healthy_count;
-        gem_running = gs.running;
+        gem_status = gemini_balancer_->getStatus();
+        gem_backends = gem_status.backend_count;
+        gem_healthy = gem_status.healthy_count;
+        gem_running = gem_status.running;
     }
 
     // DPI status
@@ -1436,18 +2130,24 @@ void HunterOrchestrator::printDashboard() {
     out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " LOAD BALANCERS" << ansi::RESET << "\n";
 
     // Main balancer
-    out << "    " << (bal_running ? ansi::GREEN : ansi::RED) << (bal_running ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
+    const bool bal_mixed_ready = bal_status.tcp_alive && bal_status.socks_ready && bal_status.http_ready;
+    out << "    " << (bal_mixed_ready ? ansi::GREEN : ansi::RED) << (bal_mixed_ready ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
         << " Main  :" << config_.multiproxyPort() << "  "
         << ansi::bar(bal_healthy, bal_backends > 0 ? bal_backends : 1, 15)
         << " " << ansi::BOLD << bal_healthy << "/" << bal_backends << ansi::RESET
-        << (bal_running ? "" : (std::string(ansi::RED) + " DOWN" + ansi::RESET)) << "\n";
+        << (bal_mixed_ready ? "" : (std::string(ansi::RED) + " T" + (bal_status.tcp_alive ? std::string("1") : std::string("0")) +
+            " S" + (bal_status.socks_ready ? std::string("1") : std::string("0")) +
+            " H" + (bal_status.http_ready ? std::string("1") : std::string("0")) + ansi::RESET)) << "\n";
 
     // Gemini balancer
-    out << "    " << (gem_running ? ansi::GREEN : ansi::RED) << (gem_running ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
+    const bool gem_mixed_ready = gem_status.tcp_alive && gem_status.socks_ready && gem_status.http_ready;
+    out << "    " << (gem_mixed_ready ? ansi::GREEN : ansi::RED) << (gem_mixed_ready ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
         << " Gemini:" << config_.geminiPort() << "  "
         << ansi::bar(gem_healthy, gem_backends > 0 ? gem_backends : 1, 15)
         << " " << ansi::BOLD << gem_healthy << "/" << gem_backends << ansi::RESET
-        << (gem_running ? "" : (std::string(ansi::RED) + " DOWN" + ansi::RESET)) << "\n";
+        << (gem_mixed_ready ? "" : (std::string(ansi::RED) + " T" + (gem_status.tcp_alive ? std::string("1") : std::string("0")) +
+            " S" + (gem_status.socks_ready ? std::string("1") : std::string("0")) +
+            " H" + (gem_status.http_ready ? std::string("1") : std::string("0")) + ansi::RESET)) << "\n";
 
     // Provisioned proxies
     out << "    " << (prov_alive > 0 ? ansi::GREEN : ansi::DIM) << "\xe2\x97\x89" << ansi::RESET
@@ -1806,16 +2506,33 @@ bool HunterOrchestrator::emergencyBootstrap() {
     return false;
 }
 
-void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_tested, int last_passed) {
-    std::string base = utils::dirName(config_.stateFile());
-    if (base.empty()) base = "runtime";
-    utils::mkdirRecursive(base);
-    std::string status_path = base + "/HUNTER_status.json";
-
+std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int last_tested, int last_passed) {
     int db_total = 0, db_alive = 0, db_tested = 0, db_untested = 0;
     float db_avg_lat = 0.0f;
     int db_total_tests = 0, db_total_passes = 0;
     int db_stale = 0;
+    auto workerStateName = [](WorkerState state) -> const char* {
+        switch (state) {
+            case WorkerState::IDLE: return "idle";
+            case WorkerState::RUNNING: return "running";
+            case WorkerState::SLEEPING: return "sleeping";
+            case WorkerState::WORKER_ERROR: return "error";
+            case WorkerState::STOPPED: return "stopped";
+        }
+        return "unknown";
+    };
+    auto resourceModeName = [](ResourceMode mode) -> const char* {
+        switch (mode) {
+            case ResourceMode::NORMAL: return "normal";
+            case ResourceMode::MODERATE: return "moderate";
+            case ResourceMode::SCALED: return "scaled";
+            case ResourceMode::CONSERVATIVE: return "conservative";
+            case ResourceMode::REDUCED: return "reduced";
+            case ResourceMode::MINIMAL: return "minimal";
+            case ResourceMode::ULTRA_MINIMAL: return "ultra_minimal";
+        }
+        return "unknown";
+    };
     std::vector<ConfigHealthRecord> healthy_records;
     if (config_db_) {
         auto s = config_db_->getStats();
@@ -1830,25 +2547,81 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
         healthy_records = config_db_->getHealthyRecords(200);
     }
 
+    BalancerStatus bal_status;
     int bal_backends = 0, bal_healthy = 0;
     bool bal_running = false;
     if (balancer_) {
-        auto bs = balancer_->getStatus();
-        bal_backends = bs.backend_count;
-        bal_healthy = bs.healthy_count;
-        bal_running = bs.running;
+        bal_status = balancer_->getStatus();
+        bal_backends = bal_status.backend_count;
+        bal_healthy = bal_status.healthy_count;
+        bal_running = bal_status.running;
     }
+    BalancerStatus gem_status;
     int gem_backends = 0, gem_healthy = 0;
     bool gem_running = false;
     if (gemini_balancer_) {
-        auto gs = gemini_balancer_->getStatus();
-        gem_backends = gs.backend_count;
-        gem_healthy = gs.healthy_count;
-        gem_running = gs.running;
+        gem_status = gemini_balancer_->getStatus();
+        gem_backends = gem_status.backend_count;
+        gem_healthy = gem_status.healthy_count;
+        gem_running = gem_status.running;
     }
 
     double uptime = utils::nowTimestamp() - start_time_;
     int pending_unique = db_untested + db_stale;
+    const HardwareSnapshot hw = HunterTaskManager::instance().getHardware();
+    const orchestrator::ThreadManager::Status tm_status = thread_manager_
+        ? thread_manager_->getStatus()
+        : orchestrator::ThreadManager::Status{};
+    auto parseExtraInt = [](const std::map<std::string, std::string>& extra, const std::string& key, int fallback) -> int {
+        auto it = extra.find(key);
+        if (it == extra.end()) return fallback;
+        try {
+            return std::stoi(it->second);
+        } catch (...) {
+            return fallback;
+        }
+    };
+    auto parseExtraDouble = [](const std::map<std::string, std::string>& extra, const std::string& key, double fallback) -> double {
+        auto it = extra.find(key);
+        if (it == extra.end()) return fallback;
+        try {
+            return std::stod(it->second);
+        } catch (...) {
+            return fallback;
+        }
+    };
+    std::string history_json = "[]";
+    int validator_last_tested = last_tested;
+    int validator_last_passed = last_passed;
+    int validator_interval_s = 0;
+    int validator_active_test_processes = 0;
+    int validator_max_test_processes = 0;
+    double validator_rate_per_s = 0.0;
+    double eta_seconds = 0.0;
+    int effective_timeout_s = speed_test_timeout_.load();
+    int effective_max_concurrent = speed_max_threads_.load();
+    int effective_batch_size = std::max(1, speed_chunk_size_.load());
+    int effective_chunk_size = speed_chunk_size_.load();
+    auto validator_it = tm_status.workers.find("validator");
+    if (validator_it != tm_status.workers.end()) {
+        const auto& extra = validator_it->second.extra;
+        validator_last_tested = parseExtraInt(extra, "last_tested", validator_last_tested);
+        validator_last_passed = parseExtraInt(extra, "last_passed", validator_last_passed);
+        validator_interval_s = parseExtraInt(extra, "interval_s", validator_interval_s);
+        validator_active_test_processes = parseExtraInt(extra, "active_test_processes", validator_active_test_processes);
+        validator_max_test_processes = parseExtraInt(extra, "max_test_processes", validator_max_test_processes);
+        validator_rate_per_s = parseExtraDouble(extra, "rate_per_s", validator_rate_per_s);
+        pending_unique = parseExtraInt(extra, "pending_unique", pending_unique);
+        eta_seconds = parseExtraDouble(extra, "eta_s", eta_seconds);
+        effective_timeout_s = parseExtraInt(extra, "effective_timeout_s", effective_timeout_s);
+        effective_max_concurrent = parseExtraInt(extra, "effective_max_concurrent", effective_max_concurrent);
+        effective_batch_size = parseExtraInt(extra, "effective_batch_size", effective_batch_size);
+        effective_chunk_size = parseExtraInt(extra, "effective_chunk_size", effective_chunk_size);
+        auto hist_it = extra.find("history_json");
+        if (hist_it != extra.end() && !hist_it->second.empty()) {
+            history_json = hist_it->second;
+        }
+    }
 
     std::ostringstream alive_json;
     alive_json << "[";
@@ -1859,6 +2632,7 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
         utils::JsonBuilder item;
         item.add("uri", rec.uri)
             .add("latency_ms", rec.latency_ms)
+            .add("engine_used", rec.engine_used)
             .add("first_seen", rec.first_seen)
             .add("last_alive", rec.last_alive_time)
             .add("total_tests", rec.total_tests);
@@ -1877,9 +2651,12 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
        .add("total_passes", db_total_passes);
 
     utils::JsonBuilder valj;
-    valj.add("last_tested", last_tested)
-        .add("last_passed", last_passed)
-        .add("rate_per_s", 0.0);
+    valj.add("last_tested", validator_last_tested)
+        .add("last_passed", validator_last_passed)
+        .add("interval_s", validator_interval_s)
+        .add("active_test_processes", validator_active_test_processes)
+        .add("max_test_processes", validator_max_test_processes)
+        .add("rate_per_s", validator_rate_per_s);
 
     // Provisioned ports array
     std::ostringstream ports_json;
@@ -1890,12 +2667,19 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
         for (auto& slot : provisioned_ports_) {
             if (!ports_first) ports_json << ",";
             ports_first = false;
+            const int public_mixed_port = slot.port > 0 ? slot.port : slot.http_port;
             utils::JsonBuilder pj;
-            pj.add("port", slot.port)
-              .add("http_port", slot.http_port)
+            pj.add("port", public_mixed_port)
+              .add("http_port", public_mixed_port)
+              .add("mixed", true)
               .add("uri", slot.uri)
+              .add("engine_used", slot.engine_used)
               .add("alive", slot.alive)
+              .add("tcp_alive", slot.tcp_alive)
+              .add("socks_ready", slot.socks_ready)
+              .add("http_ready", slot.http_ready)
               .add("latency_ms", slot.latency_ms)
+              .add("last_probe_ts", slot.last_probe_ts)
               .add("consecutive_failures", slot.consecutive_failures);
             ports_json << pj.build();
         }
@@ -1910,13 +2694,21 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
           .add("type", "main")
           .add("running", bal_running)
           .add("backends", bal_backends)
-          .add("healthy", bal_healthy);
+          .add("healthy", bal_healthy)
+          .add("tcp_alive", bal_status.tcp_alive)
+          .add("socks_ready", bal_status.socks_ready)
+          .add("http_ready", bal_status.http_ready)
+          .add("last_probe_ts", bal_status.last_probe_ts);
         utils::JsonBuilder bg;
         bg.add("port", config_.geminiPort())
           .add("type", "gemini")
           .add("running", gem_running)
           .add("backends", gem_backends)
-          .add("healthy", gem_healthy);
+          .add("healthy", gem_healthy)
+          .add("tcp_alive", gem_status.tcp_alive)
+          .add("socks_ready", gem_status.socks_ready)
+          .add("http_ready", gem_status.http_ready)
+          .add("last_probe_ts", gem_status.last_probe_ts);
         bal_json << "[" << bm.build() << "," << bg.build() << "]";
     }
 
@@ -1928,24 +2720,97 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
     }
     speedj.add("max_threads", speed_max_threads_.load())
           .add("test_timeout_s", speed_test_timeout_.load())
-          .add("chunk_size", speed_chunk_size_.load());
+          .add("chunk_size", speed_chunk_size_.load())
+          .add("effective_max_concurrent", effective_max_concurrent)
+          .add("effective_timeout_s", effective_timeout_s)
+          .add("effective_batch_size", effective_batch_size)
+          .add("effective_chunk_size", effective_chunk_size);
 
+    std::ostringstream workers_json;
+    workers_json << "[";
+    bool workers_first = true;
+    for (const auto& pair : tm_status.workers) {
+        if (!workers_first) workers_json << ",";
+        workers_first = false;
+        const WorkerStatus& worker = pair.second;
+        utils::JsonBuilder wj;
+        utils::JsonBuilder extraj;
+        for (const auto& extra_pair : worker.extra) {
+            extraj.add(extra_pair.first, extra_pair.second);
+        }
+        wj.add("name", pair.first)
+          .add("state", workerStateName(worker.state))
+          .add("last_run", worker.last_run)
+          .add("last_error", worker.last_error)
+          .add("runs", worker.runs)
+          .add("errors", worker.errors)
+          .add("next_run_in", worker.next_run_in)
+          .addRaw("extra", extraj.build());
+        workers_json << wj.build();
+    }
+    workers_json << "]";
+
+    utils::JsonBuilder hardwarej;
+    hardwarej.add("cpu_count", hw.cpu_count)
+             .add("cpu_percent", hw.cpu_percent)
+             .add("ram_total_gb", hw.ram_total_gb)
+             .add("ram_used_gb", hw.ram_used_gb)
+             .add("ram_percent", hw.ram_percent)
+             .add("mode", resourceModeName(hw.mode))
+             .add("io_pool_size", hw.io_pool_size)
+             .add("cpu_pool_size", hw.cpu_pool_size)
+             .add("max_configs", hw.max_configs)
+             .add("scan_chunk", hw.scan_chunk)
+             .add("thread_count", tm_status.hardware.thread_count);
+
+    utils::JsonBuilder runtimej;
+    runtimej.add("multiproxy_port", config_.multiproxyPort())
+            .add("gemini_port", config_.geminiPort())
+            .add("max_total", config_.maxTotal())
+            .add("max_workers", config_.maxWorkers())
+            .add("scan_limit", config_.scanLimit())
+            .add("sleep_seconds", config_.sleepSeconds())
+            .add("xray_path", config_.xrayPath())
+            .add("singbox_path", config_.singBoxPath())
+            .add("mihomo_path", config_.mihomoPath())
+            .add("tor_path", config_.torPath())
+            .add("telegram_enabled", config_.getBool("telegram_enabled", false))
+            .add("telegram_limit", config_.telegramLimit())
+            .add("telegram_timeout_ms", config_.getInt("telegram_timeout_ms", 12000))
+            .add("targets_count", (int)config_.telegramTargets().size())
+            .add("github_urls_count", (int)config_.githubUrls().size());
+
+    const double ts = utils::nowTimestamp();
+    const double ts_ms = ts * 1000.0;
     utils::JsonBuilder root;
-    root.add("ts", utils::nowTimestamp())
+    root.add("ts", ts)
+        .add("ts_ms", ts_ms)
         .add("phase", phase)
         .add("paused", paused_.load())
         .add("uptime_s", uptime)
         .add("balancer_backends", bal_backends)
         .add("pending_unique", pending_unique)
-        .add("eta_seconds", 0.0)
+        .add("eta_seconds", eta_seconds)
         .addRaw("db", dbj.build())
         .addRaw("validator", valj.build())
         .addRaw("speed", speedj.build())
+        .addRaw("hardware", hardwarej.build())
+        .addRaw("runtime_config", runtimej.build())
+        .addRaw("workers", workers_json.str())
         .addRaw("alive_configs", alive_json.str())
+        .addRaw("history", history_json)
         .addRaw("provisioned_ports", ports_json.str())
         .addRaw("balancers", bal_json.str());
 
-    utils::saveJsonFile(status_path, root.build());
+    return root.build();
+}
+
+void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_tested, int last_passed) {
+    std::string base = utils::dirName(config_.stateFile());
+    if (base.empty()) base = "runtime";
+    utils::mkdirRecursive(base);
+    std::string status_path = base + "/HUNTER_status.json";
+    utils::saveJsonFile(status_path, buildStatusJson(phase, last_tested, last_passed));
 }
 
 } // namespace hunter

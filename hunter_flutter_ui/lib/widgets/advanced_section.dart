@@ -9,6 +9,15 @@ class AdvancedSection extends StatelessWidget {
     required this.cliPathController,
     required this.configPathController,
     required this.xrayPathController,
+    required this.singboxPathController,
+    required this.mihomoPathController,
+    required this.torPathController,
+    required this.multiproxyPortController,
+    required this.geminiPortController,
+    required this.maxTotalController,
+    required this.maxWorkersController,
+    required this.scanLimitController,
+    required this.sleepSecondsController,
     required this.tgEnabled,
     required this.tgApiIdController,
     required this.tgApiHashController,
@@ -20,17 +29,29 @@ class AdvancedSection extends StatelessWidget {
     required this.processInfo,
     required this.engines,
     required this.onTgEnabledChanged,
+    required this.onSaveRuntimeSettings,
     required this.onSaveTelegram,
     required this.onRefresh,
     required this.onCopyText,
     required this.githubUrlsController,
     required this.onSaveGithubUrls,
     required this.onResetGithubUrls,
+    required this.onImportConfigFile,
+    required this.onExportConfigDb,
   });
 
   final TextEditingController cliPathController;
   final TextEditingController configPathController;
   final TextEditingController xrayPathController;
+  final TextEditingController singboxPathController;
+  final TextEditingController mihomoPathController;
+  final TextEditingController torPathController;
+  final TextEditingController multiproxyPortController;
+  final TextEditingController geminiPortController;
+  final TextEditingController maxTotalController;
+  final TextEditingController maxWorkersController;
+  final TextEditingController scanLimitController;
+  final TextEditingController sleepSecondsController;
   final bool tgEnabled;
   final TextEditingController tgApiIdController;
   final TextEditingController tgApiHashController;
@@ -42,12 +63,15 @@ class AdvancedSection extends StatelessWidget {
   final String processInfo;
   final Map<String, int> engines;
   final ValueChanged<bool> onTgEnabledChanged;
+  final VoidCallback onSaveRuntimeSettings;
   final VoidCallback onSaveTelegram;
   final VoidCallback onRefresh;
   final Future<void> Function(String text, {String? label}) onCopyText;
   final TextEditingController githubUrlsController;
   final VoidCallback onSaveGithubUrls;
   final VoidCallback onResetGithubUrls;
+  final Future<void> Function() onImportConfigFile;
+  final Future<void> Function() onExportConfigDb;
 
   @override
   Widget build(BuildContext context) {
@@ -67,8 +91,42 @@ class AdvancedSection extends StatelessWidget {
                     Expanded(child: _field('CLI Executable', cliPathController, 'bin\\hunter_cli.exe')),
                     const SizedBox(width: 12),
                     Expanded(child: _field('Config File', configPathController, 'runtime\\hunter_config.json')),
-                    const SizedBox(width: 12),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: <Widget>[
                     Expanded(child: _field('XRay Path', xrayPathController, 'bin\\xray.exe')),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field('Sing-box Path', singboxPathController, 'bin\\sing-box.exe')),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: <Widget>[
+                    Expanded(child: _field('Mihomo Path', mihomoPathController, 'bin\\mihomo-windows-amd64-compatible.exe')),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field('Tor Path', torPathController, 'bin\\tor.exe')),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: <Widget>[
+                    Expanded(child: _field('Main Balancer Port', multiproxyPortController, '10808')),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field('Gemini Port', geminiPortController, '10809')),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field('Max Workers', maxWorkersController, '12')),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: <Widget>[
+                    Expanded(child: _field('Max Total', maxTotalController, '1000')),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field('Scan Limit', scanLimitController, '50')),
+                    const SizedBox(width: 12),
+                    Expanded(child: _field('Sleep Seconds', sleepSecondsController, '300')),
                   ],
                 ),
                 const SizedBox(height: 12),
@@ -78,6 +136,20 @@ class AdvancedSection extends StatelessWidget {
                     const SizedBox(width: 8),
                     _infoPill('Process', processInfo),
                     const Spacer(),
+                    TextButton.icon(
+                      onPressed: onSaveRuntimeSettings,
+                      icon: const Icon(Icons.save, size: 14),
+                      label: const Text('Save Runtime', style: TextStyle(fontSize: 11)),
+                      style: TextButton.styleFrom(
+                        foregroundColor: C.neonGreen,
+                        backgroundColor: C.neonGreen.withValues(alpha: 0.08),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: BorderSide(color: C.neonGreen.withValues(alpha: 0.3)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
                     TextButton.icon(
                       onPressed: onRefresh,
                       icon: const Icon(Icons.refresh, size: 14),
@@ -127,6 +199,57 @@ class AdvancedSection extends StatelessWidget {
                   ),
                 );
               }).toList(),
+            ),
+          ),
+          const SizedBox(height: 24),
+
+          _sectionHeader('IMPORT / EXPORT DATABASE'),
+          const SizedBox(height: 10),
+          _cardWrap(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                const Text(
+                  'Import downloaded/user config files into the main DB with duplicate removal and high scan priority.\n'
+                  'Use a full path to an existing file when importing, otherwise the CLI will return file not found.\n'
+                  'Export writes the full current config database to a single text file.',
+                  style: TextStyle(color: C.txt3, fontSize: 10),
+                ),
+                const SizedBox(height: 12),
+                Row(
+                  children: <Widget>[
+                    TextButton.icon(
+                      onPressed: onImportConfigFile,
+                      icon: const Icon(Icons.upload_file_rounded, size: 14),
+                      label: const Text('Import File', style: TextStyle(fontSize: 11)),
+                      style: TextButton.styleFrom(
+                        foregroundColor: C.neonAmber,
+                        backgroundColor: C.neonAmber.withValues(alpha: 0.08),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: BorderSide(color: C.neonAmber.withValues(alpha: 0.3)),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    TextButton.icon(
+                      onPressed: onExportConfigDb,
+                      icon: const Icon(Icons.file_download_outlined, size: 14),
+                      label: const Text('Export DB', style: TextStyle(fontSize: 11)),
+                      style: TextButton.styleFrom(
+                        foregroundColor: C.neonCyan,
+                        backgroundColor: C.neonCyan.withValues(alpha: 0.08),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                          side: BorderSide(color: C.neonCyan.withValues(alpha: 0.3)),
+                        ),
+                      ),
+                    ),
+                    const Spacer(),
+                    _infoPill('Import dir hint', '${workingDir.path}\\config'),
+                  ],
+                ),
+              ],
             ),
           ),
           const SizedBox(height: 24),

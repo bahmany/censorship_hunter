@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 
 namespace hunter {
@@ -25,7 +26,10 @@ void HunterConfig::setDefaults() {
     data_["state_file"] = "runtime/hunter_state.json";
     data_["gold_file"] = "runtime/HUNTER_gold.txt";
     data_["silver_file"] = "runtime/HUNTER_silver.txt";
-    data_["xray_path"] = "xray.exe";
+    data_["xray_path"] = "bin/xray.exe";
+    data_["singbox_path"] = "bin/sing-box.exe";
+    data_["mihomo_path"] = "bin/mihomo-windows-amd64-compatible.exe";
+    data_["tor_path"] = "bin/tor.exe";
 }
 
 bool HunterConfig::loadFromFile(const std::string& path) {

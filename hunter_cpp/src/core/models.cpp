@@ -3,6 +3,7 @@
 #include "core/constants.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <set>
 #include <sstream>
 #include <thread>
@@ -15,6 +16,23 @@
 #endif
 
 namespace hunter {
+
+namespace {
+
+int getEnvIntClamped(const char* name, int fallback, int min_value, int max_value) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        int value = std::stoi(raw);
+        if (value < min_value) value = min_value;
+        if (value > max_value) value = max_value;
+        return value;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+} // namespace
 
 // ─── HardwareSnapshot ───
 
@@ -60,29 +78,32 @@ HardwareSnapshot HardwareSnapshot::detect() {
         snap.scan_chunk = 40;
     } else if (snap.ram_percent >= 80) {
         snap.mode = ResourceMode::CONSERVATIVE;
-        snap.io_pool_size = std::max(12, base + 4);
+        snap.io_pool_size = std::min(48, std::max(18, base * 2));
         snap.cpu_pool_size = std::max(2, base / 2);
         snap.max_configs = 400;
         snap.scan_chunk = 50;
     } else if (snap.ram_percent >= 70) {
         snap.mode = ResourceMode::SCALED;
-        snap.io_pool_size = std::max(15, base + 6);
+        snap.io_pool_size = std::min(80, std::max(24, base * 3));
         snap.cpu_pool_size = std::max(3, base / 2);
         snap.max_configs = 600;
         snap.scan_chunk = 50;
     } else if (snap.ram_percent >= 60) {
         snap.mode = ResourceMode::MODERATE;
-        snap.io_pool_size = std::max(18, base * 2);
+        snap.io_pool_size = std::min(96, std::max(32, base * 4));
         snap.cpu_pool_size = std::max(4, base);
         snap.max_configs = 800;
         snap.scan_chunk = 50;
     } else {
         snap.mode = ResourceMode::NORMAL;
-        snap.io_pool_size = std::max(20, base * 2);
+        snap.io_pool_size = std::min(128, std::max(40, base * 5));
         snap.cpu_pool_size = std::max(4, base);
         snap.max_configs = 1000;
         snap.scan_chunk = 50;
     }
+
+    snap.io_pool_size = getEnvIntClamped("HUNTER_IO_POOL_SIZE", snap.io_pool_size, 4, 128);
+    snap.cpu_pool_size = getEnvIntClamped("HUNTER_CPU_POOL_SIZE", snap.cpu_pool_size, 2, 64);
 
     return snap;
 }
@@ -172,7 +193,7 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
     }
     if (net == "ws") {
         stream += ",\"wsSettings\":{\"path\":\"" + (path.empty() ? "/" : path) + "\""
-                  + (host.empty() ? "" : ",\"host\":\"" + host + "\"") + "}";
+                  + (host.empty() ? "" : ",\"headers\":{\"Host\":\"" + host + "\"}") + "}";
     } else if (net == "httpupgrade") {
         stream += ",\"httpupgradeSettings\":{\"path\":\"" + (path.empty() ? "/" : path) + "\""
                   + (host.empty() ? "" : ",\"host\":\"" + host + "\"") + "}";

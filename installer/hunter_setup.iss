@@ -4,7 +4,7 @@
 ; Bundles cached configs for immediate start in censored networks
 
 #define MyAppName "Hunter VPN"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "Hunter Project"
 #define MyAppExeName "hunter_dashboard.exe"
 #define MyAppCLIName "hunter_cli.exe"
@@ -68,32 +68,12 @@ Source: "{#MyStagingDir}\msvcp140.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyStagingDir}\vcruntime140.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#MyStagingDir}\vcruntime140_1.dll"; DestDir: "{app}"; Flags: ignoreversion
 
-; CLI + proxy cores in bin\ (UI expects bin\hunter_cli.exe, bin\xray.exe)
+; CLI + proxy cores in bin\ (CLI is statically linked, no DLL deps)
 Source: "{#MyStagingDir}\bin\hunter_cli.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\xray.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\sing-box.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\mihomo-windows-amd64-compatible.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
-
-; MinGW Runtime DLLs (in bin\ alongside hunter_cli.exe)
-Source: "{#MyStagingDir}\libgcc_s_seh-1.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libstdc++-6.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libwinpthread-1.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libcurl-4.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libcrypto-3-x64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libssl-3-x64.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\zlib1.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libzstd.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libbrotlicommon.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libbrotlidec.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libbrotlienc.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libiconv-2.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libidn2-0.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libintl-8.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libnghttp2-14.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libnghttp3-9.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libpsl-5.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libssh2-1.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\libunistring-5.dll"; DestDir: "{app}\bin"; Flags: ignoreversion
+Source: "{#MyStagingDir}\bin\tor.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 
 ; Icon
 Source: "{#MyStagingDir}\app_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -129,6 +109,7 @@ Filename: "taskkill"; Parameters: "/F /IM hunter_cli.exe"; Flags: runhidden; Run
 Filename: "taskkill"; Parameters: "/F /IM xray.exe"; Flags: runhidden; RunOnceId: "KillXray"
 Filename: "taskkill"; Parameters: "/F /IM sing-box.exe"; Flags: runhidden; RunOnceId: "KillSingBox"
 Filename: "taskkill"; Parameters: "/F /IM mihomo-windows-amd64-compatible.exe"; Flags: runhidden; RunOnceId: "KillMihomo"
+Filename: "taskkill"; Parameters: "/F /IM tor.exe"; Flags: runhidden; RunOnceId: "KillTor"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\runtime"
@@ -148,8 +129,9 @@ begin
   Exec('taskkill', '/F /IM xray.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM sing-box.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM mihomo-windows-amd64-compatible.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM tor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Wait a moment for processes to fully terminate
-  Sleep(1500);
+  Sleep(2000);
 end;
 
 function InitializeSetup(): Boolean;

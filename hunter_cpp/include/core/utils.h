@@ -120,6 +120,8 @@ typedef int socket_t;
 #define INVALID_SOCKET_HANDLE -1
 #endif
 
+void ensureSocketLayer();
+
 /**
  * @brief Create TCP socket with connection timeout
  */
@@ -184,6 +186,22 @@ std::string dirName(const std::string& path);
  * @brief Check if a local TCP port is accepting connections
  */
 bool isPortAlive(int port, int timeout_ms = 1000);
+
+/**
+ * @brief Wait until a local TCP port becomes responsive within the timeout window
+ */
+bool waitForPortAlive(int port, int timeout_ms = 5000, int probe_interval_ms = 100);
+
+struct LocalProxyProbeResult {
+    bool tcp_alive = false;
+    bool socks_ready = false;
+    bool http_ready = false;
+    bool mixed_ready() const { return tcp_alive && socks_ready && http_ready; }
+};
+
+bool probeLocalSocks5(int port, int timeout_ms = 1500);
+bool probeLocalHttpProxy(int port, int timeout_ms = 1500);
+LocalProxyProbeResult probeLocalMixedPort(int port, int timeout_ms = 2000);
 
 /**
  * @brief Test TCP connect to a remote host:port (for pre-screening proxy servers)

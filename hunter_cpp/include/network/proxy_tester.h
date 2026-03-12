@@ -41,6 +41,10 @@ public:
                                const std::string& test_url = "http://cachefly.cachefly.net/50mb.test",
                                int timeout_seconds = 30);
 
+    static int activeTestCount();
+    static int peakTestCount();
+    static int maxConcurrentTestCount();
+
     /**
      * @brief Set the path to xray executable
      */

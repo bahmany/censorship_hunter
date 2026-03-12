@@ -83,6 +83,10 @@ public:
         const std::vector<std::pair<ParsedConfig, int>>& configs,
         int listen_port, int http_port = 0);
 
+    static std::string generateLocalSocksBalancedConfig(
+        const std::vector<int>& backend_ports,
+        int listen_port, int http_port = 0);
+
     /**
      * @brief Write config to temp file and return path
      */

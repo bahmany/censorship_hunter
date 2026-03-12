@@ -32,13 +32,31 @@ std::string ConfigDatabase::hashUri(const std::string& uri) const {
 }
 
 int ConfigDatabase::addConfigs(const std::set<std::string>& uris, const std::string& tag) {
+    return addConfigsWithPriority(uris, tag, nullptr);
+}
+
+int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, const std::string& tag,
+                                          int* promoted_existing) {
     std::lock_guard<std::mutex> lock(mutex_);
     int added = 0;
+    int promoted = 0;
     double now = utils::nowTimestamp();
+    const bool high_priority = (tag == "manual" || tag == "import" || tag == "user_import");
+    const double boost_until = high_priority ? (now + 1800.0) : 0.0;
     for (const auto& uri : uris) {
         if (uri.empty()) continue;
         std::string hash = hashUri(uri);
-        if (db_.find(hash) != db_.end()) continue;
+        auto existing = db_.find(hash);
+        if (existing != db_.end()) {
+            if (high_priority) {
+                auto& rec = existing->second;
+                rec.needs_retest = true;
+                rec.priority_boost_until = std::max(rec.priority_boost_until, boost_until);
+                rec.tag = tag;
+                promoted++;
+            }
+            continue;
+        }
         if ((int)db_.size() >= max_size_) evictStale();
         if ((int)db_.size() >= max_size_) break;
 
@@ -47,6 +65,7 @@ int ConfigDatabase::addConfigs(const std::set<std::string>& uris, const std::str
         rec.uri_hash = hash;
         rec.tag = tag;
         rec.first_seen = now;
+        rec.priority_boost_until = boost_until;
         rec.needs_retest = true;
         db_[hash] = rec;
         added++;
@@ -64,10 +83,14 @@ int ConfigDatabase::addConfigs(const std::set<std::string>& uris, const std::str
             db_.emplace(hash, rec);
         }
     }
+    if (promoted_existing) {
+        *promoted_existing = promoted;
+    }
     return added;
 }
 
-void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float latency_ms) {
+void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float latency_ms,
+                                  const std::string& engine_used) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string hash = hashUri(uri);
     auto it = db_.find(hash);
@@ -77,6 +100,10 @@ void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float late
     rec.last_tested = utils::nowTimestamp();
     rec.total_tests++;
     rec.needs_retest = false;
+    rec.priority_boost_until = 0.0;
+    if (!engine_used.empty()) {
+        rec.engine_used = engine_used;
+    }
 
     if (alive) {
         rec.alive = true;
@@ -101,36 +128,39 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
     // Collect candidates with priority score (lower = higher priority)
     struct Candidate {
         const ConfigHealthRecord* rec;
+        bool boosted;
         int priority;   // 0=never tested, 1=needs_retest, 2=alive stale 30s, 3=failed stale 60s
         int total_tests; // for secondary sort: fewer tests = higher priority
     };
     std::vector<Candidate> candidates;
 
     for (auto& [hash, rec] : db_) {
+        const bool boosted = rec.priority_boost_until > now;
         // Priority 0: never tested (brand new configs)
         if (rec.total_tests == 0) {
-            candidates.push_back({&rec, 0, 0});
+            candidates.push_back({&rec, boosted, 0, 0});
             continue;
         }
         // Priority 1: flagged for retest
         if (rec.needs_retest) {
-            candidates.push_back({&rec, 1, rec.total_tests});
+            candidates.push_back({&rec, boosted, 1, rec.total_tests});
             continue;
         }
         // Priority 2: alive configs stale > 30 seconds — continuous health recheck
         if (rec.alive && (now - rec.last_tested) > 30.0) {
-            candidates.push_back({&rec, 2, rec.total_tests});
+            candidates.push_back({&rec, boosted, 2, rec.total_tests});
             continue;
         }
         // Priority 3: failed configs with < 5 consecutive fails, stale > 60s
         if (!rec.alive && rec.consecutive_fails < 5 && (now - rec.last_tested) > 60.0) {
-            candidates.push_back({&rec, 3, rec.total_tests});
+            candidates.push_back({&rec, boosted, 3, rec.total_tests});
             continue;
         }
     }
 
     // Sort: primary by priority (ascending), secondary by total_tests (ascending = less tested first)
     std::sort(candidates.begin(), candidates.end(), [](const Candidate& a, const Candidate& b) {
+        if (a.boosted != b.boosted) return a.boosted > b.boosted;
         if (a.priority != b.priority) return a.priority < b.priority;
         return a.total_tests < b.total_tests;
     });
@@ -193,6 +223,14 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getAllRecords(int max_count) {
     });
     if ((int)all.size() > max_count) all.resize(max_count);
     return all;
+}
+
+std::string ConfigDatabase::getPreferredEngine(const std::string& uri) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string hash = hashUri(uri);
+    auto it = db_.find(hash);
+    if (it == db_.end()) return "";
+    return it->second.engine_used;
 }
 
 ConfigDatabase::TagStats ConfigDatabase::getTagStats(const std::string& tag) {
@@ -355,11 +393,11 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
 
     for (size_t off = 0; off < batch.size(); off += vchunk) {
         size_t chunk_end = std::min(off + vchunk, batch.size());
-        std::vector<std::future<std::tuple<std::string, bool, float>>> futures;
+        std::vector<std::future<std::tuple<std::string, bool, float, std::string>>> futures;
         for (size_t i = off; i < chunk_end; i++) {
             std::string uri = batch[i].uri;
             int timeout_cap = test_timeout;
-            futures.push_back(mgr.submitIO([uri, timeout_cap]() -> std::tuple<std::string, bool, float> {
+            futures.push_back(mgr.submitIO([uri, timeout_cap]() -> std::tuple<std::string, bool, float, std::string> {
                 ProxyTester local_tester;
                 local_tester.setXrayPath("bin/xray.exe");
                 local_tester.setSingBoxPath("bin/sing-box.exe");
@@ -368,16 +406,16 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
                 ProxyTestResult result = local_tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", timeout_cap);
                 // Only count as alive if actual HTTP download succeeded (not telegram-only)
                 bool real_success = result.success && !result.telegram_only;
-                return {uri, real_success, result.download_speed_kbps};
+                return {uri, real_success, result.download_speed_kbps, result.engine_used};
             }));
         }
 
         for (auto& fut : futures) {
             try {
-                auto [uri, ok, speed] = fut.get();
+                auto [uri, ok, speed, engine_used] = fut.get();
                 tested++;
                 if (ok) passed++;
-                db_.updateHealth(uri, ok, ok ? speed : 0.0f);
+                db_.updateHealth(uri, ok, ok ? speed : 0.0f, engine_used);
             } catch (const std::exception& e) {
                 std::cout << "  [Validator] Future exception: " << e.what() << std::endl;
             } catch (...) {
@@ -423,7 +461,7 @@ std::pair<int, int> ContinuousValidator::validateBatchWithXray() {
             auto [uri, ok] = fut.get();
             tested++;
             if (ok) passed++;
-            db_.updateHealth(uri, ok, ok ? 1000.0f : 0.0f);  // Approximate latency
+            db_.updateHealth(uri, ok, ok ? 1000.0f : 0.0f, "xray");
         } catch (...) {}
     }
 

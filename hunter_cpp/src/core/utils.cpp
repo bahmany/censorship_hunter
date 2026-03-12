@@ -234,10 +234,19 @@ std::string dirName(const std::string& path) {
 }
 
 // ─── Network helpers ───
+void ensureSocketLayer() {
+#ifdef _WIN32
+    static std::once_flag s_wsa_once;
+    std::call_once(s_wsa_once, []() {
+        WSADATA d;
+        WSAStartup(MAKEWORD(2, 2), &d);
+    });
+#endif
+}
+
 SOCKET createTcpSocket(const std::string& host, int port, double timeout_sec) {
 #ifdef _WIN32
-    static bool ws_init=false;
-    if(!ws_init){WSADATA d;WSAStartup(MAKEWORD(2,2),&d);ws_init=true;}
+    ensureSocketLayer();
 #endif
     SOCKET fd=socket(AF_INET,SOCK_STREAM,0);
     if(fd<0) return INVALID_SOCKET;
@@ -307,6 +316,57 @@ void closeSocket(SOCKET fd) {
 #endif
 }
 
+namespace {
+
+bool setSocketTimeoutMs(SOCKET fd, int timeout_ms) {
+    if (fd == INVALID_SOCKET) return false;
+    const int safe_timeout = timeout_ms > 0 ? timeout_ms : 1;
+#ifdef _WIN32
+    DWORD tv = static_cast<DWORD>(safe_timeout);
+    const char* opt = reinterpret_cast<const char*>(&tv);
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, opt, sizeof(tv)) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, opt, sizeof(tv)) == 0;
+#else
+    timeval tv{};
+    tv.tv_sec = safe_timeout / 1000;
+    tv.tv_usec = (safe_timeout % 1000) * 1000;
+    return setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 &&
+           setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0;
+#endif
+}
+
+bool sendAll(SOCKET fd, const char* data, size_t size) {
+    size_t sent_total = 0;
+    while (sent_total < size) {
+        const int sent = send(fd, data + sent_total, static_cast<int>(size - sent_total), 0);
+        if (sent <= 0) return false;
+        sent_total += static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+bool readAtLeast(SOCKET fd, char* data, size_t size) {
+    size_t received_total = 0;
+    while (received_total < size) {
+        const int received = recv(fd, data + received_total, static_cast<int>(size - received_total), 0);
+        if (received <= 0) return false;
+        received_total += static_cast<size_t>(received);
+    }
+    return true;
+}
+
+SOCKET connectLocalPort(int port, int timeout_ms) {
+    SOCKET fd = createTcpSocket("127.0.0.1", port, std::max(timeout_ms, 1) / 1000.0);
+    if (fd == INVALID_SOCKET) return INVALID_SOCKET;
+    if (!setSocketTimeoutMs(fd, timeout_ms)) {
+        closeSocket(fd);
+        return INVALID_SOCKET;
+    }
+    return fd;
+}
+
+} // namespace
+
 std::string execCommand(const std::string& cmd) {
     std::string result;
 #ifdef _WIN32
@@ -337,20 +397,9 @@ std::string execCommand(const std::string& cmd) {
     return result;
 }
 
-// Thread-safe WSAStartup — called once across all threads
-#ifdef _WIN32
-static std::once_flag s_wsa_once;
-static void ensureWsaInit() {
-    std::call_once(s_wsa_once, []() {
-        WSADATA d;
-        WSAStartup(MAKEWORD(2, 2), &d);
-    });
-}
-#endif
-
 bool isPortAlive(int port, int timeout_ms) {
 #ifdef _WIN32
-    ensureWsaInit();
+    ensureSocketLayer();
 #endif
     int fd=socket(AF_INET,SOCK_STREAM,0);
     if(fd<0) return false;
@@ -373,9 +422,61 @@ bool isPortAlive(int port, int timeout_ms) {
     return ok;
 }
 
+bool waitForPortAlive(int port, int timeout_ms, int probe_interval_ms) {
+    if (timeout_ms <= 0) return isPortAlive(port, 200);
+    if (probe_interval_ms <= 0) probe_interval_ms = 100;
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (isPortAlive(port, std::min(probe_interval_ms, 250))) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(probe_interval_ms));
+    }
+    return isPortAlive(port, std::min(timeout_ms, 300));
+}
+
+bool probeLocalSocks5(int port, int timeout_ms) {
+    SOCKET fd = connectLocalPort(port, timeout_ms);
+    if (fd == INVALID_SOCKET) return false;
+    const char handshake[] = {0x05, 0x01, 0x00};
+    char response[2] = {0, 0};
+    const bool ok = sendAll(fd, handshake, sizeof(handshake)) &&
+                    readAtLeast(fd, response, sizeof(response)) &&
+                    static_cast<unsigned char>(response[0]) == 0x05 &&
+                    static_cast<unsigned char>(response[1]) != 0xFF;
+    closeSocket(fd);
+    return ok;
+}
+
+bool probeLocalHttpProxy(int port, int timeout_ms) {
+    SOCKET fd = connectLocalPort(port, timeout_ms);
+    if (fd == INVALID_SOCKET) return false;
+    const std::string request =
+        "CONNECT 127.0.0.1:1 HTTP/1.1\r\n"
+        "Host: 127.0.0.1:1\r\n"
+        "Proxy-Connection: keep-alive\r\n"
+        "\r\n";
+    char response[64] = {0};
+    const bool ok = sendAll(fd, request.data(), request.size()) &&
+                    recv(fd, response, static_cast<int>(sizeof(response) - 1), 0) > 0 &&
+                    std::string(response).find("HTTP/") != std::string::npos;
+    closeSocket(fd);
+    return ok;
+}
+
+LocalProxyProbeResult probeLocalMixedPort(int port, int timeout_ms) {
+    LocalProxyProbeResult result;
+    result.tcp_alive = isPortAlive(port, timeout_ms);
+    if (!result.tcp_alive) return result;
+    result.socks_ready = probeLocalSocks5(port, timeout_ms);
+    result.http_ready = probeLocalHttpProxy(port, timeout_ms);
+    return result;
+}
+
 bool tcpConnect(const std::string& host, int port, int timeout_ms) {
 #ifdef _WIN32
-    ensureWsaInit();
+    ensureSocketLayer();
 #endif
     // Only pre-screen IP addresses, skip domains (DNS is censored locally)
     sockaddr_in addr{};

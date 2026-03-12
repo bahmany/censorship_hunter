@@ -5,6 +5,7 @@
 #include <sstream>
 #include <filesystem>
 #include <algorithm>
+#include <iostream>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -19,6 +20,14 @@ namespace fs = std::filesystem;
 
 namespace hunter {
 namespace proxy {
+
+namespace {
+
+bool hasGeositeData() {
+    return utils::fileExists("bin/geosite.dat");
+}
+
+} // namespace
 
 XRayManager::XRayManager() {
     xray_path_ = "bin/xray.exe";
@@ -47,7 +56,12 @@ std::string XRayManager::writeConfigFile(const std::string& json_config) {
 }
 
 int XRayManager::startProcess(const std::string& config_path) {
-    if (!isAvailable()) return -1;
+    if (!isAvailable()) {
+        const std::string msg = "[XRay] Binary not found: " + xray_path_;
+        utils::LogRingBuffer::instance().push(msg);
+        std::cerr << msg << std::endl;
+        return -1;
+    }
 
 #ifdef _WIN32
     STARTUPINFOA si = {};
@@ -63,7 +77,14 @@ int XRayManager::startProcess(const std::string& config_path) {
 
     BOOL ok = CreateProcessA(nullptr, cmd_buf, nullptr, nullptr, FALSE,
                               CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi);
-    if (!ok) return -1;
+    if (!ok) {
+        DWORD err = GetLastError();
+        const std::string msg = "[XRay] CreateProcess failed for " + xray_path_ +
+                                " (config=" + config_path + ", error=" + std::to_string((int)err) + ")";
+        utils::LogRingBuffer::instance().push(msg);
+        std::cerr << msg << std::endl;
+        return -1;
+    }
 
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
@@ -79,7 +100,12 @@ int XRayManager::startProcess(const std::string& config_path) {
         execl(xray_path_.c_str(), "xray", "run", "-c", config_path.c_str(), nullptr);
         _exit(1);
     }
-    if (pid < 0) return -1;
+    if (pid < 0) {
+        const std::string msg = "[XRay] fork failed for " + xray_path_ + " (config=" + config_path + ")";
+        utils::LogRingBuffer::instance().push(msg);
+        std::cerr << msg << std::endl;
+        return -1;
+    }
     std::lock_guard<std::mutex> lock(mutex_);
     managed_pids_.push_back(pid);
     return pid;
@@ -153,6 +179,7 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     const bool use_fragment = (parsed.security == "tls");
 
     std::ostringstream ss;
+    const bool use_mixed_inbound = (http_port > 0 && http_port == socks_port);
     ss << "{\n"
        << "  \"log\":{\"loglevel\":\"warning\"},\n"
        << "  \"dns\":{"
@@ -162,24 +189,13 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
        <<     "\"disableCache\":false"
        <<   "},\n"
        << "  \"inbounds\":[{"
-       <<     "\"tag\":\"socks-in\","
+       <<     "\"tag\":\"mixed-in\","
        <<     "\"port\":" << socks_port << ","
        <<     "\"listen\":\"127.0.0.1\","
-       <<     "\"protocol\":\"socks\","
+       <<     "\"protocol\":\"" << (use_mixed_inbound ? "mixed" : "socks") << "\","
        <<     "\"settings\":{\"udp\":true},"
        <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
-       <<   "}";
-    if (http_port > 0) {
-        ss << ",{"
-           <<     "\"tag\":\"http-in\","
-           <<     "\"port\":" << http_port << ","
-           <<     "\"listen\":\"127.0.0.1\","
-           <<     "\"protocol\":\"http\","
-           <<     "\"settings\":{\"allowTransparent\":false},"
-           <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
-           <<   "}";
-    }
-    ss << "],\n";
+       <<   "}],\n";
 
     // Outbounds: proxy, direct, dns-out, and optionally fragment
     if (use_fragment) {
@@ -199,8 +215,7 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     }
 
     // Build inbound tags for DNS routing
-    std::string client_inbounds = "\"socks-in\"";
-    if (http_port > 0) client_inbounds += ",\"http-in\"";
+    std::string client_inbounds = "\"mixed-in\"";
 
     ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":[";
     // 1. Client DNS queries → dns-out (intercept and resolve via XRay DNS)
@@ -212,7 +227,9 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     // 4. Private/local IPs → direct
     ss <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}";
     // 5. Iranian domains direct (optional, improves speed for local sites)
-    ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"}";
+    if (hasGeositeData()) {
+        ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"}";
+    }
     ss << "]}\n";
     ss << "}";
     return ss.str();
@@ -231,24 +248,13 @@ std::string XRayManager::generateBalancedConfig(
        <<     "\"disableCache\":false"
        <<   "},\n"
        << "  \"inbounds\":[{"
-       <<     "\"tag\":\"socks-in\","
+       <<     "\"tag\":\"mixed-in\","
        <<     "\"port\":" << listen_port << ","
        <<     "\"listen\":\"127.0.0.1\","
-       <<     "\"protocol\":\"socks\","
+       <<     "\"protocol\":\"mixed\","
        <<     "\"settings\":{\"udp\":true},"
        <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
-       <<   "}";
-    if (http_port > 0) {
-        ss << ",{"
-           <<     "\"tag\":\"http-in\","
-           <<     "\"port\":" << http_port << ","
-           <<     "\"listen\":\"127.0.0.1\","
-           <<     "\"protocol\":\"http\","
-           <<     "\"settings\":{\"allowTransparent\":false},"
-           <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
-           <<   "}";
-    }
-    ss << "],\n"
+       <<   "}],\n"
        << "  \"outbounds\":[";
 
     std::vector<std::string> outbound_tags;
@@ -273,17 +279,18 @@ std::string XRayManager::generateBalancedConfig(
        << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
 
     // Build inbound tags for DNS routing
-    std::string client_inbounds = "\"socks-in\"";
-    if (http_port > 0) client_inbounds += ",\"http-in\"";
+    std::string client_inbounds = "\"mixed-in\"";
 
     // Balancer + routing with DNS rules + smart routing
     ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
        <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"port\":53,\"outboundTag\":\"dns-out\"},"
        <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"balancerTag\":\"proxy-balancer\"},"
        <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
-       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},"
-       <<     "{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"},"
-       <<     "{\"type\":\"field\",\"network\":\"tcp,udp\",\"balancerTag\":\"proxy-balancer\"}"
+       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}";
+    if (hasGeositeData()) {
+        ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"}";
+    }
+    ss << ",{\"type\":\"field\",\"network\":\"tcp,udp\",\"balancerTag\":\"proxy-balancer\"}"
        << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[";
     first = true;
     for (auto& t : outbound_tags) {
@@ -300,6 +307,61 @@ std::string XRayManager::generateBalancedConfig(
         if (!first) ss << ",";
         first = false;
         ss << "\"" << t << "\"";
+    }
+    ss << "],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}\n";
+    ss << "}";
+    return ss.str();
+}
+
+std::string XRayManager::generateLocalSocksBalancedConfig(
+    const std::vector<int>& backend_ports, int listen_port, int http_port) {
+
+    if (backend_ports.empty()) return "";
+
+    std::ostringstream ss;
+    ss << "{\n"
+       << "  \"log\":{\"loglevel\":\"warning\"},\n"
+       << "  \"inbounds\":[{"
+       <<     "\"tag\":\"mixed-in\"," 
+       <<     "\"port\":" << listen_port << ","
+       <<     "\"listen\":\"127.0.0.1\","
+       <<     "\"protocol\":\"mixed\","
+       <<     "\"settings\":{\"udp\":true},"
+       <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
+       <<   "}],\n"
+       << "  \"outbounds\":[";
+
+    bool first = true;
+    std::vector<std::string> outbound_tags;
+    for (size_t i = 0; i < backend_ports.size(); ++i) {
+        if (!first) ss << ",";
+        first = false;
+        const std::string tag = "proxy-" + std::to_string(i);
+        outbound_tags.push_back(tag);
+        ss << "{\"protocol\":\"socks\",\"tag\":\"" << tag << "\",\"settings\":{\"servers\":[{\"address\":\"127.0.0.1\",\"port\":" << backend_ports[i] << "}]}}";
+    }
+    ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}],\n";
+
+    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
+       <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
+       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},"
+       <<     "{\"type\":\"field\",\"network\":\"tcp,udp\",\"balancerTag\":\"proxy-balancer\"}"
+       <<   "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[";
+
+    first = true;
+    for (const auto& tag : outbound_tags) {
+        if (!first) ss << ",";
+        first = false;
+        ss << "\"" << tag << "\"";
+    }
+    ss << "],\"strategy\":{\"type\":\"leastPing\"}}]},\n";
+
+    ss << "  \"observatory\":{\"subjectSelector\":[";
+    first = true;
+    for (const auto& tag : outbound_tags) {
+        if (!first) ss << ",";
+        first = false;
+        ss << "\"" << tag << "\"";
     }
     ss << "],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}\n";
     ss << "}";

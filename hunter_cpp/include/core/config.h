@@ -87,7 +87,10 @@ public:
     std::string stateFile() const { return getString("state_file", "runtime/hunter_state.json"); }
     std::string goldFile() const { return getString("gold_file", "runtime/gold.txt"); }
     std::string silverFile() const { return getString("silver_file", "runtime/silver.txt"); }
-    std::string xrayPath() const { return getString("xray_path", "xray.exe"); }
+    std::string xrayPath() const { return getString("xray_path", "bin/xray.exe"); }
+    std::string singBoxPath() const { return getString("singbox_path", "bin/sing-box.exe"); }
+    std::string mihomoPath() const { return getString("mihomo_path", "bin/mihomo-windows-amd64-compatible.exe"); }
+    std::string torPath() const { return getString("tor_path", "bin/tor.exe"); }
     std::vector<std::string> telegramTargets() const { return getStringList("targets"); }
 
     /**

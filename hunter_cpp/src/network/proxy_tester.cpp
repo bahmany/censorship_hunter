@@ -10,6 +10,9 @@
 #include <fstream>
 #include <atomic>
 #include <mutex>
+#include <cstdlib>
+#include <future>
+#include <vector>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -33,17 +36,111 @@ namespace network {
 
 // Limit concurrent XRay processes to prevent resource exhaustion
 static std::atomic<int> s_active_tests{0};
+static std::atomic<int> s_peak_tests{0};
 static std::mutex s_port_mutex;
+
+static int getEnvIntClamped(const char* name, int fallback, int min_value, int max_value) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        int value = std::stoi(raw);
+        if (value < min_value) value = min_value;
+        if (value > max_value) value = max_value;
+        return value;
+    } catch (...) {
+        return fallback;
+    }
+}
 
 static int getMaxConcurrentTests() {
     static int max_tests = 0;
     if (max_tests == 0) {
-        int cpus = std::thread::hardware_concurrency();
-        if (cpus <= 0) cpus = 2;
-        // Scale: 2 CPU -> 4 tests, 4 CPU -> 8, 8+ CPU -> 16, cap at 20
-        max_tests = std::min(20, std::max(4, cpus * 2));
+        const int forced = getEnvIntClamped("HUNTER_MAX_CONCURRENT_TEST_PROCESSES", 0, 1, 128);
+        if (forced > 0) {
+            max_tests = forced;
+        } else {
+            int cpus = static_cast<int>(std::thread::hardware_concurrency());
+            if (cpus <= 0) cpus = 4;
+            max_tests = std::min(96, std::max(32, cpus * 4));
+        }
     }
     return max_tests;
+}
+
+static int getProcessHoldMs() {
+    static int hold_ms = -1;
+    if (hold_ms < 0) {
+        hold_ms = getEnvIntClamped("HUNTER_TEST_PROCESS_HOLD_MS", 1200, 0, 5000);
+    }
+    return hold_ms;
+}
+
+static bool useTcpPreScreen() {
+    static int enabled = getEnvIntClamped("HUNTER_ENABLE_TCP_PRESCREEN", 0, 0, 1);
+    return enabled == 1;
+}
+
+static bool keepFailedXrayArtifacts() {
+    static int enabled = getEnvIntClamped("HUNTER_KEEP_FAILED_XRAY_CONFIG", 0, 0, 1);
+    return enabled == 1;
+}
+
+static void onTestStarted() {
+    const int active = ++s_active_tests;
+    int peak = s_peak_tests.load();
+    while (active > peak && !s_peak_tests.compare_exchange_weak(peak, active)) {
+    }
+}
+
+static void onTestFinished() {
+    --s_active_tests;
+}
+
+static ProxyTestResult chooseBestResult(const std::vector<ProxyTestResult>& results) {
+    ProxyTestResult best_success;
+    bool have_success = false;
+    ProxyTestResult best_telegram;
+    bool have_telegram = false;
+    ProxyTestResult best_failure;
+    bool have_failure = false;
+    bool have_unreachable = false;
+
+    for (const auto& result : results) {
+        if (result.success && !result.telegram_only) {
+            if (!have_success || result.download_speed_kbps > best_success.download_speed_kbps) {
+                best_success = result;
+                have_success = true;
+            }
+            continue;
+        }
+        if (result.success && result.telegram_only) {
+            if (!have_telegram) {
+                best_telegram = result;
+                have_telegram = true;
+            }
+            continue;
+        }
+        if (!have_failure) {
+            best_failure = result;
+            have_failure = true;
+        }
+        if (result.error_message == "Server unreachable") {
+            have_unreachable = true;
+        }
+    }
+
+    if (have_success) return best_success;
+    if (have_telegram) return best_telegram;
+    if (have_unreachable) {
+        ProxyTestResult result;
+        result.error_message = "Server unreachable";
+        return result;
+    }
+    if (have_failure) return best_failure;
+
+    ProxyTestResult result;
+    result.error_message = "All engines failed or no engines available";
+    return result;
 }
 
 ProxyTester::ProxyTester() {
@@ -53,6 +150,18 @@ ProxyTester::ProxyTester() {
 }
 
 ProxyTester::~ProxyTester() {}
+
+int ProxyTester::activeTestCount() {
+    return s_active_tests.load();
+}
+
+int ProxyTester::peakTestCount() {
+    return s_peak_tests.load();
+}
+
+int ProxyTester::maxConcurrentTestCount() {
+    return getMaxConcurrentTests();
+}
 
 int ProxyTester::getFreePort() {
     std::lock_guard<std::mutex> lock(s_port_mutex);
@@ -168,7 +277,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     
     // TCP pre-screening: quick connect to proxy server to skip dead IPs
     auto parsed_opt = UriParser::parse(config_uri);
-    if (parsed_opt.has_value() && parsed_opt->isValid()) {
+    if (useTcpPreScreen() && parsed_opt.has_value() && parsed_opt->isValid()) {
         if (!utils::tcpConnect(parsed_opt->address, parsed_opt->port, 2000)) {
             result.error_message = "Server unreachable";
             TLOG("  [Pre] DEAD " << parsed_opt->address << ":" << parsed_opt->port);
@@ -213,7 +322,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     si.hStdError = hOutFile;
     si.hStdInput = NULL;
     
-    std::string cmd = xray_path_ + " run -c " + temp_config;
+    std::string cmd = "\"" + xray_path_ + "\" run -c \"" + temp_config + "\"";
     TLOG("  [Test:" << test_port << "] Starting xray: " << cmd);
     char cmd_buf[4096];
     strncpy(cmd_buf, cmd.c_str(), sizeof(cmd_buf) - 1);
@@ -224,8 +333,12 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
         result.error_message = "Failed to start XRay";
         TLOG("  [Test:" << test_port << "] FAIL " << short_uri << " - CreateProcess failed");
         if (hOutFile != INVALID_HANDLE_VALUE) CloseHandle(hOutFile);
-        std::remove(temp_config.c_str());
-        std::remove(xray_out_path.c_str());
+        if (keepFailedXrayArtifacts()) {
+            TLOG("  [Test:" << test_port << "] KEEP xray artifacts cfg=" << temp_config << " log=" << xray_out_path);
+        } else {
+            std::remove(temp_config.c_str());
+            std::remove(xray_out_path.c_str());
+        }
         s_active_tests--;
         return result;
     }
@@ -264,8 +377,12 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
                 TLOG("  [Test:" << test_port << "] XRAY: " << err_line);
             }
         }
-        std::remove(temp_config.c_str());
-        std::remove(xray_out_path.c_str());
+        if (keepFailedXrayArtifacts()) {
+            TLOG("  [Test:" << test_port << "] KEEP xray artifacts cfg=" << temp_config << " log=" << xray_out_path);
+        } else {
+            std::remove(temp_config.c_str());
+            std::remove(xray_out_path.c_str());
+        }
         result.error_message = "XRay port not listening";
         TLOG("  [Test:" << test_port << "] FAIL " << short_uri << " - port not alive");
         s_active_tests--;
@@ -293,6 +410,10 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
         if (telegram_ok) {
             TLOG("  [Test:" << test_port << "] TG-ONLY " << short_uri << " (HTTP download failed, Telegram TCP works)");
         }
+    }
+    const int hold_ms = getProcessHoldMs();
+    if (hold_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
     }
     
     // Kill XRay process
@@ -464,6 +585,10 @@ static ProxyTestResult runEngineTest(
             TLOG("  [" << engine_name << ":" << test_port << "] TG-ONLY " << short_uri << " (HTTP download failed, Telegram TCP works)");
         }
     }
+    const int hold_ms = getProcessHoldMs();
+    if (hold_ms > 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms));
+    }
     
     // Kill engine process
     TerminateProcess(pi.hProcess, 0);
@@ -535,7 +660,7 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
     
 #ifdef _WIN32
     std::string log_file = "runtime/temp_singbox_out_" + std::to_string(test_port) + ".txt";
-    std::string cmd = singbox_path_ + " run -c " + temp_config;
+    std::string cmd = "\"" + singbox_path_ + "\" run -c \"" + temp_config + "\"";
     result = runEngineTest(cmd, temp_config, log_file, test_port, short_uri, "sing-box", timeout_seconds);
 #else
     result.error_message = "sing-box testing not implemented on this platform";
@@ -596,7 +721,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     
 #ifdef _WIN32
     std::string log_file = "runtime/temp_mihomo_out_" + std::to_string(test_port) + ".txt";
-    std::string cmd = mihomo_path_ + " -f " + temp_config;
+    std::string cmd = "\"" + mihomo_path_ + "\" -f \"" + temp_config + "\"";
     result = runEngineTest(cmd, temp_config, log_file, test_port, short_uri, "mihomo", timeout_seconds);
 #else
     result.error_message = "mihomo testing not implemented on this platform";
@@ -619,31 +744,51 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
     
     // Protocols that XRay doesn't support but sing-box/mihomo do
     bool xray_unsupported = (proto == "hysteria2" || proto == "tuic");
-    
-    // Try XRay first (most compatible for vmess/vless/trojan/ss)
+
+    std::vector<std::future<ProxyTestResult>> futures;
+    futures.reserve(3);
+
     if (!xray_unsupported && utils::fileExists(xray_path_)) {
-        ProxyTestResult result = testWithXray(config_uri, test_url, timeout_seconds);
-        if (result.success) return result;
-        // If server is unreachable, no point trying other engines
-        if (result.error_message == "Server unreachable") return result;
+        futures.emplace_back(std::async(std::launch::async, [this, config_uri, test_url, timeout_seconds]() {
+            return testWithXray(config_uri, test_url, timeout_seconds);
+        }));
     }
-    
-    // Try sing-box (supports hysteria2, tuic, and all standard protocols)
+
     if (utils::fileExists(singbox_path_)) {
-        ProxyTestResult result = testWithSingBox(config_uri, test_url, timeout_seconds);
-        if (result.success) return result;
-        if (result.error_message == "Server unreachable") return result;
+        futures.emplace_back(std::async(std::launch::async, [this, config_uri, test_url, timeout_seconds]() {
+            return testWithSingBox(config_uri, test_url, timeout_seconds);
+        }));
     }
-    
-    // Try mihomo (Clash Meta — supports vless, vmess, trojan, ss, hysteria2, tuic)
+
     if (utils::fileExists(mihomo_path_)) {
-        ProxyTestResult result = testWithMihomo(config_uri, test_url, timeout_seconds);
-        if (result.success) return result;
+        futures.emplace_back(std::async(std::launch::async, [this, config_uri, test_url, timeout_seconds]() {
+            return testWithMihomo(config_uri, test_url, timeout_seconds);
+        }));
     }
-    
-    ProxyTestResult result;
-    result.error_message = "All engines failed or no engines available";
-    return result;
+
+    if (futures.empty()) {
+        ProxyTestResult result;
+        result.error_message = "All engines failed or no engines available";
+        return result;
+    }
+
+    std::vector<ProxyTestResult> results;
+    results.reserve(futures.size());
+    for (auto& future : futures) {
+        try {
+            results.push_back(future.get());
+        } catch (const std::exception& ex) {
+            ProxyTestResult result;
+            result.error_message = std::string("Engine test exception: ") + ex.what();
+            results.push_back(result);
+        } catch (...) {
+            ProxyTestResult result;
+            result.error_message = "Engine test exception";
+            results.push_back(result);
+        }
+    }
+
+    return chooseBestResult(results);
 }
 
 } // namespace network
