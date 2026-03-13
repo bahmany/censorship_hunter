@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 #include <memory>
 
 namespace hunter {
@@ -15,6 +16,7 @@ struct ProxyTestResult {
     float download_speed_kbps = 0.0f;  // Download speed in KB/s
     std::string error_message;
     std::string engine_used;  // "xray", "sing-box", "mihomo", etc.
+    std::string uri;           // The config URI that was tested
 };
 
 /**
@@ -38,8 +40,25 @@ public:
      * @return Test result with success status and download speed
      */
     ProxyTestResult testConfig(const std::string& config_uri, 
-                               const std::string& test_url = "http://cachefly.cachefly.net/50mb.test",
+                               const std::string& test_url = "https://cachefly.cachefly.net/1mb.test",
                                int timeout_seconds = 30);
+
+    /**
+     * @brief Batch-test multiple configs using a SINGLE xray process (v2rayN pattern)
+     * 
+     * Generates one xray config with N inbounds (one per config on unique ports),
+     * starts ONE process, tests all configs in parallel through their SOCKS ports.
+     * Dramatically more efficient than spawning N separate processes.
+     * 
+     * @param config_uris Vector of proxy URI strings to test
+     * @param base_port Starting port for sequential allocation
+     * @param timeout_seconds Per-config test timeout
+     * @return Vector of results (one per input URI, in same order)
+     */
+    std::vector<ProxyTestResult> batchTestWithXray(
+        const std::vector<std::string>& config_uris,
+        int base_port = 29100,
+        int timeout_seconds = 10);
 
     static int activeTestCount();
     static int peakTestCount();

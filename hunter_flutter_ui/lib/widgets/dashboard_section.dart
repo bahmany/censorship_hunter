@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../models.dart';
 import '../services.dart';
+import 'tactical_frame.dart';
 
 class DashboardSection extends StatelessWidget {
   const DashboardSection({
@@ -24,6 +25,8 @@ class DashboardSection extends StatelessWidget {
     required this.onNavigate,
     required this.onCopyText,
     required this.onCopyLines,
+    this.pulseValue = 0.0,
+    this.statisticsMode = false,
     this.provisionedPorts = const <Map<String, dynamic>>[],
     this.balancers = const <Map<String, dynamic>>[],
     this.activeSystemProxyPort,
@@ -47,10 +50,12 @@ class DashboardSection extends StatelessWidget {
     this.clearAgeHours = 168,
     this.onClearAgeChanged,
     this.onClearOldConfigs,
+    this.onClearAliveConfigs,
     this.manualConfigCtl,
     this.onAddManualConfigs,
     this.onRunCycle,
     this.onRefreshProvisionedPorts,
+    this.onRecheckLivePorts,
     this.onReprovisionPorts,
     this.onLoadRawFiles,
     this.onLoadBundleFiles,
@@ -75,6 +80,8 @@ class DashboardSection extends StatelessWidget {
   final void Function(HunterNavSection, {HunterConfigListKind? kind}) onNavigate;
   final Future<void> Function(String text, {String? label}) onCopyText;
   final Future<void> Function(List<String> lines, {String? label}) onCopyLines;
+  final double pulseValue;
+  final bool statisticsMode;
   final List<Map<String, dynamic>> provisionedPorts;
   final List<Map<String, dynamic>> balancers;
   final int? activeSystemProxyPort;
@@ -98,10 +105,12 @@ class DashboardSection extends StatelessWidget {
   final int clearAgeHours;
   final void Function(int)? onClearAgeChanged;
   final VoidCallback? onClearOldConfigs;
+  final VoidCallback? onClearAliveConfigs;
   final TextEditingController? manualConfigCtl;
   final VoidCallback? onAddManualConfigs;
   final VoidCallback? onRunCycle;
   final VoidCallback? onRefreshProvisionedPorts;
+  final VoidCallback? onRecheckLivePorts;
   final VoidCallback? onReprovisionPorts;
   final VoidCallback? onLoadRawFiles;
   final VoidCallback? onLoadBundleFiles;
@@ -137,6 +146,7 @@ class DashboardSection extends StatelessWidget {
     final double rate = _dbl(val, 'rate_per_s');
     final double eta = _dbl(status, 'eta_seconds');
     final double uptime = _dbl(status, 'uptime_s');
+    final String phase = (status?['phase'] ?? '--').toString().toUpperCase();
     final int totalFound = goldConfigs.length + silverConfigs.length;
     final int liveBalancer = balancerConfigs.length;
     // Merge file-based configs + balancer URIs, deduplicate
@@ -145,41 +155,385 @@ class DashboardSection extends StatelessWidget {
     final int surfacedAlive = dbAlive > 0 ? dbAlive : allAlive.length;
     final bool isRunning = runState == HunterRunState.running;
     final bool isLive = _isLiveNow();
+    final int readyProvisioned = provisionedPorts.where((Map<String, dynamic> p) {
+      return p['tcp_alive'] == true && p['socks_ready'] == true && p['http_ready'] == true;
+    }).length;
+    final int readyBalancers = balancers.where((Map<String, dynamic> b) {
+      return b['tcp_alive'] == true && b['socks_ready'] == true && b['http_ready'] == true;
+    }).length;
+    Map<String, dynamic>? iranAssetsWorker;
+    for (final Map<String, dynamic> worker in workers) {
+      if ((worker['name'] ?? '').toString() == 'iran_assets') {
+        iranAssetsWorker = worker;
+        break;
+      }
+    }
+
+    if (statisticsMode) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            _buildStatisticsHeader(phase, dbAlive, dbTested, dbTotal, readyProvisioned + readyBalancers),
+            const SizedBox(height: 16),
+            _buildFoundAlert(context, surfacedAlive, totalFound, allAlive, isRunning),
+            const SizedBox(height: 16),
+            _buildStatsRow(context, dbAlive, dbTested, dbTotal, liveBalancer, rate, uptime),
+            const SizedBox(height: 16),
+            _buildProgress(context, dbTotal, dbTested, eta, isRunning, isLive),
+            const SizedBox(height: 16),
+            _buildRealtimeAdminSection(context, isRunning, hardware, runtime, speed, val, workers),
+            const SizedBox(height: 16),
+            _buildIranAssetsSection(iranAssetsWorker),
+            const SizedBox(height: 16),
+            if (provisionedPorts.isNotEmpty || balancers.isNotEmpty)
+              _buildProvisionedPorts(context),
+            if (provisionedPorts.isNotEmpty || balancers.isNotEmpty)
+              const SizedBox(height: 16),
+            if (allAlive.isNotEmpty || balancerConfigs.isNotEmpty)
+              _buildConfigPreview(context, allAlive, isRunning),
+            if (allAlive.isNotEmpty || balancerConfigs.isNotEmpty)
+              const SizedBox(height: 16),
+            _buildMaintenanceSection(context, isRunning),
+          ],
+        ),
+      );
+    }
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          // ── Top: Found configs alert (most prominent) ──
-          _buildFoundAlert(context, surfacedAlive, totalFound, allAlive, isRunning),
+          _buildTacticalHero(
+            phase: phase,
+            alive: surfacedAlive,
+            tested: dbTested,
+            total: dbTotal,
+            rate: rate,
+            readyPorts: readyProvisioned + readyBalancers,
+            isRunning: isRunning,
+            isLive: isLive,
+          ),
           const SizedBox(height: 16),
-          // ── Stats row ──
-          _buildStatsRow(context, dbAlive, dbTested, dbTotal, liveBalancer, rate, uptime),
+          _buildPrimaryActions(context, isRunning),
           const SizedBox(height: 16),
-          // ── Progress ──
           _buildProgress(context, dbTotal, dbTested, eta, isRunning, isLive),
           const SizedBox(height: 16),
-          // ── Pause + Speed Controls ──
           _buildControlsSection(context, isRunning),
           const SizedBox(height: 16),
-          // ── Maintenance: clear old + manual add ──
-          _buildMaintenanceSection(context, isRunning),
+          _buildQuickOpsOverview(
+            context,
+            readyProvisioned: readyProvisioned,
+            readyBalancers: readyBalancers,
+            totalFound: totalFound,
+            allAlive: allAlive,
+          ),
           const SizedBox(height: 16),
-          _buildRealtimeAdminSection(context, isRunning, hardware, runtime, speed, val, workers),
-          const SizedBox(height: 16),
-          // ── Active Proxy Ports (balancers + provisioned) ──
-          if (provisionedPorts.isNotEmpty || balancers.isNotEmpty)
-            _buildProvisionedPorts(context),
-          if (provisionedPorts.isNotEmpty || balancers.isNotEmpty)
+          if (allAlive.isNotEmpty)
+            _buildQuickLivePreview(allAlive),
+          if (allAlive.isNotEmpty)
             const SizedBox(height: 16),
-          // ── Live configs preview ──
-          if (allAlive.isNotEmpty || balancerConfigs.isNotEmpty)
-            _buildConfigPreview(context, allAlive, isRunning),
-          if (allAlive.isNotEmpty || balancerConfigs.isNotEmpty)
-            const SizedBox(height: 16),
-          // ── Activity log ──
           _buildActivity(context, isLive),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatisticsHeader(String phase, int alive, int tested, int total, int ports) {
+    return TacticalFrame(
+      accent: C.neonPurple,
+      padding: const EdgeInsets.all(18),
+      pulseValue: pulseValue,
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final bool compact = constraints.maxWidth < 860;
+          final Widget metrics = Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: <Widget>[
+              _compactKpi('ALIVE', '$alive', C.neonGreen),
+              _compactKpi('TESTED', fmtNumber(tested), C.neonCyan),
+              _compactKpi('TOTAL', fmtNumber(total), C.neonAmber),
+              _compactKpi('PORTS', '$ports', C.neonPurple),
+              _actionBtn('MAIN DASHBOARD', C.neonCyan, () => onNavigate(HunterNavSection.dashboard)),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+                decoration: BoxDecoration(
+                  color: C.surface,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: C.border),
+                ),
+                child: Text('PHASE $phase', style: const TextStyle(color: C.txt2, fontSize: 10, fontWeight: FontWeight.w700)),
+              ),
+            ],
+          );
+          final Widget intro = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              const Text('STATISTICS / TELEMETRY', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1.4)),
+              const SizedBox(height: 6),
+              Text('Deep metrics, workers, ports, maintenance', style: TextStyle(color: C.txt3.withValues(alpha: 0.9), fontSize: 12)),
+            ],
+          );
+          if (compact) {
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                intro,
+                const SizedBox(height: 14),
+                metrics,
+              ],
+            );
+          }
+          return Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Expanded(child: intro),
+              const SizedBox(width: 16),
+              Flexible(child: metrics),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildTacticalHero({
+    required String phase,
+    required int alive,
+    required int tested,
+    required int total,
+    required double rate,
+    required int readyPorts,
+    required bool isRunning,
+    required bool isLive,
+  }) {
+    final double pct = total > 0 ? (tested / total).clamp(0.0, 1.0) : 0.0;
+    final Color accent = isLive ? C.neonGreen : (isRunning ? C.neonAmber : C.neonCyan);
+    return TacticalFrame(
+      accent: accent,
+      padding: const EdgeInsets.all(20),
+      pulseValue: pulseValue,
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints constraints) {
+          final bool compact = constraints.maxWidth < 760;
+          final Widget statusPill = Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            decoration: BoxDecoration(
+              color: C.surface,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: accent.withValues(alpha: 0.25)),
+            ),
+            child: Column(
+              crossAxisAlignment: compact ? CrossAxisAlignment.start : CrossAxisAlignment.end,
+              children: <Widget>[
+                Text('PHASE $phase', style: const TextStyle(color: C.txt2, fontSize: 10, fontWeight: FontWeight.w700)),
+                const SizedBox(height: 4),
+                Text(isLive ? 'LIVE' : (isRunning ? 'TRACKING' : 'OFFLINE'), style: TextStyle(color: accent, fontSize: 16, fontWeight: FontWeight.w900, fontFamily: 'Consolas')),
+              ],
+            ),
+          );
+          final Widget intro = Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(
+                alive > 0 ? 'TACTICAL LIVE GRID READY' : (isRunning ? 'TACTICAL SCAN IN PROGRESS' : 'SYSTEM READY / STANDBY'),
+                style: TextStyle(color: accent, fontSize: compact ? 18 : 22, fontWeight: FontWeight.w900, letterSpacing: 1.0),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                alive > 0
+                    ? '$alive live configs confirmed • $readyPorts active ports online'
+                    : (isRunning ? 'Hunter is testing routes and filling the grid.' : 'Start the engine to populate live routes.'),
+                style: const TextStyle(color: C.txt2, fontSize: 13, height: 1.4),
+              ),
+            ],
+          );
+          return Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              if (compact) ...<Widget>[
+                intro,
+                const SizedBox(height: 14),
+                statusPill,
+              ] else
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Expanded(child: intro),
+                    const SizedBox(width: 16),
+                    statusPill,
+                  ],
+                ),
+              const SizedBox(height: 18),
+              Wrap(
+                spacing: 12,
+                runSpacing: 12,
+                children: <Widget>[
+                  _compactKpi('ALIVE', '$alive', C.neonGreen),
+                  _compactKpi('READY PORTS', '$readyPorts', C.neonPurple),
+                  _compactKpi('RATE', rate > 0.01 ? '${rate.toStringAsFixed(1)}/s' : '--', C.neonCyan),
+                  _compactKpi('PROGRESS', '${(pct * 100).toStringAsFixed(0)}%', C.neonAmber),
+                ],
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildPrimaryActions(BuildContext context, bool isRunning) {
+    return TacticalFrame(
+      accent: C.neonGreen,
+      padding: const EdgeInsets.all(16),
+      pulseValue: pulseValue,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Text('PRIMARY OPS', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              _actionBtn('RUN CYCLE', C.neonCyan, isRunning ? onRunCycle : null),
+              _actionBtn('REFRESH PORTS', C.neonGreen, isRunning ? onRefreshProvisionedPorts : null),
+              _actionBtn('RECHECK LIVE', C.neonGreen, isRunning ? onRecheckLivePorts : null),
+              _actionBtn('REPROVISION', C.neonAmber, isRunning ? onReprovisionPorts : null),
+              _actionBtn('STATISTICS', C.neonPurple, () => onNavigate(HunterNavSection.statistics)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickOpsOverview(
+    BuildContext context, {
+    required int readyProvisioned,
+    required int readyBalancers,
+    required int totalFound,
+    required List<String> allAlive,
+  }) {
+    return TacticalFrame(
+      accent: C.neonAmber,
+      padding: const EdgeInsets.all(16),
+      pulseValue: pulseValue,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          const Text('QUICK STATUS', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: <Widget>[
+              _compactKpi('INDIVIDUAL PORTS', '$readyProvisioned', C.neonGreen),
+              _compactKpi('BALANCERS', '$readyBalancers', C.neonCyan),
+              _compactKpi('FOUND', '$totalFound', C.neonAmber),
+              _compactKpi('COPY READY', '${allAlive.length}', C.neonPurple),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              _actionBtn('LIVE CONFIGS', C.neonCyan, () => onNavigate(HunterNavSection.configs, kind: HunterConfigListKind.alive)),
+              _actionBtn('BALANCER LIST', C.neonPurple, () => onNavigate(HunterNavSection.configs, kind: HunterConfigListKind.balancer)),
+              _actionBtn('MORE METRICS', C.neonAmber, () => onNavigate(HunterNavSection.statistics)),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildQuickLivePreview(List<String> allAlive) {
+    final List<String> preview = allAlive.take(4).toList(growable: false);
+    return TacticalFrame(
+      accent: C.neonCyan,
+      padding: const EdgeInsets.all(16),
+      pulseValue: pulseValue,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Text('LIVE PREVIEW', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1.2)),
+              const Spacer(),
+              if (allAlive.isNotEmpty) ...<Widget>[
+                _actionBtn('CLEAR ALIVE', C.neonRed, onClearAliveConfigs),
+                const SizedBox(width: 8),
+              ],
+              _actionBtn('COPY ALL', C.neonGreen, () => onCopyLines(allAlive, label: 'Copied ${allAlive.length} configs')),
+            ],
+          ),
+          const SizedBox(height: 12),
+          ...preview.map((String uri) {
+            final String proto = uri.contains('://') ? uri.split('://').first.toUpperCase() : '?';
+            final Color pc = _protoColor(proto);
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: InkWell(
+                onTap: () => onCopyText(uri, label: 'Config copied!'),
+                borderRadius: BorderRadius.circular(8),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: C.surface,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: pc.withValues(alpha: 0.22)),
+                  ),
+                  child: Row(
+                    children: <Widget>[
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: pc.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(5),
+                        ),
+                        child: Text(proto, style: TextStyle(color: pc, fontSize: 10, fontWeight: FontWeight.w800, fontFamily: 'Consolas')),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(uri, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: C.txt2, fontSize: 11, fontFamily: 'Consolas')),
+                      ),
+                      const Icon(Icons.content_copy, color: C.txt3, size: 14),
+                    ],
+                  ),
+                ),
+              ),
+            );
+          }),
+          if (allAlive.length > preview.length)
+            Align(
+              alignment: Alignment.centerRight,
+              child: _actionBtn('VIEW ALL', C.neonCyan, () => onNavigate(HunterNavSection.configs, kind: HunterConfigListKind.alive)),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _compactKpi(String label, String value, Color color) {
+    return Container(
+      constraints: const BoxConstraints(minWidth: 96),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: C.surface,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.18)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(label, style: const TextStyle(color: C.txt3, fontSize: 9, fontWeight: FontWeight.w700, letterSpacing: 1.2)),
+          const SizedBox(height: 4),
+          Text(value, style: TextStyle(color: color, fontSize: 18, fontWeight: FontWeight.w900, fontFamily: 'Consolas')),
         ],
       ),
     );
@@ -221,6 +575,10 @@ class DashboardSection extends StatelessWidget {
               Expanded(
                 child: Text(title, style: TextStyle(color: accent, fontSize: 20, fontWeight: FontWeight.w800)),
               ),
+              if (hasCopyable) ...<Widget>[
+                _actionBtn('CLEAR ALIVE', C.neonRed, onClearAliveConfigs),
+                const SizedBox(width: 8),
+              ],
               if (hasCopyable)
                 _actionBtn('COPY ALL', C.neonGreen, () => onCopyLines(allAlive, label: 'Copied ${allAlive.length} configs')),
             ],
@@ -318,6 +676,8 @@ class DashboardSection extends StatelessWidget {
   // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   Widget _buildProgress(BuildContext context, int total, int tested, double eta, bool isRunning, bool isLive) {
     final double pct = total > 0 ? (tested / total).clamp(0.0, 1.0) : 0.0;
+    final int remaining = total > tested ? total - tested : 0;
+    final double remainingPct = total > 0 ? (1.0 - pct).clamp(0.0, 1.0) : 0.0;
     return Container(
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
@@ -332,23 +692,29 @@ class DashboardSection extends StatelessWidget {
             children: <Widget>[
               const Text('SCAN PROGRESS', style: TextStyle(color: C.txt3, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 1.2)),
               const Spacer(),
-              Text('${(pct * 100).toStringAsFixed(1)}%', style: const TextStyle(color: C.neonCyan, fontSize: 16, fontWeight: FontWeight.w800, fontFamily: 'Consolas')),
+              Text('${(pct * 100).toStringAsFixed(1)}% DONE', style: const TextStyle(color: C.neonCyan, fontSize: 16, fontWeight: FontWeight.w800, fontFamily: 'Consolas')),
             ],
           ),
           const SizedBox(height: 10),
           ClipRRect(
             borderRadius: BorderRadius.circular(6),
-            child: LinearProgressIndicator(
-              value: pct,
-              minHeight: 8,
-              backgroundColor: C.surface,
-              valueColor: const AlwaysStoppedAnimation<Color>(C.neonCyan),
+            child: SizedBox(
+              height: 10,
+              child: Stack(
+                children: <Widget>[
+                  Container(color: C.surface),
+                  FractionallySizedBox(
+                    widthFactor: pct,
+                    child: Container(color: C.neonCyan),
+                  ),
+                ],
+              ),
             ),
           ),
           const SizedBox(height: 10),
           Row(
             children: <Widget>[
-              Text('${fmtNumber(tested)} / ${fmtNumber(total)}', style: const TextStyle(color: C.txt2, fontSize: 12)),
+              Text('${fmtNumber(tested)} / ${fmtNumber(total)} tested', style: const TextStyle(color: C.txt2, fontSize: 12)),
               const Spacer(),
               if (isLive)
                 Container(
@@ -366,6 +732,37 @@ class DashboardSection extends StatelessWidget {
                 const SizedBox(width: 10),
                 Text('ETA ${fmtDuration(Duration(seconds: eta.round()))}', style: const TextStyle(color: C.txt3, fontSize: 11)),
               ],
+            ],
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 8,
+            runSpacing: 8,
+            children: <Widget>[
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: C.neonCyan.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: C.neonCyan.withValues(alpha: 0.28)),
+                ),
+                child: Text(
+                  'DONE ${(pct * 100).toStringAsFixed(1)}% • ${fmtNumber(tested)}',
+                  style: const TextStyle(color: C.neonCyan, fontSize: 11, fontWeight: FontWeight.w700),
+                ),
+              ),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: C.neonAmber.withValues(alpha: 0.08),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: C.neonAmber.withValues(alpha: 0.28)),
+                ),
+                child: Text(
+                  'REMAINING ${(remainingPct * 100).toStringAsFixed(1)}% • ${fmtNumber(remaining)}',
+                  style: const TextStyle(color: C.neonAmber, fontSize: 11, fontWeight: FontWeight.w700),
+                ),
+              ),
             ],
           ),
         ],
@@ -457,6 +854,7 @@ class DashboardSection extends StatelessWidget {
             children: <Widget>[
               _actionBtn('RUN CYCLE', C.neonCyan, isRunning ? onRunCycle : null),
               _actionBtn('REFRESH PORTS', C.neonGreen, isRunning ? onRefreshProvisionedPorts : null),
+              _actionBtn('RECHECK LIVE', C.neonGreen, isRunning ? onRecheckLivePorts : null),
               _actionBtn('REPROVISION', C.neonAmber, isRunning ? onReprovisionPorts : null),
               _actionBtn('LOAD RAW', C.neonPurple, isRunning ? onLoadRawFiles : null),
               _actionBtn('LOAD BUNDLE', C.neonPurple, isRunning ? onLoadBundleFiles : null),
@@ -531,6 +929,74 @@ class DashboardSection extends StatelessWidget {
                 ),
               );
             }),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildIranAssetsSection(Map<String, dynamic>? worker) {
+    final Map<String, dynamic>? extra = worker?['extra'] is Map<String, dynamic>
+        ? worker!['extra'] as Map<String, dynamic>
+        : null;
+    final String state = (worker?['state'] ?? 'unknown').toString();
+    final Color stateColor = _workerStateColor(state);
+    final String reason = (extra?['reason'] ?? '--').toString();
+    final String transport = (extra?['transport'] ?? '--').toString();
+    final String updated = (extra?['files_updated'] ?? '--').toString();
+    final String unchanged = (extra?['files_unchanged'] ?? '--').toString();
+    final String failed = (extra?['files_failed'] ?? '--').toString();
+    final String total = (extra?['files_total'] ?? '--').toString();
+    final String dir = (extra?['asset_dir'] ?? '--').toString();
+    final String source = (extra?['last_source'] ?? '').toString();
+    final double nextRun = (worker?['next_run_in'] as num?)?.toDouble() ?? 0.0;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: C.card,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: C.border),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              const Icon(Icons.download_for_offline_outlined, color: C.neonCyan, size: 18),
+              const SizedBox(width: 8),
+              const Text('IRAN ASSETS', style: TextStyle(color: C.txt2, fontSize: 12, fontWeight: FontWeight.w800, letterSpacing: 1)),
+              const Spacer(),
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: stateColor.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: stateColor.withValues(alpha: 0.25)),
+                ),
+                child: Text(state.toUpperCase(), style: TextStyle(color: stateColor, fontSize: 10, fontWeight: FontWeight.w700)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: <Widget>[
+              _statChip('FILES', total, C.neonCyan),
+              _statChip('UPDATED', updated, C.neonGreen),
+              _statChip('UNCHANGED', unchanged, C.neonAmber),
+              _statChip('FAILED', failed, C.neonRed),
+              _statChip('TRANSPORT', transport, C.neonPurple),
+              _statChip('REASON', reason, C.txt2),
+              _statChip('NEXT', nextRun > 0 ? '${nextRun.round()}s' : '--', C.txt2),
+            ],
+          ),
+          const SizedBox(height: 10),
+          Text(dir, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+          if (source.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 4),
+            Text(source, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: C.txt3, fontSize: 10, fontFamily: 'Consolas')),
+          ],
         ],
       ),
     );
@@ -1318,6 +1784,28 @@ class DashboardSection extends StatelessWidget {
             ],
           ),
           const SizedBox(height: 12),
+          if (onClearAliveConfigs != null) ...<Widget>[
+            Row(
+              children: <Widget>[
+                const Text('Clear persisted alive cache/files', style: TextStyle(color: C.txt2, fontSize: 11)),
+                const SizedBox(width: 8),
+                SizedBox(
+                  height: 28,
+                  child: ElevatedButton(
+                    onPressed: onClearAliveConfigs,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: C.neonRed.withValues(alpha: 0.12),
+                      foregroundColor: C.neonRed,
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(6), side: BorderSide(color: C.neonRed.withValues(alpha: 0.3))),
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                    ),
+                    child: const Text('CLEAR ALIVE', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+          ],
           // Manual config add
           const Text('Add configs manually:', style: TextStyle(color: C.txt2, fontSize: 11)),
           const SizedBox(height: 6),
@@ -1440,6 +1928,15 @@ class DashboardSection extends StatelessWidget {
       if (read('active_test_processes').isNotEmpty) parts.add('pid ${read('active_test_processes')}/${read('max_test_processes')}');
       if (read('pending_unique').isNotEmpty) parts.add('pending ${read('pending_unique')}');
       if (read('rate_per_s').isNotEmpty) parts.add('rate ${read('rate_per_s')}');
+      return parts.join(' | ');
+    }
+    if (workerName == 'iran_assets') {
+      final List<String> parts = <String>[];
+      if (read('files_updated').isNotEmpty) parts.add('up ${read('files_updated')}');
+      if (read('files_unchanged').isNotEmpty) parts.add('same ${read('files_unchanged')}');
+      if (read('files_failed').isNotEmpty) parts.add('fail ${read('files_failed')}');
+      if (read('transport').isNotEmpty) parts.add(read('transport'));
+      if (read('reason').isNotEmpty) parts.add(read('reason'));
       return parts.join(' | ');
     }
     final List<String> parts = <String>[];

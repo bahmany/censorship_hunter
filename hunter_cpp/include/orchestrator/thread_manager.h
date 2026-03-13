@@ -37,6 +37,7 @@ public:
     void start();
     void join(float timeout = 10.0f);
     WorkerStatus getStatus() const;
+    void setPauseCallback(std::function<bool()> callback);
 
 protected:
     virtual void execute() = 0;
@@ -45,6 +46,7 @@ protected:
     WorkerStatus status_;
     mutable std::mutex status_mutex_;
     std::thread thread_;
+    std::function<bool()> pause_callback_;
 
     void runLoop();
     void updateExtra(const std::string& key, const std::string& value);
@@ -135,6 +137,16 @@ private:
     std::string cacheFile();
     void loadSeen();
     int appendNew(const std::vector<std::string>& configs);
+};
+
+class IranAssetsWorker : public BaseWorker {
+public:
+    IranAssetsWorker(HunterOrchestrator* orch, std::atomic<bool>& stop);
+protected:
+    void execute() override;
+private:
+    HunterOrchestrator* orch_;
+    int download_count_ = 0;
 };
 
 /**
@@ -243,6 +255,7 @@ private:
     std::unique_ptr<HealthMonitorWorker> health_;
     std::unique_ptr<HarvesterWorker> harvester_;
     std::unique_ptr<GitHubDownloaderWorker> github_downloader_;
+    std::unique_ptr<IranAssetsWorker> iran_assets_;
     std::unique_ptr<ValidatorWorker> validator_;
     std::unique_ptr<DpiPressureWorker> dpi_pressure_;
     std::unique_ptr<ImportWatcherWorker> import_watcher_;

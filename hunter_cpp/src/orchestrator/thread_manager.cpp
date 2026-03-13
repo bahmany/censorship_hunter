@@ -180,6 +180,168 @@ GitHubRefreshResult refreshGithubConfigs(HunterOrchestrator* orch, int cap,
     return result;
 }
 
+struct IranAssetTarget {
+    std::string file_name;
+    std::vector<std::string> urls;
+};
+
+std::string runtimeBasePathFor(HunterOrchestrator* orch) {
+    std::string base = utils::dirName(orch->config().stateFile());
+    if (base.empty()) base = "runtime";
+    utils::mkdirRecursive(base);
+    return base;
+}
+
+std::string iranAssetDirFor(HunterOrchestrator* orch) {
+    std::string dir = runtimeBasePathFor(orch) + "/assets/iran";
+    utils::mkdirRecursive(dir);
+    return dir;
+}
+
+std::vector<IranAssetTarget> iranAssetTargets() {
+    return {
+        {"geoip-ir.srs", {
+            "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs",
+            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@rule-set/geoip-ir.srs"
+        }},
+        {"geosite-ir.srs", {
+            "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs",
+            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@rule-set/geosite-ir.srs"
+        }},
+        {"geoip-lite.db", {
+            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/geoip-lite.db"
+        }},
+        {"geosite-lite.db", {
+            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/geosite-lite.db"
+        }},
+        {"security-ip.db", {
+            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/security-ip.db"
+        }},
+        {"security.db", {
+            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/security.db"
+        }},
+    };
+}
+
+std::string readBinaryFile(const std::string& path) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) return "";
+    std::ostringstream ss;
+    ss << file.rdbuf();
+    return ss.str();
+}
+
+bool writeBinaryFileAtomic(const std::string& path, const std::string& body) {
+    utils::mkdirRecursive(utils::dirName(path));
+    const std::string temp = path + ".tmp";
+    {
+        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
+        if (!file) return false;
+        file.write(body.data(), static_cast<std::streamsize>(body.size()));
+        if (!file.good()) return false;
+    }
+    std::error_code ec;
+    std::filesystem::rename(temp, path, ec);
+    if (ec) {
+        std::filesystem::remove(path, ec);
+        ec.clear();
+        std::filesystem::rename(temp, path, ec);
+    }
+    if (ec) {
+        std::filesystem::remove(temp, ec);
+        return false;
+    }
+    return true;
+}
+
+struct IranAssetsRefreshResult {
+    int files_total = 0;
+    int files_updated = 0;
+    int files_unchanged = 0;
+    int files_failed = 0;
+    std::string transport = "none";
+    std::string last_source;
+    std::string reason = "ok";
+};
+
+IranAssetsRefreshResult refreshIranAssets(HunterOrchestrator* orch, int timeout_ms) {
+    IranAssetsRefreshResult result;
+    const auto targets = iranAssetTargets();
+    result.files_total = (int)targets.size();
+
+    auto& mgr = HunterTaskManager::instance();
+    std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
+    if (!lock.try_lock_for(std::chrono::seconds(10))) {
+        result.reason = "scrape_lock_busy";
+        return result;
+    }
+
+    auto& fetcher = orch->configFetcher();
+    auto& http = orch->httpClient();
+    const auto proxy_ports = githubProxyPorts(orch);
+    const bool direct_ok = fetcher.checkDirectAccess();
+    const auto proxy_port = fetcher.findBestProxyPort(proxy_ports);
+    const std::string proxy_url = proxy_port.has_value()
+        ? ("socks5h://127.0.0.1:" + std::to_string(*proxy_port))
+        : "";
+    const std::string asset_dir = iranAssetDirFor(orch);
+
+    for (const auto& target : targets) {
+        bool downloaded = false;
+        std::string body;
+        std::string source;
+        std::string transport;
+
+        auto tryUrls = [&](const std::string& proxy, const std::string& transport_name) {
+            for (const auto& url : target.urls) {
+                std::string candidate = http.get(url, timeout_ms, proxy);
+                if (!candidate.empty()) {
+                    body = std::move(candidate);
+                    source = url;
+                    transport = transport_name;
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        if (direct_ok) {
+            downloaded = tryUrls("", "direct");
+            if (!downloaded && !proxy_url.empty()) downloaded = tryUrls(proxy_url, "proxy");
+        } else {
+            if (!proxy_url.empty()) downloaded = tryUrls(proxy_url, "proxy");
+            if (!downloaded) downloaded = tryUrls("", "direct_fallback");
+        }
+
+        if (!downloaded) {
+            result.files_failed++;
+            continue;
+        }
+
+        const std::string target_path = asset_dir + "/" + target.file_name;
+        const std::string existing = readBinaryFile(target_path);
+        if (existing == body) {
+            result.files_unchanged++;
+        } else if (writeBinaryFileAtomic(target_path, body)) {
+            result.files_updated++;
+        } else {
+            result.files_failed++;
+            continue;
+        }
+
+        result.transport = transport;
+        result.last_source = source;
+    }
+
+    if (result.files_failed > 0 && result.files_updated == 0 && result.files_unchanged == 0) {
+        result.reason = "download_failed";
+    } else if (result.files_failed > 0) {
+        result.reason = "partial";
+    }
+
+    return result;
+}
+
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -213,6 +375,10 @@ WorkerStatus BaseWorker::getStatus() const {
     return status_;
 }
 
+void BaseWorker::setPauseCallback(std::function<bool()> callback) {
+    pause_callback_ = std::move(callback);
+}
+
 void BaseWorker::updateExtra(const std::string& key, const std::string& value) {
     std::lock_guard<std::mutex> lock(status_mutex_);
     status_.extra[key] = value;
@@ -225,6 +391,19 @@ HardwareSnapshot BaseWorker::getHardware() {
 void BaseWorker::runLoop() {
     utils::LogRingBuffer::instance().push("[" + name + "] Thread started");
     while (!stop_.load()) {
+        while (!stop_.load() && pause_callback_ && pause_callback_()) {
+            {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                status_.state = WorkerState::SLEEPING;
+                status_.next_run_in = 0.0;
+                status_.extra["paused"] = "true";
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        }
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.extra["paused"] = "false";
+        }
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
             status_.state = WorkerState::RUNNING;
@@ -258,6 +437,21 @@ void BaseWorker::runLoop() {
         }
         int remaining = interval_seconds;
         while (remaining > 0 && !stop_.load()) {
+            if (pause_callback_ && pause_callback_()) {
+                while (!stop_.load() && pause_callback_ && pause_callback_()) {
+                    {
+                        std::lock_guard<std::mutex> lock(status_mutex_);
+                        status_.state = WorkerState::SLEEPING;
+                        status_.next_run_in = 0.0;
+                        status_.extra["paused"] = "true";
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                }
+                {
+                    std::lock_guard<std::mutex> lock(status_mutex_);
+                    status_.extra["paused"] = "false";
+                }
+            }
             {
                 std::lock_guard<std::mutex> lock(status_mutex_);
                 status_.next_run_in = (double)remaining;
@@ -590,6 +784,54 @@ void GitHubDownloaderWorker::execute() {
     if (continuous2 && env_interval <= 0) {
         interval_seconds = std::min(interval_seconds, 300);
     }
+}
+
+IranAssetsWorker::IranAssetsWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
+    : BaseWorker("iran_assets", constants::IRAN_ASSETS_INTERVAL_S, stop), orch_(orch) {
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_IRAN_ASSETS_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
+}
+
+void IranAssetsWorker::execute() {
+    interval_seconds = constants::IRAN_ASSETS_INTERVAL_S;
+
+    const bool enabled = HunterConfig::getEnvBool("HUNTER_IRAN_ASSETS_ENABLED", true);
+    if (!enabled) {
+        updateExtra("enabled", "false");
+        updateExtra("reason", "disabled");
+        return;
+    }
+
+    const std::string asset_dir = iranAssetDirFor(orch_);
+    const int timeout_ms = std::max(4000, HunterConfig::getEnvInt("HUNTER_IRAN_ASSETS_TIMEOUT_MS", 15000));
+    const IranAssetsRefreshResult refresh = refreshIranAssets(orch_, timeout_ms);
+
+    download_count_++;
+    updateExtra("enabled", "true");
+    updateExtra("asset_dir", asset_dir);
+    updateExtra("files_total", std::to_string(refresh.files_total));
+    updateExtra("files_updated", std::to_string(refresh.files_updated));
+    updateExtra("files_unchanged", std::to_string(refresh.files_unchanged));
+    updateExtra("files_failed", std::to_string(refresh.files_failed));
+    updateExtra("transport", refresh.transport);
+    updateExtra("last_source", refresh.last_source);
+    updateExtra("reason", refresh.reason);
+    updateExtra("timeout_ms", std::to_string(timeout_ms));
+    updateExtra("downloads", std::to_string(download_count_));
+    updateExtra("last_sync_ts", std::to_string(utils::nowTimestamp()));
+
+    std::ostringstream line;
+    line << "[IranAssets] dir=" << asset_dir
+         << " updated=" << refresh.files_updated
+         << " unchanged=" << refresh.files_unchanged
+         << " failed=" << refresh.files_failed
+         << " reason=" << refresh.reason;
+    if (!refresh.transport.empty()) line << " transport=" << refresh.transport;
+    if (!refresh.last_source.empty()) line << " source=" << refresh.last_source;
+    utils::LogRingBuffer::instance().push(line.str());
+
+    const int env_interval = HunterConfig::getEnvInt("HUNTER_IRAN_ASSETS_INTERVAL_S", -1);
+    if (env_interval > 0) interval_seconds = env_interval;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -1025,18 +1267,24 @@ ThreadManager::ThreadManager(HunterOrchestrator* orch) : orch_(orch) {
     balancer_ = std::make_unique<BalancerWorker>(orch, stop_event_);
     harvester_ = std::make_unique<HarvesterWorker>(orch, stop_event_);
     github_downloader_ = std::make_unique<GitHubDownloaderWorker>(orch, stop_event_);
+    iran_assets_ = std::make_unique<IranAssetsWorker>(orch, stop_event_);
     validator_ = std::make_unique<ValidatorWorker>(orch, stop_event_);
     dpi_pressure_ = std::make_unique<DpiPressureWorker>(orch, stop_event_);
     import_watcher_ = std::make_unique<ImportWatcherWorker>(orch, stop_event_);
 
     all_workers_ = {
         scanner_.get(), telegram_.get(), balancer_.get(),
-        harvester_.get(), github_downloader_.get(), validator_.get(),
+        harvester_.get(), github_downloader_.get(), iran_assets_.get(), validator_.get(),
         dpi_pressure_.get(), import_watcher_.get()
     };
 
     health_ = std::make_unique<HealthMonitorWorker>(stop_event_, all_workers_);
     all_workers_.insert(all_workers_.begin(), health_.get());
+    for (auto* w : all_workers_) {
+        w->setPauseCallback([this]() {
+            return orch_ && orch_->isPaused();
+        });
+    }
 }
 
 ThreadManager::~ThreadManager() {

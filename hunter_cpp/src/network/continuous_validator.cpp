@@ -7,6 +7,9 @@
 #include <algorithm>
 #include <numeric>
 #include <iostream>
+#include <fstream>
+#include <sstream>
+#include <iomanip>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -90,7 +93,7 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
 }
 
 void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float latency_ms,
-                                  const std::string& engine_used) {
+                                  const std::string& engine_used, bool force_dead) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string hash = hashUri(uri);
     auto it = db_.find(hash);
@@ -112,7 +115,8 @@ void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float late
         rec.total_passes++;
         rec.last_alive_time = rec.last_tested;
     } else {
-        rec.consecutive_fails++;
+        if (force_dead) rec.consecutive_fails = 3;
+        else rec.consecutive_fails++;
         if (rec.consecutive_fails >= 3) {
             rec.alive = false;
             rec.latency_ms = 0.0f;
@@ -151,9 +155,19 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
             candidates.push_back({&rec, boosted, 2, rec.total_tests});
             continue;
         }
-        // Priority 3: failed configs with < 5 consecutive fails, stale > 60s
-        if (!rec.alive && rec.consecutive_fails < 5 && (now - rec.last_tested) > 60.0) {
-            candidates.push_back({&rec, boosted, 3, rec.total_tests});
+        // Priority 3: failed configs — backoff based on consecutive failures
+        if (!rec.alive && rec.consecutive_fails > 0) {
+            double backoff_s;
+            if (rec.consecutive_fails >= 10) {
+                backoff_s = 1800.0; // 30 min for heavily-failing configs
+            } else if (rec.consecutive_fails >= 5) {
+                backoff_s = 300.0;  // 5 min for moderately-failing configs
+            } else {
+                backoff_s = 60.0;   // 1 min for recently-failing configs
+            }
+            if ((now - rec.last_tested) > backoff_s) {
+                candidates.push_back({&rec, boosted, 3, rec.total_tests});
+            }
             continue;
         }
     }
@@ -353,6 +367,119 @@ int ConfigDatabase::clearOlderThan(int max_age_hours) {
     return removed;
 }
 
+int ConfigDatabase::clearAlive() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    int removed = 0;
+    for (auto it = db_.begin(); it != db_.end(); ) {
+        if (it->second.alive) {
+            it = db_.erase(it);
+            removed++;
+        } else {
+            ++it;
+        }
+    }
+    return removed;
+}
+
+int ConfigDatabase::removeUris(const std::set<std::string>& uris) {
+    if (uris.empty()) return 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+    int removed = 0;
+    for (const auto& uri : uris) {
+        const std::string hash = hashUri(uri);
+        auto it = db_.find(hash);
+        if (it != db_.end()) {
+            db_.erase(it);
+            removed++;
+        }
+    }
+    return removed;
+}
+
+int ConfigDatabase::saveToDisk(const std::string& filepath) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    try { utils::mkdirRecursive(utils::dirName(filepath)); } catch (...) {}
+    std::ofstream ofs(filepath, std::ios::binary);
+    if (!ofs) return 0;
+    // Header line
+    ofs << "#HUNTER_CONFIG_DB_V1\n";
+    int saved = 0;
+    for (const auto& [hash, rec] : db_) {
+        if (rec.uri.empty()) continue;
+        // Tab-separated: uri \t tag \t engine_used \t first_seen \t last_tested \t last_alive_time
+        //                \t alive \t latency_ms \t consecutive_fails \t total_tests \t total_passes
+        ofs << rec.uri << '\t'
+            << rec.tag << '\t'
+            << rec.engine_used << '\t'
+            << std::fixed << rec.first_seen << '\t'
+            << rec.last_tested << '\t'
+            << rec.last_alive_time << '\t'
+            << (rec.alive ? 1 : 0) << '\t'
+            << rec.latency_ms << '\t'
+            << rec.consecutive_fails << '\t'
+            << rec.total_tests << '\t'
+            << rec.total_passes << '\n';
+        saved++;
+    }
+    return saved;
+}
+
+int ConfigDatabase::loadFromDisk(const std::string& filepath) {
+    std::ifstream ifs(filepath, std::ios::binary);
+    if (!ifs) return 0;
+
+    std::string line;
+    // Check header
+    if (!std::getline(ifs, line)) return 0;
+    if (line.find("#HUNTER_CONFIG_DB_V1") == std::string::npos) {
+        // Legacy format or corrupted — skip
+        return 0;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    int loaded = 0;
+    while (std::getline(ifs, line)) {
+        if (line.empty() || line[0] == '#') continue;
+        // Parse tab-separated fields
+        std::vector<std::string> fields;
+        std::istringstream ss(line);
+        std::string field;
+        while (std::getline(ss, field, '\t')) {
+            fields.push_back(field);
+        }
+        if (fields.size() < 11) continue;
+
+        std::string uri = fields[0];
+        if (uri.empty() || uri.find("://") == std::string::npos) continue;
+
+        std::string hash = hashUri(uri);
+        if (db_.find(hash) != db_.end()) continue; // already exists
+        if ((int)db_.size() >= max_size_) break;
+
+        ConfigHealthRecord rec;
+        rec.uri = uri;
+        rec.uri_hash = hash;
+        rec.tag = fields[1];
+        rec.engine_used = fields[2];
+        try {
+            rec.first_seen = std::stod(fields[3]);
+            rec.last_tested = std::stod(fields[4]);
+            rec.last_alive_time = std::stod(fields[5]);
+            rec.alive = (std::stoi(fields[6]) != 0);
+            rec.latency_ms = std::stof(fields[7]);
+            rec.consecutive_fails = std::stoi(fields[8]);
+            rec.total_tests = std::stoi(fields[9]);
+            rec.total_passes = std::stoi(fields[10]);
+        } catch (...) {
+            continue; // malformed line, skip
+        }
+        rec.needs_retest = true; // always retest after loading from disk
+        db_[hash] = rec;
+        loaded++;
+    }
+    return loaded;
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // ContinuousValidator
 // ═══════════════════════════════════════════════════════════════════
@@ -362,18 +489,17 @@ ContinuousValidator::ContinuousValidator(ConfigDatabase& db, int batch_size,
     : db_(db), batch_size_(batch_size), timeout_s_(timeout_s), max_concurrent_(max_concurrent) {}
 
 bool ContinuousValidator::quickCheck(const std::string& uri) {
-    // Use real proxy testing with cachefly download
+    // Require real download-capable success only
     ProxyTester tester;
     tester.setXrayPath("bin/xray.exe");
     tester.setSingBoxPath("bin/sing-box.exe");
     tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
     
-    ProxyTestResult result = tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", timeout_s_);
-    return result.success;
+    ProxyTestResult result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s_);
+    return result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
 }
 
 std::pair<int, int> ContinuousValidator::validateBatch() {
-    // Use larger batches - TCP pre-screening skips dead servers fast
     int effective_batch = std::min(batch_size_, 50);
     auto batch = db_.getUntestedBatch(effective_batch);
     if (batch.empty()) return {0, 0};
@@ -383,19 +509,44 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
 
     int tested = 0, passed = 0;
     auto& mgr = HunterTaskManager::instance();
-
-    // Process in chunks sized by user speed settings (max_concurrent_)
-    size_t vchunk = (size_t)std::max(1, std::min(50, max_concurrent_));
     int test_timeout = std::max(1, std::min(30, timeout_s_));
 
-    { std::ostringstream _ls; _ls << "[Validator] Speed: concurrency=" << vchunk << " timeout=" << test_timeout << "s";
+    // ═══ Split: xray-compatible → batch test, others → individual ═══
+    std::vector<std::string> xray_uris;
+    std::vector<std::string> other_uris;
+    for (auto& rec : batch) {
+        bool needs_individual = (rec.uri.find("hysteria2://") == 0 || rec.uri.find("tuic://") == 0);
+        if (needs_individual) other_uris.push_back(rec.uri);
+        else xray_uris.push_back(rec.uri);
+    }
+
+    // ═══ Primary: batch test with single xray process (v2rayN pattern) ═══
+    if (!xray_uris.empty()) {
+        static std::atomic<int> s_batch_offset{0};
+        int base = 29100 + (s_batch_offset.fetch_add((int)xray_uris.size() + 10) % 400);
+
+        ProxyTester batch_tester;
+        batch_tester.setXrayPath("bin/xray.exe");
+        auto results = batch_tester.batchTestWithXray(xray_uris, base, test_timeout);
+        for (auto& r : results) {
+            bool full_success = r.success && !r.telegram_only && r.download_speed_kbps > 0.0f;
+            tested++;
+            if (full_success) passed++;
+            db_.updateHealth(r.uri, full_success, full_success ? r.download_speed_kbps : 0.0f, r.engine_used);
+        }
+    }
+
+    // ═══ Fallback: individual test for non-xray protocols ═══
+    size_t vchunk = (size_t)std::max(1, std::min(50, max_concurrent_));
+
+    { std::ostringstream _ls; _ls << "[Validator] Batch: " << xray_uris.size() << " xray, " << other_uris.size() << " individual";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
-    for (size_t off = 0; off < batch.size(); off += vchunk) {
-        size_t chunk_end = std::min(off + vchunk, batch.size());
+    for (size_t off = 0; off < other_uris.size(); off += vchunk) {
+        size_t chunk_end = std::min(off + vchunk, other_uris.size());
         std::vector<std::future<std::tuple<std::string, bool, float, std::string>>> futures;
         for (size_t i = off; i < chunk_end; i++) {
-            std::string uri = batch[i].uri;
+            std::string uri = other_uris[i];
             int timeout_cap = test_timeout;
             futures.push_back(mgr.submitIO([uri, timeout_cap]() -> std::tuple<std::string, bool, float, std::string> {
                 ProxyTester local_tester;
@@ -403,10 +554,9 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
                 local_tester.setSingBoxPath("bin/sing-box.exe");
                 local_tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
                 
-                ProxyTestResult result = local_tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", timeout_cap);
-                // Only count as alive if actual HTTP download succeeded (not telegram-only)
-                bool real_success = result.success && !result.telegram_only;
-                return {uri, real_success, result.download_speed_kbps, result.engine_used};
+                ProxyTestResult result = local_tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_cap);
+                bool is_alive = result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
+                return {uri, is_alive, is_alive ? result.download_speed_kbps : 0.0f, result.engine_used};
             }));
         }
 

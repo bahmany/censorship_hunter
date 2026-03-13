@@ -11,6 +11,7 @@ import 'theme.dart';
 import 'models.dart';
 import 'services.dart';
 import 'widgets/dashboard_section.dart';
+import 'widgets/statistics_section.dart';
 import 'widgets/configs_section.dart';
 import 'widgets/logs_section.dart';
 import 'widgets/docs_section.dart';
@@ -206,6 +207,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   int _logBytes = 0;
   bool _autoScroll = true;
   Timer? _refreshTimer;
+  Timer? _uiStatePersistTimer;
   bool _refreshing = false;
   DateTime? _lastRefresh;
   final List<String> _recentLogOrder = <String>[];
@@ -240,6 +242,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
 
   // ── Pause / Speed Controls ──
   bool _isPaused = false;
+  bool _liveRecheckInFlight = false;
   String _speedProfile = 'medium';
   int _speedThreads = 10;
   int _speedTimeout = 5;
@@ -288,6 +291,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _initTray();
     _loadConfigSettings();
     _checkSystemProxy();
+    _registerUiStateListeners();
   }
 
   @override
@@ -296,6 +300,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _ignitionCtl.dispose();
     windowManager.removeListener(this);
     _refreshTimer?.cancel();
+    _uiStatePersistTimer?.cancel();
     _realtimeHeartbeatTimer?.cancel();
     _noticeTimer?.cancel();
     _stdoutSub?.cancel();
@@ -410,18 +415,52 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _quietRealtimeCommands.clear();
   }
 
+  Duration _commandTimeoutFor(String commandName) {
+    switch (commandName) {
+      case 'ping':
+        return const Duration(seconds: 8);
+      case 'pause':
+      case 'resume':
+      case 'get_status':
+      case 'clear_old':
+      case 'clear_alive':
+      case 'remove_configs':
+      case 'set_speed':
+      case 'set_threads':
+      case 'set_timeout':
+      case 'speed_profile':
+      case 'update_runtime_settings':
+      case 'add_configs':
+      case 'export_config_db':
+        return const Duration(seconds: 30);
+      case 'run_cycle':
+      case 'refresh_ports':
+      case 'reprovision_ports':
+      case 'load_raw_files':
+      case 'load_bundle_files':
+      case 'detect_censorship':
+        return const Duration(minutes: 2);
+      case 'import_config_file':
+      case 'recheck_live_ports':
+        return const Duration(minutes: 10);
+      default:
+        return const Duration(minutes: 2);
+    }
+  }
+
   void _registerRealtimePendingCommand(
     String requestId,
     String commandName, {
     bool quiet = false,
-    Duration timeout = const Duration(seconds: 8),
+    Duration? timeout,
   }) {
     _clearRealtimePendingCommand(requestId);
     _pendingRealtimeCommands[requestId] = commandName;
     if (quiet) {
       _quietRealtimeCommands.add(requestId);
     }
-    _pendingRealtimeTimeouts[requestId] = Timer(timeout, () {
+    final Duration effectiveTimeout = timeout ?? _commandTimeoutFor(commandName);
+    _pendingRealtimeTimeouts[requestId] = Timer(effectiveTimeout, () {
       final String? pendingCommand = _pendingRealtimeCommands.remove(requestId);
       final bool wasQuiet = _quietRealtimeCommands.remove(requestId);
       _pendingRealtimeTimeouts.remove(requestId);
@@ -537,6 +576,11 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
           _clearRealtimePendingCommand(requestId);
         }
         final String resultMessage = result['message'] is String ? result['message'] as String : '';
+        final Map<String, dynamic>? data = result['data'] is Map<String, dynamic>
+            ? Map<String, dynamic>.from(result['data'] as Map<String, dynamic>)
+            : (event['data'] is Map<String, dynamic>)
+                ? Map<String, dynamic>.from(event['data'] as Map<String, dynamic>)
+                : null;
         if (status != null) {
           _applyRealtimeStatusSnapshot(Map<String, dynamic>.from(status));
         }
@@ -560,7 +604,22 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         if (!quiet && !ok && mounted) {
           setState(() => _lastError = resultMessage.isEmpty ? 'Command failed: $command' : resultMessage);
         }
-        if (ok && (command == 'import_config_file' || command == 'add_configs')) {
+        if (ok && command == 'recheck_live_ports' && data != null) {
+          if (mounted) {
+            setState(() => _liveRecheckInFlight = false);
+          }
+          _showNotice(
+            'Deep live recheck completed. Hunter is paused pending your decision.',
+            color: C.neonAmber,
+            icon: Icons.pause_circle_outline,
+            duration: const Duration(seconds: 5),
+          );
+          unawaited(_showLiveRecheckDecisionDialog(data));
+        }
+        if (!ok && command == 'recheck_live_ports' && mounted) {
+          setState(() => _liveRecheckInFlight = false);
+        }
+        if (ok && (command == 'import_config_file' || command == 'add_configs' || command == 'remove_configs')) {
           unawaited(_refresh());
         }
         return;
@@ -964,6 +1023,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       _selectedDocContent = content;
       _nav = HunterNavSection.docs;
     });
+    _scheduleUiStatePersist();
   }
 
   // ━━━━━ CLI Process ━━━━━
@@ -1017,11 +1077,13 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       unawaited(p.exitCode.then((int code) {
         _log('sys', 'Process exited: $code');
         _realtimeDesired = false;
+        _pulseCtl.stop();
         unawaited(_disconnectRealtimeSockets());
         _clearAllRealtimePendingCommands();
         if (mounted) setState(() { _process = null; _workingDir = null; _state = HunterRunState.stopped; });
       }));
       unawaited(_connectRealtimeSockets());
+      _pulseCtl.repeat(reverse: true);
       setState(() => _state = HunterRunState.running);
     } catch (e) {
       _pulseCtl.stop();
@@ -1120,6 +1182,111 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         }
       });
     });
+  }
+
+  Future<void> _showLiveRecheckDecisionDialog(Map<String, dynamic> data) async {
+    if (!mounted) return;
+    final int tested = (data['tested'] as num?)?.toInt() ?? 0;
+    final int passed = (data['passed'] as num?)?.toInt() ?? 0;
+    final int failed = (data['failed'] as num?)?.toInt() ?? 0;
+    final bool wasPausedBefore = data['was_paused_before'] == true;
+    final List<String> failedUris = (data['failed_uris'] is List)
+        ? (data['failed_uris'] as List<dynamic>).whereType<String>().toList(growable: false)
+        : const <String>[];
+    final List<String> testedUris = (data['tested_uris'] is List)
+        ? (data['tested_uris'] as List<dynamic>).whereType<String>().toList(growable: false)
+        : const <String>[];
+    final String? action = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (BuildContext ctx) {
+        final String resumeLabel = wasPausedBefore ? 'KEEP PAUSED' : 'CONTINUE';
+        return AlertDialog(
+          backgroundColor: C.card,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14), side: const BorderSide(color: C.border)),
+          title: const Text('LIVE RECHECK COMPLETE', style: TextStyle(color: C.txt1, fontWeight: FontWeight.w800)),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text('Tested $tested live configs using temporary engine ports.', style: const TextStyle(color: C.txt2)),
+              const SizedBox(height: 12),
+              Text('Passed: $passed', style: const TextStyle(color: C.neonGreen, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 4),
+              Text('Failed: $failed', style: const TextStyle(color: C.neonRed, fontWeight: FontWeight.w700)),
+              const SizedBox(height: 12),
+              Text(
+                wasPausedBefore
+                    ? 'Hunter was already paused before this test and is still paused.'
+                    : 'Hunter was paused for this test and is still waiting for your decision.',
+                style: const TextStyle(color: C.txt3, fontSize: 12),
+              ),
+            ],
+          ),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(ctx).pop('keep'),
+              child: Text(resumeLabel, style: const TextStyle(color: C.txt2)),
+            ),
+            if (failedUris.isNotEmpty)
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop('clear_dead'),
+                child: const Text('CLEAR DEAD', style: TextStyle(color: C.neonRed)),
+              ),
+            if (testedUris.isNotEmpty)
+              TextButton(
+                onPressed: () => Navigator.of(ctx).pop('clear_all'),
+                child: const Text('CLEAR ALL TESTED', style: TextStyle(color: C.neonAmber)),
+              ),
+          ],
+        );
+      },
+    );
+    if (!mounted) return;
+    if (action == 'clear_dead') {
+      _sendCommand(<String, dynamic>{
+        'command': 'remove_configs',
+        'uris_text': failedUris.join('\n'),
+      });
+      if (!wasPausedBefore) {
+        _sendCommand(<String, dynamic>{'command': 'resume'});
+      }
+      _showNotice(
+        'Removed $failed dead configs after live recheck.',
+        color: C.neonRed,
+        icon: Icons.delete_outline,
+        duration: const Duration(seconds: 5),
+      );
+    } else if (action == 'clear_all') {
+      _sendCommand(<String, dynamic>{
+        'command': 'remove_configs',
+        'uris_text': testedUris.join('\n'),
+      });
+      if (!wasPausedBefore) {
+        _sendCommand(<String, dynamic>{'command': 'resume'});
+      }
+      _showNotice(
+        'Removed $tested tested configs after live recheck.',
+        color: C.neonAmber,
+        icon: Icons.delete_sweep_outlined,
+        duration: const Duration(seconds: 5),
+      );
+    } else if (!wasPausedBefore) {
+      _sendCommand(<String, dynamic>{'command': 'resume'});
+      _showNotice(
+        'Live recheck finished. Hunter resumed without cleanup.',
+        color: C.neonGreen,
+        icon: Icons.play_arrow_rounded,
+        duration: const Duration(seconds: 4),
+      );
+    } else {
+      _showNotice(
+        'Live recheck finished. Hunter remains paused.',
+        color: C.neonAmber,
+        icon: Icons.pause_circle_outline,
+        duration: const Duration(seconds: 4),
+      );
+    }
   }
 
   Widget _buildNoticeBanner() {
@@ -1294,8 +1461,143 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         } else if (_githubUrls.text.isEmpty) {
           _githubUrls.text = _defaultGithubUrls().join('\n');
         }
+        final Map<String, dynamic>? uiDrafts = decoded['ui_drafts'] is Map<String, dynamic>
+            ? decoded['ui_drafts'] as Map<String, dynamic>
+            : null;
+        if (uiDrafts != null) {
+          void loadDraft(String key, TextEditingController controller) {
+            final dynamic value = uiDrafts[key];
+            if (value != null) controller.text = value.toString();
+          }
+          loadDraft('search', _searchCtl);
+          loadDraft('manual_config', _manualConfigCtl);
+          loadDraft('xray_path', _xrayPath);
+          loadDraft('singbox_path', _singboxPath);
+          loadDraft('mihomo_path', _mihomoPath);
+          loadDraft('tor_path', _torPath);
+          loadDraft('multiproxy_port', _multiproxyPort);
+          loadDraft('gemini_port', _geminiPort);
+          loadDraft('max_total', _maxTotal);
+          loadDraft('max_workers', _maxWorkers);
+          loadDraft('scan_limit', _scanLimit);
+          loadDraft('sleep_seconds', _sleepSeconds);
+          loadDraft('telegram_api_id', _tgApiId);
+          loadDraft('telegram_api_hash', _tgApiHash);
+          loadDraft('telegram_phone', _tgPhone);
+          loadDraft('telegram_targets', _tgTargets);
+          loadDraft('telegram_limit', _tgLimit);
+          loadDraft('telegram_timeout_ms', _tgTimeout);
+          loadDraft('github_urls', _githubUrls);
+        }
+        final String? navName = decoded['ui_last_nav'] as String?;
+        _nav = _navFromName(navName);
+        final String? kindName = decoded['ui_last_config_kind'] as String?;
+        _configKind = _configKindFromName(kindName);
+        _clearAgeHours = (decoded['ui_clear_age_hours'] as num?)?.toInt() ?? _clearAgeHours;
+        final String? selectedDocPath = decoded['ui_selected_doc_path'] as String?;
+        if (selectedDocPath != null && selectedDocPath.trim().isNotEmpty) {
+          _selectedDocPath = selectedDocPath;
+        }
+        _draftSpeedProfile = (decoded['ui_draft_speed_profile'] as String?) ?? _draftSpeedProfile;
+        _draftSpeedThreads = (decoded['ui_draft_speed_threads'] as num?)?.toInt() ?? _draftSpeedThreads;
+        _draftSpeedTimeout = (decoded['ui_draft_speed_timeout'] as num?)?.toInt() ?? _draftSpeedTimeout;
       });
     } catch (_) {}
+  }
+
+  Map<String, dynamic> _uiDraftsPayload() {
+    return <String, dynamic>{
+      'search': _searchCtl.text,
+      'manual_config': _manualConfigCtl.text,
+      'xray_path': _xrayPath.text,
+      'singbox_path': _singboxPath.text,
+      'mihomo_path': _mihomoPath.text,
+      'tor_path': _torPath.text,
+      'multiproxy_port': _multiproxyPort.text,
+      'gemini_port': _geminiPort.text,
+      'max_total': _maxTotal.text,
+      'max_workers': _maxWorkers.text,
+      'scan_limit': _scanLimit.text,
+      'sleep_seconds': _sleepSeconds.text,
+      'telegram_api_id': _tgApiId.text,
+      'telegram_api_hash': _tgApiHash.text,
+      'telegram_phone': _tgPhone.text,
+      'telegram_targets': _tgTargets.text,
+      'telegram_limit': _tgLimit.text,
+      'telegram_timeout_ms': _tgTimeout.text,
+      'github_urls': _githubUrls.text,
+    };
+  }
+
+  HunterNavSection _navFromName(String? name) {
+    for (final HunterNavSection section in HunterNavSection.values) {
+      if (section.name == name) return section;
+    }
+    return HunterNavSection.dashboard;
+  }
+
+  HunterConfigListKind _configKindFromName(String? name) {
+    for (final HunterConfigListKind kind in HunterConfigListKind.values) {
+      if (kind.name == name) return kind;
+    }
+    return HunterConfigListKind.alive;
+  }
+
+  void _registerUiStateListeners() {
+    for (final TextEditingController controller in <TextEditingController>[
+      _searchCtl,
+      _manualConfigCtl,
+      _xrayPath,
+      _singboxPath,
+      _mihomoPath,
+      _torPath,
+      _multiproxyPort,
+      _geminiPort,
+      _maxTotal,
+      _maxWorkers,
+      _scanLimit,
+      _sleepSeconds,
+      _tgApiId,
+      _tgApiHash,
+      _tgPhone,
+      _tgTargets,
+      _tgLimit,
+      _tgTimeout,
+      _githubUrls,
+    ]) {
+      controller.addListener(_scheduleUiStatePersist);
+    }
+  }
+
+  void _scheduleUiStatePersist() {
+    _uiStatePersistTimer?.cancel();
+    _uiStatePersistTimer = Timer(const Duration(milliseconds: 350), () {
+      unawaited(_persistUiState());
+    });
+  }
+
+  Future<void> _persistUiState() async {
+    final Directory wd = _effectiveWd();
+    final String path = absPathInWorkingDir(wd, _configPath.text);
+    if (path.isEmpty) return;
+    final File f = File(path);
+    Map<String, dynamic> root = <String, dynamic>{};
+    try {
+      if (f.existsSync()) {
+        final dynamic d = jsonDecode(await f.readAsString());
+        if (d is Map<String, dynamic>) root = d;
+      }
+    } catch (_) {}
+    root['ui_last_nav'] = _nav.name;
+    root['ui_last_config_kind'] = _configKind.name;
+    root['ui_clear_age_hours'] = _clearAgeHours;
+    root['ui_selected_doc_path'] = _selectedDocPath;
+    root['ui_draft_speed_profile'] = _draftSpeedProfile;
+    root['ui_draft_speed_threads'] = _draftSpeedThreads;
+    root['ui_draft_speed_timeout'] = _draftSpeedTimeout;
+    root['ui_drafts'] = _uiDraftsPayload();
+    await f.parent.create(recursive: true);
+    await f.writeAsString(jsonEncode(root), flush: true);
   }
 
   List<String> _defaultGithubUrls() {
@@ -1443,6 +1745,26 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _sendCommand(<String, dynamic>{'command': 'refresh_ports'});
   }
 
+  void _recheckLiveProvisionedPortsNow() {
+    if (_liveRecheckInFlight) {
+      _showNotice(
+        'A live recheck is already running...',
+        color: C.neonAmber,
+        icon: Icons.hourglass_top_rounded,
+        duration: const Duration(seconds: 3),
+      );
+      return;
+    }
+    setState(() => _liveRecheckInFlight = true);
+    _sendCommand(<String, dynamic>{'command': 'recheck_live_ports'});
+    _showNotice(
+      'Pausing Hunter and deep-testing live configs with temporary engine ports...',
+      color: C.neonAmber,
+      icon: Icons.pause_circle_outline,
+      duration: const Duration(seconds: 5),
+    );
+  }
+
   void _reprovisionPortsNow() {
     _sendCommand(<String, dynamic>{'command': 'reprovision_ports'});
   }
@@ -1543,6 +1865,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       _draftSpeedThreads = _presetThreadsFor(profile);
       _draftSpeedTimeout = _presetTimeoutFor(profile);
     });
+    _scheduleUiStatePersist();
   }
 
   void _setThreads(int val) {
@@ -1550,6 +1873,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       _draftSpeedThreads = val;
       _draftSpeedProfile = 'custom';
     });
+    _scheduleUiStatePersist();
   }
 
   void _setTimeout(int val) {
@@ -1557,6 +1881,20 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       _draftSpeedTimeout = val;
       _draftSpeedProfile = 'custom';
     });
+    _scheduleUiStatePersist();
+  }
+
+  void _setConfigKind(HunterConfigListKind kind) {
+    setState(() {
+      _configKind = kind;
+      _searchCtl.clear();
+    });
+    _scheduleUiStatePersist();
+  }
+
+  void _setClearAgeHours(int value) {
+    setState(() => _clearAgeHours = value);
+    _scheduleUiStatePersist();
   }
 
   void _applySpeedChanges() {
@@ -1587,6 +1925,13 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     _sendCommand({'command': 'clear_old', 'hours': _clearAgeHours});
     if (mounted) {
       _showNotice('Clearing configs older than $_clearAgeHours hours...', color: C.neonAmber, icon: Icons.cleaning_services_outlined);
+    }
+  }
+
+  void _clearAliveConfigs() {
+    _sendCommand({'command': 'clear_alive'});
+    if (mounted) {
+      _showNotice('Clearing persisted alive configs and proxy pools...', color: C.neonRed, icon: Icons.delete_sweep_outlined);
     }
   }
 
@@ -1784,47 +2129,55 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       if (kind != null) _configKind = kind;
       _searchCtl.clear();
     });
+    _scheduleUiStatePersist();
   }
 
   // ━━━━━ Build ━━━━━
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      body: LayoutBuilder(
-        builder: (BuildContext context, BoxConstraints shellConstraints) {
-          final bool compactShell = shellConstraints.maxWidth < 1100;
-          if (compactShell) {
-            return Column(
-              children: <Widget>[
-                _buildTopBar(context),
-                AnimatedSwitcher(duration: const Duration(milliseconds: 180), child: _buildNoticeBanner()),
-                Expanded(child: _buildContent(context, 0.0)),
-                _buildCompactNavBar(context),
-              ],
-            );
-          }
-          return Row(
-            children: <Widget>[
-              _buildSidebar(context),
-              Expanded(
-                child: Column(
+    return AnimatedBuilder(
+      animation: _pulseCtl,
+      builder: (BuildContext context, Widget? child) {
+        final double pulseValue = _state == HunterRunState.running ? _pulseAnim.value : 0.0;
+        return Scaffold(
+          body: LayoutBuilder(
+            builder: (BuildContext context, BoxConstraints shellConstraints) {
+              final bool compactShell = shellConstraints.maxWidth < 1100;
+              if (compactShell) {
+                return Column(
                   children: <Widget>[
-                    _buildTopBar(context),
+                    _buildTopBar(context, pulseValue),
                     AnimatedSwitcher(duration: const Duration(milliseconds: 180), child: _buildNoticeBanner()),
-                    Expanded(child: _buildContent(context, 0.0)),
+                    Expanded(child: _buildContent(context, pulseValue)),
+                    _buildCompactNavBar(context, pulseValue),
                   ],
-                ),
-              ),
-            ],
-          );
-        },
-      ),
+                );
+              }
+              return Row(
+                children: <Widget>[
+                  _buildSidebar(context, pulseValue),
+                  Expanded(
+                    child: Column(
+                      children: <Widget>[
+                        _buildTopBar(context, pulseValue),
+                        AnimatedSwitcher(duration: const Duration(milliseconds: 180), child: _buildNoticeBanner()),
+                        Expanded(child: _buildContent(context, pulseValue)),
+                      ],
+                    ),
+                  ),
+                ],
+              );
+            },
+          ),
+        );
+      },
     );
   }
 
   List<(HunterNavSection, IconData, String)> _navEntries() {
     return <(HunterNavSection, IconData, String)>[
       (HunterNavSection.dashboard, Icons.speed, 'Dashboard'),
+      (HunterNavSection.statistics, Icons.hub_outlined, 'Statistics'),
       (HunterNavSection.configs, Icons.vpn_key, 'Configs'),
       (HunterNavSection.logs, Icons.terminal, 'Logs'),
       (HunterNavSection.docs, Icons.menu_book_rounded, 'Docs'),
@@ -1833,8 +2186,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     ];
   }
 
-  Widget _buildSidebar(BuildContext context) {
-    final double pulseVal = 0.0;
+  Widget _buildSidebar(BuildContext context, double pulseVal) {
     return Container(
       width: 56,
       decoration: BoxDecoration(
@@ -1900,7 +2252,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         message: item.$3,
         preferBelow: false,
         child: InkWell(
-          onTap: () => setState(() => _nav = item.$1),
+          onTap: () => _navigate(item.$1),
           child: Container(
             width: 56, height: 48,
             decoration: BoxDecoration(
@@ -1918,8 +2270,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     }).toList();
   }
 
-  Widget _buildCompactNavBar(BuildContext context) {
-    final double pulseVal = 0.0;
+  Widget _buildCompactNavBar(BuildContext context, double pulseVal) {
     return SafeArea(
       top: false,
       child: Container(
@@ -1939,7 +2290,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
                 final bool selected = _nav == item.$1;
                 return Expanded(
                   child: InkWell(
-                    onTap: () => setState(() => _nav = item.$1),
+                    onTap: () => _navigate(item.$1),
                     child: AnimatedContainer(
                       duration: const Duration(milliseconds: 220),
                       curve: Curves.easeOutCubic,
@@ -1976,17 +2327,16 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     );
   }
 
-  Widget _buildTopBar(BuildContext context) {
+  Widget _buildTopBar(BuildContext context, double pulseVal) {
     final String title = switch (_nav) {
       HunterNavSection.dashboard => 'DASHBOARD',
+      HunterNavSection.statistics => 'STATISTICS',
       HunterNavSection.configs => 'CONFIGS',
       HunterNavSection.logs => 'LOGS',
       HunterNavSection.docs => 'DOCS',
       HunterNavSection.advanced => 'SETTINGS',
       HunterNavSection.about => 'ABOUT',
     };
-    final double pulseVal = 0.0;
-
     return GestureDetector(
       onPanStart: (_) => windowManager.startDragging(),
       onDoubleTap: () async {
@@ -2017,6 +2367,8 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
                   child: Text(title, key: ValueKey<String>(title),
                     style: const TextStyle(color: C.txt3, fontSize: 10, fontWeight: FontWeight.w600, letterSpacing: 2)),
                 ),
+                const SizedBox(width: 8),
+                Text('v$kDashboardVersion', style: TextStyle(color: C.txt3.withValues(alpha: 0.4), fontSize: 9, fontFamily: 'Consolas')),
                 if (_lastError != null) ...<Widget>[
                   const SizedBox(width: 12),
                   Expanded(
@@ -2046,6 +2398,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
                   color: C.neonGreen,
                   isActive: _state == HunterRunState.running,
                   isLoading: _state == HunterRunState.starting,
+                  pulseVal: pulseVal,
                   onPressed: _state == HunterRunState.stopped ? _start : null,
                 ),
                 _animatedActionButton(
@@ -2054,6 +2407,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
                   color: C.neonRed,
                   isActive: false,
                   isLoading: _state == HunterRunState.stopping,
+                  pulseVal: pulseVal,
                   onPressed: _state == HunterRunState.running ? _stop : null,
                 ),
                 Container(
@@ -2151,10 +2505,10 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
     required Color color,
     required bool isActive,
     required bool isLoading,
+    required double pulseVal,
     VoidCallback? onPressed,
   }) {
     final bool enabled = onPressed != null;
-    final double pulseVal = 0.0;
     return AnimatedContainer(
       duration: const Duration(milliseconds: 300),
       curve: Curves.easeOutCubic,
@@ -2234,6 +2588,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         onNavigate: _navigate,
         onCopyText: _copyText,
         onCopyLines: _copyLines,
+        pulseValue: pulseValue,
         provisionedPorts: _parseProvisionedPorts(),
         balancers: _parseBalancers(),
         activeSystemProxyPort: _activeSystemProxyPort,
@@ -2256,12 +2611,68 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         onTimeoutChanged: _setTimeout,
         onApplySpeedChanges: _applySpeedChanges,
         clearAgeHours: _clearAgeHours,
-        onClearAgeChanged: (int v) => setState(() => _clearAgeHours = v),
+        onClearAgeChanged: _setClearAgeHours,
         onClearOldConfigs: _clearOldConfigs,
+        onClearAliveConfigs: _clearAliveConfigs,
         manualConfigCtl: _manualConfigCtl,
         onAddManualConfigs: _addManualConfigs,
         onRunCycle: _runCycleNow,
         onRefreshProvisionedPorts: _refreshProvisionedPortsNow,
+        onRecheckLivePorts: _recheckLiveProvisionedPortsNow,
+        onReprovisionPorts: _reprovisionPortsNow,
+        onLoadRawFiles: _loadRawFilesNow,
+        onLoadBundleFiles: _loadBundleFilesNow,
+        onDetectCensorship: _detectCensorshipNow,
+      ),
+      HunterNavSection.statistics => StatisticsSection(
+        status: _status,
+        history: _history,
+        silverConfigs: _silverConfigs,
+        goldConfigs: _goldConfigs,
+        balancerConfigs: _balancerConfigs,
+        geminiConfigs: _geminiConfigs,
+        allCacheCount: _allCache.length,
+        githubCacheCount: _githubCache.length,
+        docsCount: _docs.length,
+        runState: _state,
+        engines: _engines,
+        lastRefresh: _lastRefresh,
+        lastActivityAt: _lastActivityAt,
+        refreshTick: _refreshTick,
+        logs: _logs,
+        onNavigate: _navigate,
+        onCopyText: _copyText,
+        onCopyLines: _copyLines,
+        pulseValue: pulseValue,
+        provisionedPorts: _parseProvisionedPorts(),
+        balancers: _parseBalancers(),
+        activeSystemProxyPort: _activeSystemProxyPort,
+        onSetSystemProxy: _setSystemProxy,
+        onClearSystemProxy: _clearSystemProxy,
+        isPaused: _isPaused,
+        onTogglePause: _togglePause,
+        speedProfile: _speedProfile,
+        speedThreads: _speedThreads,
+        speedTimeout: _speedTimeout,
+        draftSpeedProfile: _draftSpeedProfile,
+        draftSpeedThreads: _draftSpeedThreads,
+        draftSpeedTimeout: _draftSpeedTimeout,
+        hasPendingSpeedChanges: _hasPendingSpeedChanges,
+        speedApplyInFlight: _speedApplyInFlight,
+        projectedScanDuration: _projectedScanTimeForDraft(),
+        onSpeedProfile: _setSpeedProfile,
+        onThreadsChanged: _setThreads,
+        onTimeoutChanged: _setTimeout,
+        onApplySpeedChanges: _applySpeedChanges,
+        clearAgeHours: _clearAgeHours,
+        onClearAgeChanged: _setClearAgeHours,
+        onClearOldConfigs: _clearOldConfigs,
+        onClearAliveConfigs: _clearAliveConfigs,
+        manualConfigCtl: _manualConfigCtl,
+        onAddManualConfigs: _addManualConfigs,
+        onRunCycle: _runCycleNow,
+        onRefreshProvisionedPorts: _refreshProvisionedPortsNow,
+        onRecheckLivePorts: _recheckLiveProvisionedPortsNow,
         onReprovisionPorts: _reprovisionPortsNow,
         onLoadRawFiles: _loadRawFilesNow,
         onLoadBundleFiles: _loadBundleFilesNow,
@@ -2278,7 +2689,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         geminiConfigs: _geminiConfigs,
         allRecords: _allRecords,
         lastRefresh: _lastRefresh,
-        onKindChanged: (HunterConfigListKind k) => setState(() { _configKind = k; _searchCtl.clear(); }),
+        onKindChanged: _setConfigKind,
         onSearchChanged: () => setState(() {}),
         onRefresh: _refresh,
         onCopyText: _copyText,

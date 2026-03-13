@@ -170,6 +170,8 @@ public:
 
     // ─── Maintenance ───
     int clearOldConfigs(int max_age_hours = 168); // default 7 days
+    int clearAliveConfigs();
+    int removeConfigs(const std::set<std::string>& uris);
     void addManualConfigs(const std::vector<std::string>& uris);
 
     // ─── Dashboard ───
@@ -191,6 +193,7 @@ public:
     void provisionPorts();
     void stopProvisionedPorts();
     void refreshProvisionedPorts();
+    std::string recheckLiveProvisionedPorts();
     struct PortSlot {
         int port = 0;          // SOCKS port
         int http_port = 0;     // HTTP port (same as port in mixed mode)
@@ -267,6 +270,8 @@ private:
     int appendUniqueLines(const std::string& filepath,
                           const std::vector<std::string>& lines);
     int computeAdaptiveSleep();
+    void replaceProvisionedPortsLocked(const std::vector<int>& dead_indices, double now,
+                                       const std::set<std::string>& excluded_uris = {});
 };
 
 } // namespace hunter

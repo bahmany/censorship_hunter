@@ -67,7 +67,20 @@ Future<List<HunterLatencyConfig>> readLatencyConfigsFromJson(String absPath) asy
         String s => double.tryParse(s),
         _ => null,
       };
-      out.add(HunterLatencyConfig(uri: uri.trim(), latencyMs: latency, engineUsed: engineUsed));
+      final double? firstSeen = (row['first_seen'] is num) ? (row['first_seen'] as num).toDouble() : null;
+      final double? lastAlive = (row['last_alive'] is num) ? (row['last_alive'] as num).toDouble() : null;
+      final double? lastTested = (row['last_tested'] is num) ? (row['last_tested'] as num).toDouble() : null;
+      final int? totalTests = (row['total_tests'] is num) ? (row['total_tests'] as num).toInt() : null;
+      final int? totalPasses = (row['total_passes'] is num) ? (row['total_passes'] as num).toInt() : null;
+      final int? consecutiveFails = (row['consecutive_fails'] is num) ? (row['consecutive_fails'] as num).toInt() : null;
+      final bool? alive = (row['alive'] is bool) ? row['alive'] as bool : null;
+      final String? tag = (row['tag'] is String) ? row['tag'] as String : null;
+      out.add(HunterLatencyConfig(
+        uri: uri.trim(), latencyMs: latency, engineUsed: engineUsed,
+        firstSeen: firstSeen, lastAlive: lastAlive, lastTested: lastTested,
+        totalTests: totalTests, totalPasses: totalPasses,
+        consecutiveFails: consecutiveFails, alive: alive, tag: tag,
+      ));
     }
     return out;
   } catch (_) {

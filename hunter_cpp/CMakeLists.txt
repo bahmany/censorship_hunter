@@ -44,6 +44,7 @@ set(NETWORK_SOURCES
     src/network/proxy_tester.cpp
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp
+    src/network/sys_proxy.cpp
 )
 
 # ─── Proxy Library Sources ───
@@ -136,6 +137,7 @@ if(WIN32)
         gdi32
         ws2_32
         winhttp
+        wininet
     )
     target_compile_definitions(hunter_core PUBLIC CURL_STATICLIB)
 else()

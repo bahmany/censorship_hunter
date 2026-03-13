@@ -38,7 +38,7 @@ public:
      * @brief Update health status after a test
      */
     void updateHealth(const std::string& uri, bool alive, float latency_ms = 0.0f,
-                      const std::string& engine_used = "");
+                      const std::string& engine_used = "", bool force_dead = false);
 
     /**
      * @brief Get a batch of untested or stale configs
@@ -106,9 +106,35 @@ public:
     int clearOlderThan(int max_age_hours);
 
     /**
+     * @brief Remove currently alive configs from the database
+     * @return Number of configs removed
+     */
+    int clearAlive();
+
+    /**
+     * @brief Remove a specific set of configs from the database
+     * @return Number of configs removed
+     */
+    int removeUris(const std::set<std::string>& uris);
+
+    /**
      * @brief Current database size
      */
     int size() const;
+
+    /**
+     * @brief Save entire database to disk (JSON lines format)
+     * @param filepath Path to save file
+     * @return Number of records saved
+     */
+    int saveToDisk(const std::string& filepath) const;
+
+    /**
+     * @brief Load database from disk
+     * @param filepath Path to saved file
+     * @return Number of records loaded
+     */
+    int loadFromDisk(const std::string& filepath);
 
 private:
     int max_size_;

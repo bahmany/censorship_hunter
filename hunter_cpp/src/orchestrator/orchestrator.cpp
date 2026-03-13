@@ -20,6 +20,73 @@ namespace hunter {
 
 namespace {
 
+static const char* LIVE_RECHECK_URLS[] = {
+    "https://www.gstatic.com/generate_204",
+    "https://speed.cloudflare.com/__down?bytes=5120",
+    "https://cachefly.cachefly.net/1mb.test",
+};
+static constexpr int LIVE_RECHECK_URL_COUNT = 3;
+
+struct LiveRecheckItem {
+    std::string uri;
+    bool alive = false;
+    std::string engine_used;
+    float score = 0.0f;
+    std::string error;
+};
+
+std::string jsonEscape(const std::string& value) {
+    std::string escaped;
+    escaped.reserve(value.size() + 8);
+    for (char c : value) {
+        if (c == '"') escaped += "\\\"";
+        else if (c == '\\') escaped += "\\\\";
+        else if (c == '\n') escaped += "\\n";
+        else if (c == '\r') escaped += "\\r";
+        else if (c == '\t') escaped += "\\t";
+        else escaped.push_back(c);
+    }
+    return escaped;
+}
+
+std::string jsonStringArray(const std::vector<std::string>& values) {
+    std::ostringstream out;
+    out << "[";
+    bool first = true;
+    for (const auto& value : values) {
+        if (!first) out << ",";
+        first = false;
+        out << "\"" << jsonEscape(value) << "\"";
+    }
+    out << "]";
+    return out.str();
+}
+
+int reserveTemporaryListenPort() {
+    static std::mutex port_mutex;
+    static int next_port = 21000;
+    std::lock_guard<std::mutex> lock(port_mutex);
+    for (int attempts = 0; attempts < 12000; ++attempts) {
+        const int candidate = next_port++;
+        if (next_port > 45000) next_port = 21000;
+        if (!utils::isPortAlive(candidate, 100)) {
+            return candidate;
+        }
+    }
+    return 0;
+}
+
+float testProvisionedPortDownload(int port, int timeout_seconds) {
+    const int quick_timeout = std::max(3, std::min(timeout_seconds, 8));
+    const int download_timeout = std::max(8, timeout_seconds);
+    float speed = -1.0f;
+    for (int i = 0; i < LIVE_RECHECK_URL_COUNT && speed <= 0.0f; ++i) {
+        const int url_timeout = i == 0 ? quick_timeout : download_timeout;
+        speed = utils::downloadSpeedViaSocks5(LIVE_RECHECK_URLS[i], "127.0.0.1", port, url_timeout);
+    }
+    return speed;
+}
+
 bool isImportableProxyUri(const std::string& uri) {
     if (uri.size() < 10) return false;
     static const std::vector<std::string> schemes = {
@@ -117,6 +184,15 @@ void HunterOrchestrator::initComponents() {
 
     // Config database
     config_db_ = std::make_unique<network::ConfigDatabase>(constants::CONFIG_DB_MAX_SIZE);
+    
+    // Load persisted config database from disk (survives restarts)
+    {
+        std::string db_path = "runtime/HUNTER_config_db.tsv";
+        int db_loaded = config_db_->loadFromDisk(db_path);
+        if (db_loaded > 0) {
+            std::cout << "[Startup] Restored " << db_loaded << " configs from disk database" << std::endl;
+        }
+    }
 
     // Continuous validator
     continuous_validator_ = std::make_unique<network::ContinuousValidator>(*config_db_);
@@ -344,6 +420,7 @@ void HunterOrchestrator::start() {
     const std::string cmd_file = runtime_dir + "/hunter_command.json";
     int provision_tick = 0;
     int dashboard_tick = 0;
+    int db_save_tick = 0;
     while (!stop_requested_.load() && thread_manager_ && thread_manager_->isRunning()) {
         if (utils::fileExists(stop_flag)) {
             try { std::filesystem::remove(stop_flag); } catch (...) {}
@@ -383,6 +460,20 @@ void HunterOrchestrator::start() {
             try { refreshProvisionedPorts(); } catch (...) {}
         }
 
+        // Persist ConfigDB to disk every ~60s
+        if (++db_save_tick >= 30) {
+            db_save_tick = 0;
+            if (config_db_) {
+                try {
+                    int saved = config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
+                    if (saved > 0) {
+                        utils::LogRingBuffer::instance().push(
+                            "[DB] Persisted " + std::to_string(saved) + " configs to disk");
+                    }
+                } catch (...) {}
+            }
+        }
+
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
@@ -395,6 +486,15 @@ void HunterOrchestrator::start() {
 void HunterOrchestrator::stop() {
     stop_requested_ = true;
     paused_ = false;
+    
+    // Persist ConfigDB before shutdown
+    if (config_db_) {
+        try {
+            int saved = config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
+            std::cout << "[Shutdown] Saved " << saved << " configs to disk" << std::endl;
+        } catch (...) {}
+    }
+    
     if (thread_manager_) {
         thread_manager_->stopAll();
         thread_manager_.reset();
@@ -474,6 +574,138 @@ void HunterOrchestrator::applyAutoProfile(const std::string& level) {
 int HunterOrchestrator::clearOldConfigs(int max_age_hours) {
     if (!config_db_) return 0;
     return config_db_->clearOlderThan(max_age_hours);
+}
+
+int HunterOrchestrator::clearAliveConfigs() {
+    int removed = 0;
+    if (config_db_) {
+        removed = config_db_->clearAlive();
+        try {
+            config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
+        } catch (...) {}
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        last_good_configs_.clear();
+        cached_configs_["HUNTER_balancer_cache.json"].clear();
+        cached_configs_["HUNTER_gemini_balancer_cache.json"].clear();
+    }
+
+    if (balancer_) {
+        balancer_->clearForcedBackend();
+        balancer_->updateAvailableConfigs({}, true);
+    }
+    if (gemini_balancer_) {
+        gemini_balancer_->clearForcedBackend();
+        gemini_balancer_->updateAvailableConfigs({}, true);
+    }
+
+    stopProvisionedPorts();
+    saveBalancerCache("HUNTER_balancer_cache.json", {});
+    saveBalancerCache("HUNTER_gemini_balancer_cache.json", {});
+
+    try {
+        const std::string gold_path = config_.goldFile();
+        if (!gold_path.empty()) {
+            std::ofstream gold_out(gold_path, std::ios::trunc);
+        }
+        const std::string silver_path = config_.silverFile();
+        if (!silver_path.empty()) {
+            std::ofstream silver_out(silver_path, std::ios::trunc);
+        }
+    } catch (...) {}
+
+    utils::LogRingBuffer::instance().push(
+        "[Cmd] Cleared alive configs: db=" + std::to_string(removed) +
+        " and reset balancer/runtime live caches");
+    return removed;
+}
+
+int HunterOrchestrator::removeConfigs(const std::set<std::string>& uris) {
+    if (uris.empty()) return 0;
+
+    int removed = 0;
+    if (config_db_) {
+        removed = config_db_->removeUris(uris);
+        try {
+            config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
+        } catch (...) {}
+    }
+
+    auto filterLines = [&](const std::string& path) {
+        if (path.empty()) return;
+        std::vector<std::string> filtered;
+        for (const auto& line : utils::readLines(path)) {
+            if (uris.find(line) == uris.end()) filtered.push_back(line);
+        }
+        utils::writeLines(path, filtered);
+    };
+    filterLines(config_.goldFile());
+    filterLines(config_.silverFile());
+
+    auto filterPairs = [&](std::vector<std::pair<std::string, float>>& items) {
+        items.erase(std::remove_if(items.begin(), items.end(), [&](const auto& item) {
+            return uris.find(item.first) != uris.end();
+        }), items.end());
+    };
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        filterPairs(last_good_configs_);
+        for (auto& [name, items] : cached_configs_) {
+            filterPairs(items);
+        }
+        for (const auto& uri : uris) {
+            cached_engine_hints_.erase(uri);
+        }
+    }
+
+    auto filterBalancerPool = [&](proxy::MultiProxyServer* bal, const std::string& cache_name) {
+        if (!bal) return;
+        const auto pool = bal->getAvailableConfigsList();
+        std::vector<std::pair<std::string, float>> filtered;
+        filtered.reserve(pool.size());
+        for (const auto& entry : pool) {
+            if (uris.find(entry.uri) == uris.end()) {
+                filtered.emplace_back(entry.uri, entry.latency);
+            }
+        }
+        bal->updateAvailableConfigs(filtered, true);
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            cached_configs_[cache_name] = filtered;
+        }
+        saveBalancerCache(cache_name, filtered);
+    };
+    filterBalancerPool(balancer_.get(), "HUNTER_balancer_cache.json");
+    filterBalancerPool(gemini_balancer_.get(), "HUNTER_gemini_balancer_cache.json");
+
+    bool touched_ports = false;
+    {
+        std::lock_guard<std::mutex> lock(provision_mutex_);
+        for (auto& slot : provisioned_ports_) {
+            if (slot.uri.empty() || uris.find(slot.uri) == uris.end()) continue;
+            if (slot.pid > 0) runtime_engine_manager_.stopProcess(slot.pid);
+            slot.uri.clear();
+            slot.engine_used.clear();
+            slot.pid = -1;
+            slot.alive = false;
+            slot.tcp_alive = false;
+            slot.socks_ready = false;
+            slot.http_ready = false;
+            slot.latency_ms = 0.0f;
+            slot.consecutive_failures = 0;
+            touched_ports = true;
+        }
+    }
+    if (touched_ports) {
+        provisionPorts();
+    }
+
+    utils::LogRingBuffer::instance().push(
+        "[Cmd] Removed " + std::to_string(removed) + " configs from DB/runtime artifacts");
+    return removed;
 }
 
 void HunterOrchestrator::addManualConfigs(const std::vector<std::string>& uris) {
@@ -613,11 +845,14 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
         else if (json_line.find("\"set_threads\"") != std::string::npos) command = "set_threads";
         else if (json_line.find("\"set_timeout\"") != std::string::npos) command = "set_timeout";
         else if (json_line.find("\"clear_old\"") != std::string::npos) command = "clear_old";
+        else if (json_line.find("\"clear_alive\"") != std::string::npos) command = "clear_alive";
+        else if (json_line.find("\"remove_configs\"") != std::string::npos) command = "remove_configs";
         else if (json_line.find("\"add_configs\"") != std::string::npos) command = "add_configs";
         else if (json_line.find("\"import_config_file\"") != std::string::npos) command = "import_config_file";
         else if (json_line.find("\"export_config_db\"") != std::string::npos) command = "export_config_db";
         else if (json_line.find("\"run_cycle\"") != std::string::npos) command = "run_cycle";
         else if (json_line.find("\"refresh_ports\"") != std::string::npos) command = "refresh_ports";
+        else if (json_line.find("\"recheck_live_ports\"") != std::string::npos) command = "recheck_live_ports";
         else if (json_line.find("\"reprovision_ports\"") != std::string::npos) command = "reprovision_ports";
         else if (json_line.find("\"load_raw_files\"") != std::string::npos) command = "load_raw_files";
         else if (json_line.find("\"load_bundle_files\"") != std::string::npos) command = "load_bundle_files";
@@ -630,6 +865,7 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
 
     bool ok = true;
     std::string message = "ok";
+    std::string data_json;
 
     try {
         if (command == "pause") {
@@ -691,6 +927,14 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
             if (hours < 1) hours = 1;
             int removed = clearOldConfigs(hours);
             message = "cleared_" + std::to_string(removed);
+        } else if (command == "clear_alive") {
+            int removed = clearAliveConfigs();
+            message = "alive_cleared_" + std::to_string(removed);
+        } else if (command == "remove_configs") {
+            const std::vector<std::string> uris_list = splitTextLines(extractString("uris_text"));
+            const std::set<std::string> uris(uris_list.begin(), uris_list.end());
+            int removed = removeConfigs(uris);
+            message = "removed_" + std::to_string(removed);
         } else if (command == "add_configs") {
             const std::string configs = extractString("configs");
             if (!configs.empty()) {
@@ -718,14 +962,42 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                     ok = false;
                     message = invalid_count > 0 ? "no_valid_configs_in_file" : "empty_import_file";
                 } else {
-                    int promoted = 0;
-                    const int added = config_db_->addConfigsWithPriority(valid_configs, "user_import", &promoted);
+                    // Process in batches of 5000 to prevent timeout on large imports
+                    constexpr int IMPORT_BATCH = 5000;
+                    int total_added = 0;
+                    int total_promoted = 0;
+                    
+                    if ((int)valid_configs.size() <= IMPORT_BATCH) {
+                        int promoted = 0;
+                        total_added = config_db_->addConfigsWithPriority(valid_configs, "user_import", &promoted);
+                        total_promoted = promoted;
+                    } else {
+                        // Split into batches
+                        std::set<std::string> batch;
+                        int batch_num = 0;
+                        for (auto it = valid_configs.begin(); it != valid_configs.end(); ++it) {
+                            batch.insert(*it);
+                            if ((int)batch.size() >= IMPORT_BATCH || std::next(it) == valid_configs.end()) {
+                                int promoted = 0;
+                                int added = config_db_->addConfigsWithPriority(batch, "user_import", &promoted);
+                                total_added += added;
+                                total_promoted += promoted;
+                                batch_num++;
+                                utils::LogRingBuffer::instance().push(
+                                    "[Import] Batch " + std::to_string(batch_num) + ": +" +
+                                    std::to_string(added) + " new, " + std::to_string(promoted) + " promoted");
+                                batch.clear();
+                            }
+                        }
+                    }
+                    
                     utils::LogRingBuffer::instance().push(
-                        "[Import] File " + import_path + ": added " + std::to_string(added) +
-                        ", promoted " + std::to_string(promoted) +
-                        ", invalid " + std::to_string(invalid_count));
-                    message = "imported " + std::to_string(added) + " new, reprioritized " +
-                              std::to_string(promoted) + " existing, invalid " + std::to_string(invalid_count);
+                        "[Import] File " + import_path + ": added " + std::to_string(total_added) +
+                        ", promoted " + std::to_string(total_promoted) +
+                        ", invalid " + std::to_string(invalid_count) +
+                        " (total parsed: " + std::to_string(valid_configs.size()) + ")");
+                    message = "imported " + std::to_string(total_added) + " new, reprioritized " +
+                              std::to_string(total_promoted) + " existing, invalid " + std::to_string(invalid_count);
                 }
             }
         } else if (command == "export_config_db") {
@@ -753,6 +1025,9 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
         } else if (command == "refresh_ports") {
             refreshProvisionedPorts();
             message = "ports_refreshed";
+        } else if (command == "recheck_live_ports") {
+            data_json = recheckLiveProvisionedPorts();
+            message = "live_recheck_completed";
         } else if (command == "reprovision_ports") {
             stopProvisionedPorts();
             provisionPorts();
@@ -984,6 +1259,9 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
       .add("response_ts", response_ts)
       .add("response_ts_ms", response_ts_ms)
       .addRaw("status", buildStatusJson(paused_.load() ? "paused" : "running"));
+    if (!data_json.empty()) {
+        jb.addRaw("data", data_json);
+    }
     return jb.build();
 }
 
@@ -1410,14 +1688,18 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
                     tester.setXrayPath("bin/xray.exe");
                     tester.setSingBoxPath("bin/sing-box.exe");
                     tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
-                    auto result = tester.testConfig(uri, "http://cp.cloudflare.com/generate_204", timeout_s);
+                    auto result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s);
 
-                    br.success = result.success && !result.telegram_only;
-                    br.latency_ms = br.success ? (result.download_speed_kbps > 0 ? 1000.0f / result.download_speed_kbps : 5000.0f) : 0;
-                    br.tier = br.success ? (br.latency_ms <= 3000 ? "gold" : "silver") : "dead";
+                    br.success = result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
+                    if (br.success) {
+                        br.latency_ms = result.download_speed_kbps > 0 ? 1000.0f / result.download_speed_kbps : 5000.0f;
+                        br.tier = br.latency_ms <= 3000 ? "gold" : "silver";
+                    } else {
+                        br.latency_ms = 0;
+                        br.tier = "dead";
+                    }
                     br.engine_used = result.engine_used;
                     br.error = result.error_message;
-                    if (result.telegram_only) br.error = "Telegram-only (no HTTP download)";
                 } catch (const std::exception& ex) {
                     br.error = std::string("EXCEPTION: ") + ex.what();
                     br.tier = "dead";
@@ -1721,7 +2003,7 @@ void HunterOrchestrator::provisionPorts() {
 void HunterOrchestrator::refreshProvisionedPorts() {
     // Health-check each provisioned port; replace dead ones with next-best configs
     std::lock_guard<std::mutex> lock(provision_mutex_);
-    double now = utils::nowTimestamp();
+    const double now = utils::nowTimestamp();
 
     std::vector<int> dead_indices;
     for (int i = 0; i < (int)provisioned_ports_.size(); i++) {
@@ -1750,6 +2032,9 @@ void HunterOrchestrator::refreshProvisionedPorts() {
                 if (slot.pid > 0) {
                     runtime_engine_manager_.stopProcess(slot.pid);
                 }
+                if (config_db_ && !slot.uri.empty()) {
+                    config_db_->updateHealth(slot.uri, false, 0.0f, slot.engine_used, true);
+                }
                 slot.alive = false;
                 slot.pid = -1;
                 dead_indices.push_back(i);
@@ -1764,6 +2049,162 @@ void HunterOrchestrator::refreshProvisionedPorts() {
     }
 
     if (dead_indices.empty()) return;
+    replaceProvisionedPortsLocked(dead_indices, now);
+}
+
+std::string HunterOrchestrator::recheckLiveProvisionedPorts() {
+    const bool was_paused = paused_.exchange(true);
+    const int timeout_s = speed_test_timeout_.load();
+    std::vector<ConfigHealthRecord> live_records;
+    if (config_db_) {
+        live_records = config_db_->getHealthyRecords(std::max(500, config_db_->size()));
+    }
+
+    std::vector<LiveRecheckItem> results;
+    results.reserve(live_records.size());
+    std::vector<std::string> passed_uris;
+    std::vector<std::string> failed_uris;
+
+    auto testWithEngine = [&](const std::string& uri, const std::string& preferred_engine) -> LiveRecheckItem {
+        LiveRecheckItem item;
+        item.uri = uri;
+
+        auto parsed = network::UriParser::parse(uri);
+        if (!parsed.has_value() || !parsed->isValid()) {
+            item.error = "invalid_uri";
+            return item;
+        }
+
+        std::vector<std::string> engines;
+        auto add_engine = [&](const std::string& engine) {
+            if (engine.empty()) return;
+            if (!runtime_engine_manager_.isEngineAvailable(engine)) return;
+            if (std::find(engines.begin(), engines.end(), engine) != engines.end()) return;
+            if (runtime_engine_manager_.generateConfig(*parsed, 10808, engine).empty()) return;
+            engines.push_back(engine);
+        };
+
+        add_engine(preferred_engine);
+        add_engine("xray");
+        add_engine("sing-box");
+        add_engine("mihomo");
+
+        if (engines.empty()) {
+            item.error = "no_compatible_engine";
+            return item;
+        }
+
+        for (const auto& engine : engines) {
+            const int port = reserveTemporaryListenPort();
+            if (port <= 0) {
+                item.error = "no_free_port";
+                break;
+            }
+
+            const std::string config_text = runtime_engine_manager_.generateConfig(*parsed, port, engine);
+            if (config_text.empty()) {
+                item.error = "config_generation_failed";
+                continue;
+            }
+            const std::string config_path = runtime_engine_manager_.writeConfigFile(engine, config_text);
+            if (config_path.empty()) {
+                item.error = "config_write_failed";
+                continue;
+            }
+
+            int pid = runtime_engine_manager_.startProcess(engine, config_path);
+            if (pid <= 0) {
+                item.error = "process_start_failed";
+                continue;
+            }
+
+            utils::LocalProxyProbeResult probe;
+            bool ready = false;
+            if (utils::waitForPortAlive(port, 5000, 100)) {
+                probe = utils::probeLocalMixedPort(port, 2000);
+                ready = probe.mixed_ready();
+            }
+
+            float score = -1.0f;
+            if (ready) {
+                score = testProvisionedPortDownload(port, timeout_s);
+            }
+            runtime_engine_manager_.stopProcess(pid);
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+            if (ready && score > 0.0f) {
+                item.alive = true;
+                item.engine_used = engine;
+                item.score = score;
+                item.error.clear();
+                return item;
+            }
+
+            std::ostringstream err;
+            err << "engine=" << engine
+                << " tcp=" << (probe.tcp_alive ? "1" : "0")
+                << " socks=" << (probe.socks_ready ? "1" : "0")
+                << " http=" << (probe.http_ready ? "1" : "0");
+            item.error = err.str();
+        }
+
+        return item;
+    };
+
+    utils::LogRingBuffer::instance().push(
+        "[RecheckLive] Started deep live validation for " + std::to_string(live_records.size()) +
+        " configs using temporary engine ports");
+
+    for (const auto& rec : live_records) {
+        LiveRecheckItem item = testWithEngine(rec.uri, rec.engine_used);
+        if (item.alive) {
+            const float latency_ms = std::max(1.0f, 1000.0f / std::max(item.score, 0.001f));
+            if (config_db_) {
+                config_db_->updateHealth(rec.uri, true, latency_ms, item.engine_used);
+            }
+            passed_uris.push_back(rec.uri);
+        } else {
+            if (config_db_) {
+                config_db_->updateHealth(rec.uri, false, 0.0f, rec.engine_used, true);
+            }
+            failed_uris.push_back(rec.uri);
+        }
+        results.push_back(std::move(item));
+    }
+
+    if (config_db_) {
+        try {
+            config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
+        } catch (...) {}
+    }
+
+    utils::LogRingBuffer::instance().push(
+        "[RecheckLive] Completed: tested=" + std::to_string((int)results.size()) +
+        " passed=" + std::to_string((int)passed_uris.size()) +
+        " failed=" + std::to_string((int)failed_uris.size()) +
+        " runtime_kept_paused=1");
+
+    std::ostringstream data;
+    data << "{"
+         << "\"tested\":" << (int)results.size()
+         << ",\"passed\":" << (int)passed_uris.size()
+         << ",\"failed\":" << (int)failed_uris.size()
+         << ",\"was_paused_before\":" << (was_paused ? "true" : "false")
+         << ",\"kept_paused\":true"
+         << ",\"passed_uris\":" << jsonStringArray(passed_uris)
+         << ",\"failed_uris\":" << jsonStringArray(failed_uris)
+         << ",\"tested_uris\":" << jsonStringArray([&]() {
+                std::vector<std::string> combined = passed_uris;
+                combined.insert(combined.end(), failed_uris.begin(), failed_uris.end());
+                return combined;
+            }())
+         << "}";
+    return data.str();
+}
+
+void HunterOrchestrator::replaceProvisionedPortsLocked(const std::vector<int>& dead_indices, double now,
+                                                       const std::set<std::string>& excluded_uris) {
+    if (dead_indices.empty()) return;
 
     // Get replacement configs
     std::set<std::string> existing_uris;
@@ -1776,6 +2217,7 @@ void HunterOrchestrator::refreshProvisionedPorts() {
         auto it = cached_engine_hints_.find(uri);
         return it != cached_engine_hints_.end() ? it->second : "";
     };
+    existing_uris.insert(excluded_uris.begin(), excluded_uris.end());
     for (auto& slot : provisioned_ports_) {
         if (slot.alive && slot.pid > 0) existing_uris.insert(slot.uri);
     }
@@ -1805,72 +2247,88 @@ void HunterOrchestrator::refreshProvisionedPorts() {
     std::sort(replacements.begin(), replacements.end(),
               [](const auto& a, const auto& b) { return a.second < b.second; });
 
-    int replaced = 0;
     for (int idx : dead_indices) {
-        if (replaced >= (int)replacements.size()) break;
-        auto& [uri, latency] = replacements[replaced];
+        auto& slot = provisioned_ports_[idx];
+        const int socks_port = slot.port;
+        const int h_port = slot.http_port > 0 ? slot.http_port : socks_port;
+        bool assigned = false;
 
-        auto parsed = network::UriParser::parse(uri);
-        if (!parsed.has_value() || !parsed->isValid()) {
-            replaced++;
-            continue;
-        }
+        while (!replacements.empty()) {
+            auto [uri, latency] = replacements.front();
+            replacements.erase(replacements.begin());
 
-        int socks_port = provisioned_ports_[idx].port;
-        int h_port = provisioned_ports_[idx].http_port;
-        if (h_port <= 0) h_port = socks_port;
-        const std::string preferred_engine = resolve_engine_hint(uri);
-        const std::string engine_used = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
-        if (engine_used.empty()) {
-            replaced++;
-            continue;
-        }
-        std::string config_text = runtime_engine_manager_.generateConfig(*parsed, socks_port, engine_used);
-        std::string config_path = runtime_engine_manager_.writeConfigFile(engine_used, config_text);
-        int pid = runtime_engine_manager_.startProcess(engine_used, config_path);
-        utils::LocalProxyProbeResult probe;
-        bool ready = false;
-        if (pid > 0 && utils::waitForPortAlive(socks_port, 5000, 100)) {
-            probe = utils::probeLocalMixedPort(socks_port, 2000);
-            ready = probe.mixed_ready();
-        }
-        if (pid > 0 && !ready) {
-            runtime_engine_manager_.stopProcess(pid);
-            pid = -1;
-        }
+            auto parsed = network::UriParser::parse(uri);
+            if (!parsed.has_value() || !parsed->isValid()) continue;
 
-        provisioned_ports_[idx].uri = uri;
-        provisioned_ports_[idx].engine_used = engine_used;
-        provisioned_ports_[idx].http_port = h_port;
-        provisioned_ports_[idx].pid = pid;
-        provisioned_ports_[idx].alive = ready;
-        provisioned_ports_[idx].tcp_alive = probe.tcp_alive;
-        provisioned_ports_[idx].socks_ready = probe.socks_ready;
-        provisioned_ports_[idx].http_ready = probe.http_ready;
-        provisioned_ports_[idx].latency_ms = latency;
-        provisioned_ports_[idx].last_health_check = now;
-        provisioned_ports_[idx].last_probe_ts = utils::nowTimestamp();
-        provisioned_ports_[idx].consecutive_failures = 0;
-        if (!engine_used.empty()) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            cached_engine_hints_[uri] = engine_used;
-        }
+            const std::string preferred_engine = resolve_engine_hint(uri);
+            const std::string engine_used = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
+            if (engine_used.empty()) continue;
 
-        if (ready) {
+            std::string config_text = runtime_engine_manager_.generateConfig(*parsed, socks_port, engine_used);
+            std::string config_path = runtime_engine_manager_.writeConfigFile(engine_used, config_text);
+            int pid = runtime_engine_manager_.startProcess(engine_used, config_path);
+            utils::LocalProxyProbeResult probe;
+            bool ready = false;
+            if (pid > 0 && utils::waitForPortAlive(socks_port, 5000, 100)) {
+                probe = utils::probeLocalMixedPort(socks_port, 2000);
+                ready = probe.mixed_ready();
+            }
+            if (pid > 0 && !ready) {
+                runtime_engine_manager_.stopProcess(pid);
+                pid = -1;
+            }
+
+            if (!ready) {
+                if (config_db_) config_db_->updateHealth(uri, false, 0.0f, engine_used, true);
+                utils::LogRingBuffer::instance().push(
+                    "[Provision] Failed to replace MIXED:" + std::to_string(socks_port) +
+                    " engine=" + engine_used +
+                    " using new config tcp=" + std::string(probe.tcp_alive ? "1" : "0") +
+                    " socks=" + std::string(probe.socks_ready ? "1" : "0") +
+                    " http=" + std::string(probe.http_ready ? "1" : "0"));
+                continue;
+            }
+
+            slot.uri = uri;
+            slot.engine_used = engine_used;
+            slot.http_port = h_port;
+            slot.pid = pid;
+            slot.alive = true;
+            slot.tcp_alive = probe.tcp_alive;
+            slot.socks_ready = probe.socks_ready;
+            slot.http_ready = probe.http_ready;
+            slot.latency_ms = latency;
+            slot.last_health_check = now;
+            slot.last_probe_ts = utils::nowTimestamp();
+            slot.consecutive_failures = 0;
+            {
+                std::lock_guard<std::mutex> lock(state_mutex_);
+                cached_engine_hints_[uri] = engine_used;
+            }
+
             utils::LogRingBuffer::instance().push(
                 "[Provision] Replaced dead SOCKS:" + std::to_string(socks_port) +
                 " HTTP:" + std::to_string(h_port) +
                 " engine=" + engine_used +
                 " with new config (latency=" + std::to_string((int)latency) + "ms)");
-        } else {
-            utils::LogRingBuffer::instance().push(
-                "[Provision] Failed to replace MIXED:" + std::to_string(socks_port) +
-                " engine=" + engine_used +
-                " using new config tcp=" + std::string(provisioned_ports_[idx].tcp_alive ? "1" : "0") +
-                " socks=" + std::string(provisioned_ports_[idx].socks_ready ? "1" : "0") +
-                " http=" + std::string(provisioned_ports_[idx].http_ready ? "1" : "0"));
+            assigned = true;
+            break;
         }
-        replaced++;
+
+        if (!assigned) {
+            slot.uri.clear();
+            slot.engine_used.clear();
+            slot.http_port = h_port;
+            slot.pid = -1;
+            slot.alive = false;
+            slot.tcp_alive = false;
+            slot.socks_ready = false;
+            slot.http_ready = false;
+            slot.latency_ms = 0.0f;
+            slot.last_health_check = now;
+            slot.last_probe_ts = utils::nowTimestamp();
+            slot.consecutive_failures = 3;
+        }
     }
 }
 

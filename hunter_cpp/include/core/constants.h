@@ -34,6 +34,7 @@ constexpr int HEALTH_MONITOR_INTERVAL_S = 30;  // 30 sec
 constexpr int VALIDATOR_INTERVAL_S = 30;       // 30 sec
 constexpr int HARVESTER_INTERVAL_S = 2700;     // 45 min
 constexpr int GITHUB_BG_INTERVAL_S = 1800;     // 30 min
+constexpr int IRAN_ASSETS_INTERVAL_S = 3600;   // 60 min
 constexpr int DPI_PRESSURE_INTERVAL_S = 300;   // 5 min
 constexpr int GITHUB_BG_INITIAL_DELAY_S = 5;
 constexpr int HARVESTER_INITIAL_DELAY_S = 900;

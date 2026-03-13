@@ -205,6 +205,42 @@ std::string jsonEscape(const std::string& input) {
     return out;
 }
 
+std::string extractJsonStringField(const std::string& json, const std::string& key) {
+    const std::string needle = "\"" + key + "\"";
+    const size_t key_pos = json.find(needle);
+    if (key_pos == std::string::npos) return "";
+    const size_t colon = json.find(':', key_pos + needle.size());
+    if (colon == std::string::npos) return "";
+    size_t pos = colon + 1;
+    while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) pos++;
+    const size_t first_quote = json.find('"', pos);
+    if (first_quote == std::string::npos) return "";
+    std::string out;
+    bool escape = false;
+    for (size_t i = first_quote + 1; i < json.size(); ++i) {
+        const char ch = json[i];
+        if (!escape && ch == '"') return out;
+        if (escape) {
+            switch (ch) {
+                case '\\': out.push_back('\\'); break;
+                case '"': out.push_back('"'); break;
+                case 'n': out.push_back('\n'); break;
+                case 'r': out.push_back('\r'); break;
+                case 't': out.push_back('\t'); break;
+                default: out.push_back(ch); break;
+            }
+            escape = false;
+            continue;
+        }
+        if (ch == '\\') {
+            escape = true;
+        } else {
+            out.push_back(ch);
+        }
+    }
+    return "";
+}
+
 } // namespace
 
 WebSocketBridge::WebSocketBridge(int control_port, int monitor_port)
@@ -461,6 +497,12 @@ void WebSocketBridge::handleControlClient(intptr_t client_fd) {
     }
     std::string message;
     while (running_.load() && readTextFrame(client_fd, message)) {
+        const std::string request_id = extractJsonStringField(message, "request_id");
+        if (!request_id.empty()) {
+            std::ostringstream ack;
+            ack << "{\"type\":\"command_ack\",\"request_id\":\"" << jsonEscape(request_id) << "\"}";
+            if (!sendTextFrame(client_fd, ack.str())) break;
+        }
         std::string response;
         try {
             response = command_handler_ ? command_handler_(message) : std::string("{\"type\":\"command_result\",\"ok\":false,\"message\":\"No command handler\"}");

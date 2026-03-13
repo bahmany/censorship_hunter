@@ -368,5 +368,105 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
     return ss.str();
 }
 
+std::string XRayManager::generateBatchSpeedtestConfig(
+    const std::vector<std::pair<ParsedConfig, int>>& configs) {
+
+    if (configs.empty()) return "";
+
+    std::ostringstream ss;
+    ss << "{\n"
+       << "  \"log\":{\"loglevel\":\"warning\"},\n"
+       << "  \"dns\":{"
+       <<     "\"tag\":\"dns-module\","
+       <<     "\"servers\":[\"1.1.1.1\",\"8.8.8.8\",\"https+local://1.1.1.1/dns-query\"],"
+       <<     "\"queryStrategy\":\"UseIPv4\","
+       <<     "\"disableCache\":false"
+       <<   "},\n";
+
+    // ═══ Inbounds: one mixed-protocol inbound per config ═══
+    ss << "  \"inbounds\":[";
+    bool first = true;
+    for (auto& [parsed, port] : configs) {
+        if (!first) ss << ",";
+        first = false;
+        std::string tag = "test-" + std::to_string(port);
+        ss << "{"
+           <<   "\"tag\":\"" << tag << "\","
+           <<   "\"port\":" << port << ","
+           <<   "\"listen\":\"127.0.0.1\","
+           <<   "\"protocol\":\"mixed\","
+           <<   "\"settings\":{\"udp\":true},"
+           <<   "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
+           << "}";
+    }
+    ss << "],\n";
+
+    // ═══ Outbounds: one proxy outbound per config + direct + dns-out ═══
+    ss << "  \"outbounds\":[";
+    first = true;
+    std::vector<std::string> outbound_tags;
+    for (auto& [parsed, port] : configs) {
+        std::string ob = parsed.toXrayOutboundJson(port);
+        if (ob.empty()) continue;
+
+        std::string ob_tag = "proxy-" + std::to_string(port);
+        outbound_tags.push_back(ob_tag);
+
+        // Replace default "proxy" tag with port-specific tag
+        std::string tag_needle = "\"tag\":\"proxy\"";
+        size_t tag_pos = ob.find(tag_needle);
+        if (tag_pos != std::string::npos) {
+            ob.replace(tag_pos, tag_needle.size(), "\"tag\":\"" + ob_tag + "\"");
+        }
+
+        // Apply TLS fragment for anti-DPI (Iranian censorship)
+        if (parsed.security == "tls") {
+            // Inject sockopt fragment into streamSettings if present
+            std::string stream_needle = "\"streamSettings\":{";
+            size_t stream_pos = ob.find(stream_needle);
+            if (stream_pos != std::string::npos) {
+                size_t insert_at = stream_pos + stream_needle.size();
+                ob.insert(insert_at,
+                    "\"sockopt\":{\"dialerProxy\":\"fragment-out\"},");
+            }
+        }
+
+        if (!first) ss << ",";
+        first = false;
+        ss << ob;
+    }
+
+    // Direct outbound
+    ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}";
+    // Fragment outbound for anti-DPI
+    ss << ",{\"protocol\":\"freedom\",\"tag\":\"fragment-out\",\"settings\":{\"domainStrategy\":\"AsIs\""
+       <<     ",\"fragment\":{\"packets\":\"tlshello\",\"length\":\"100-200\",\"interval\":\"10-20\"}"
+       <<   "}}";
+    // DNS outbound
+    ss << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}";
+    ss << "],\n";
+
+    // ═══ Routing: each inbound tag → its own outbound tag ═══
+    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":[";
+
+    // Per-config routing: inbound → outbound
+    first = true;
+    for (auto& [parsed, port] : configs) {
+        std::string in_tag = "test-" + std::to_string(port);
+        std::string out_tag = "proxy-" + std::to_string(port);
+        if (!first) ss << ",";
+        first = false;
+        ss << "{\"type\":\"field\",\"inboundTag\":[\"" << in_tag << "\"],\"outboundTag\":\"" << out_tag << "\"}";
+    }
+
+    // DNS module → direct (for internal XRay DNS resolution)
+    ss << ",{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"}";
+    // Private IPs → direct
+    ss << ",{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}";
+    ss << "]}\n";
+    ss << "}";
+    return ss.str();
+}
+
 } // namespace proxy
 } // namespace hunter

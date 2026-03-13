@@ -88,6 +88,19 @@ public:
         int listen_port, int http_port = 0);
 
     /**
+     * @brief Generate XRay batch speedtest config (v2rayN pattern)
+     * 
+     * Creates a SINGLE xray config with N inbounds (one per config),
+     * each on a unique port, with dedicated outbound routing.
+     * This is dramatically more efficient than spawning N separate processes.
+     * 
+     * @param configs Vector of (ParsedConfig, assigned_port) pairs
+     * @return JSON config string for a single xray process
+     */
+    static std::string generateBatchSpeedtestConfig(
+        const std::vector<std::pair<ParsedConfig, int>>& configs);
+
+    /**
      * @brief Write config to temp file and return path
      */
     std::string writeConfigFile(const std::string& json_config);

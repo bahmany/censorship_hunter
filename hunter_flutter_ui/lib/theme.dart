@@ -3,11 +3,11 @@ import 'package:flutter/material.dart';
 /// Racing / Neon / Trust — Color Psychology Palette
 class C {
   C._();
-  static const Color bg        = Color(0xFF0A0E17);
-  static const Color surface   = Color(0xFF111827);
-  static const Color card      = Color(0xFF1A2235);
-  static const Color cardHi    = Color(0xFF1F2A3F);
-  static const Color border    = Color(0xFF2A3650);
+  static const Color bg        = Color(0xFF070B12);
+  static const Color surface   = Color(0xFF0D1422);
+  static const Color card      = Color(0xFF121B2D);
+  static const Color cardHi    = Color(0xFF162235);
+  static const Color border    = Color(0xFF2D3A52);
   static const Color neonCyan  = Color(0xFF22D3EE);
   static const Color neonGreen = Color(0xFF34D399);
   static const Color neonAmber = Color(0xFFFBBF24);
@@ -36,7 +36,7 @@ ThemeData hunterTheme() {
     ),
     cardTheme: CardThemeData(
       color: C.card,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
       elevation: 0,
     ),
     navigationRailTheme: NavigationRailThemeData(
