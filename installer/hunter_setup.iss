@@ -88,6 +88,7 @@ Source: "{#MyStagingDir}\runtime\HUNTER_gold.txt"; DestDir: "{app}\runtime"; Fla
 Source: "{#MyStagingDir}\runtime\HUNTER_silver.txt"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 Source: "{#MyStagingDir}\runtime\HUNTER_balancer_cache.json"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 Source: "{#MyStagingDir}\runtime\HUNTER_gemini_balancer_cache.json"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
+Source: "{#MyStagingDir}\runtime\HUNTER_config_db.tsv"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 Source: "{#MyStagingDir}\runtime\hunter_config.json"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 
 [Icons]
