@@ -4,7 +4,7 @@
 ; Bundles cached configs for immediate start in censored networks
 
 #define MyAppName "Hunter VPN"
-#define MyAppVersion "1.2.1"
+#define MyAppVersion "1.2.2"
 #define MyAppPublisher "Hunter Project"
 #define MyAppExeName "hunter_dashboard.exe"
 #define MyAppCLIName "hunter_cli.exe"

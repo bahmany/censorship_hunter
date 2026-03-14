@@ -62,10 +62,12 @@ echo.
 echo === Assembling release package ===
 set "OUT=%BUILD_DIR%\runner\Release"
 if not exist "%OUT%" mkdir "%OUT%"
+if exist "%OUT%\data\flutter_assets" rmdir /s /q "%OUT%\data\flutter_assets"
+if not exist "%OUT%\data" mkdir "%OUT%\data"
 copy /y "%BUILD_DIR%\runner\hunter_dashboard.exe" "%OUT%\" >nul 2>&1
 copy /y "%PROJECT_DIR%\windows\flutter\ephemeral\flutter_windows.dll" "%OUT%\" >nul 2>&1
 copy /y "%PROJECT_DIR%\windows\flutter\ephemeral\icudtl.dat" "%OUT%\data\" >nul 2>&1
-xcopy /s /y /i "%BUILD_DIR%\flutter_assemble\flutter_assets" "%OUT%\data\flutter_assets" >nul 2>&1
+xcopy /s /y /i "%BUILD_DIR%\flutter_assemble\flutter_assets\*" "%OUT%\data\flutter_assets\" >nul 2>&1
 copy /y "%BUILD_DIR%\flutter_assemble\windows\app.so" "%OUT%\data\app.so" >nul 2>&1
 
 echo.

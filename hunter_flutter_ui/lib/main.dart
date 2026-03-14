@@ -10,13 +10,16 @@ import 'package:system_tray/system_tray.dart';
 import 'theme.dart';
 import 'models.dart';
 import 'services.dart';
-import 'widgets/dashboard_section.dart';
 import 'widgets/statistics_section.dart';
 import 'widgets/configs_section.dart';
 import 'widgets/logs_section.dart';
 import 'widgets/docs_section.dart';
 import 'widgets/advanced_section.dart';
+import 'widgets/advanced_workbench_section.dart';
 import 'widgets/about_section.dart';
+import 'widgets/simple_dashboard_section.dart';
+import 'widgets/simple_configs_section.dart';
+import 'widgets/simple_about_section.dart';
 
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // Singleton lock
@@ -179,6 +182,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   HunterRunState _state = HunterRunState.stopped;
   HunterNavSection _nav = HunterNavSection.dashboard;
   HunterConfigListKind _configKind = HunterConfigListKind.alive;
+  int _advancedTabIndex = 0;
   Process? _process;
   Directory? _workingDir;
   StreamSubscription<String>? _stdoutSub;
@@ -1491,6 +1495,12 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         }
         final String? navName = decoded['ui_last_nav'] as String?;
         _nav = _navFromName(navName);
+        final int savedAdvancedTab = (decoded['ui_last_advanced_tab'] as num?)?.toInt() ?? _advancedTabIndex;
+        _advancedTabIndex = savedAdvancedTab < 0
+            ? 0
+            : savedAdvancedTab > 4
+                ? 4
+                : savedAdvancedTab;
         final String? kindName = decoded['ui_last_config_kind'] as String?;
         _configKind = _configKindFromName(kindName);
         _clearAgeHours = (decoded['ui_clear_age_hours'] as num?)?.toInt() ?? _clearAgeHours;
@@ -1530,10 +1540,16 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   }
 
   HunterNavSection _navFromName(String? name) {
-    for (final HunterNavSection section in HunterNavSection.values) {
-      if (section.name == name) return section;
-    }
-    return HunterNavSection.dashboard;
+    return switch (name) {
+      'dashboard' => HunterNavSection.dashboard,
+      'configs' => HunterNavSection.configs,
+      'statistics' => HunterNavSection.advanced,
+      'logs' => HunterNavSection.advanced,
+      'docs' => HunterNavSection.advanced,
+      'advanced' => HunterNavSection.advanced,
+      'about' => HunterNavSection.about,
+      _ => HunterNavSection.dashboard,
+    };
   }
 
   HunterConfigListKind _configKindFromName(String? name) {
@@ -1589,6 +1605,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       }
     } catch (_) {}
     root['ui_last_nav'] = _nav.name;
+    root['ui_last_advanced_tab'] = _advancedTabIndex;
     root['ui_last_config_kind'] = _configKind.name;
     root['ui_clear_age_hours'] = _clearAgeHours;
     root['ui_selected_doc_path'] = _selectedDocPath;
@@ -2125,7 +2142,12 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
   // ━━━━━ Navigation ━━━━━
   void _navigate(HunterNavSection section, {HunterConfigListKind? kind}) {
     setState(() {
-      _nav = section;
+      if (section == HunterNavSection.statistics || section == HunterNavSection.logs || section == HunterNavSection.docs) {
+        _advancedTabIndex = _advancedTabIndexForSection(section);
+        _nav = HunterNavSection.advanced;
+      } else {
+        _nav = section;
+      }
       if (kind != null) _configKind = kind;
       _searchCtl.clear();
     });
@@ -2176,13 +2198,10 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
 
   List<(HunterNavSection, IconData, String)> _navEntries() {
     return <(HunterNavSection, IconData, String)>[
-      (HunterNavSection.dashboard, Icons.speed, 'Dashboard'),
-      (HunterNavSection.statistics, Icons.hub_outlined, 'Statistics'),
-      (HunterNavSection.configs, Icons.vpn_key, 'Configs'),
-      (HunterNavSection.logs, Icons.terminal, 'Logs'),
-      (HunterNavSection.docs, Icons.menu_book_rounded, 'Docs'),
-      (HunterNavSection.advanced, Icons.tune, 'Advanced'),
-      (HunterNavSection.about, Icons.info_outline, 'About'),
+      (HunterNavSection.dashboard, Icons.home_rounded, 'Home'),
+      (HunterNavSection.configs, Icons.vpn_key_rounded, 'Configs'),
+      (HunterNavSection.advanced, Icons.tune_rounded, 'Advanced'),
+      (HunterNavSection.about, Icons.info_outline_rounded, 'About'),
     ];
   }
 
@@ -2329,13 +2348,13 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
 
   Widget _buildTopBar(BuildContext context, double pulseVal) {
     final String title = switch (_nav) {
-      HunterNavSection.dashboard => 'DASHBOARD',
-      HunterNavSection.statistics => 'STATISTICS',
-      HunterNavSection.configs => 'CONFIGS',
-      HunterNavSection.logs => 'LOGS',
-      HunterNavSection.docs => 'DOCS',
-      HunterNavSection.advanced => 'SETTINGS',
-      HunterNavSection.about => 'ABOUT',
+      HunterNavSection.dashboard => 'Home',
+      HunterNavSection.statistics => 'Advanced',
+      HunterNavSection.configs => 'Configs',
+      HunterNavSection.logs => 'Advanced',
+      HunterNavSection.docs => 'Advanced',
+      HunterNavSection.advanced => 'Advanced',
+      HunterNavSection.about => 'About',
     };
     return GestureDetector(
       onPanStart: (_) => windowManager.startDragging(),
@@ -2394,7 +2413,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
               children: <Widget>[
                 _animatedActionButton(
                   icon: Icons.play_arrow,
-                  label: 'START',
+                  label: 'START HUNT',
                   color: C.neonGreen,
                   isActive: _state == HunterRunState.running,
                   isLoading: _state == HunterRunState.starting,
@@ -2403,7 +2422,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
                 ),
                 _animatedActionButton(
                   icon: Icons.stop,
-                  label: 'STOP',
+                  label: 'STOP HUNT',
                   color: C.neonRed,
                   isActive: false,
                   isLoading: _state == HunterRunState.stopping,
@@ -2428,7 +2447,7 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
                           children: <Widget>[
                             Icon(Icons.refresh, color: C.neonAmber, size: 18),
                             const SizedBox(width: 8),
-                            Text('RESET', style: TextStyle(color: C.neonAmber, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
+                            Text('RESTART', style: TextStyle(color: C.neonAmber, fontSize: 12, fontWeight: FontWeight.bold, letterSpacing: 0.5)),
                           ],
                         ),
                       ),
@@ -2568,188 +2587,216 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
 
 
   Widget _buildContent(BuildContext context, double pulseValue) {
-    return switch (_nav) {
-      HunterNavSection.dashboard => DashboardSection(
-        status: _status,
-        history: _history,
-        silverConfigs: _silverConfigs,
-        goldConfigs: _goldConfigs,
-        balancerConfigs: _balancerConfigs,
-        geminiConfigs: _geminiConfigs,
-        allCacheCount: _allCache.length,
-        githubCacheCount: _githubCache.length,
-        docsCount: _docs.length,
+    final List<String> liveConfigs = _liveConfigs();
+    final int availableConfigsCount = _availableConfigsCount(liveConfigs);
+    final int checkedConfigsCount = _checkedConfigsCount();
+    if (_nav == HunterNavSection.dashboard) {
+      return SimpleDashboardSection(
         runState: _state,
-        engines: _engines,
-        lastRefresh: _lastRefresh,
-        lastActivityAt: _lastActivityAt,
-        refreshTick: _refreshTick,
-        logs: _logs,
-        onNavigate: _navigate,
-        onCopyText: _copyText,
-        onCopyLines: _copyLines,
-        pulseValue: pulseValue,
-        provisionedPorts: _parseProvisionedPorts(),
-        balancers: _parseBalancers(),
-        activeSystemProxyPort: _activeSystemProxyPort,
-        onSetSystemProxy: _setSystemProxy,
-        onClearSystemProxy: _clearSystemProxy,
-        // Pause / Speed / Maintenance
-        isPaused: _isPaused,
-        onTogglePause: _togglePause,
-        speedProfile: _speedProfile,
-        speedThreads: _speedThreads,
-        speedTimeout: _speedTimeout,
-        draftSpeedProfile: _draftSpeedProfile,
-        draftSpeedThreads: _draftSpeedThreads,
-        draftSpeedTimeout: _draftSpeedTimeout,
-        hasPendingSpeedChanges: _hasPendingSpeedChanges,
-        speedApplyInFlight: _speedApplyInFlight,
-        projectedScanDuration: _projectedScanTimeForDraft(),
-        onSpeedProfile: _setSpeedProfile,
-        onThreadsChanged: _setThreads,
-        onTimeoutChanged: _setTimeout,
-        onApplySpeedChanges: _applySpeedChanges,
-        clearAgeHours: _clearAgeHours,
-        onClearAgeChanged: _setClearAgeHours,
-        onClearOldConfigs: _clearOldConfigs,
-        onClearAliveConfigs: _clearAliveConfigs,
-        manualConfigCtl: _manualConfigCtl,
-        onAddManualConfigs: _addManualConfigs,
-        onRunCycle: _runCycleNow,
-        onRefreshProvisionedPorts: _refreshProvisionedPortsNow,
-        onRecheckLivePorts: _recheckLiveProvisionedPortsNow,
-        onReprovisionPorts: _reprovisionPortsNow,
-        onLoadRawFiles: _loadRawFilesNow,
-        onLoadBundleFiles: _loadBundleFilesNow,
-        onDetectCensorship: _detectCensorshipNow,
-      ),
-      HunterNavSection.statistics => StatisticsSection(
-        status: _status,
-        history: _history,
-        silverConfigs: _silverConfigs,
-        goldConfigs: _goldConfigs,
-        balancerConfigs: _balancerConfigs,
-        geminiConfigs: _geminiConfigs,
-        allCacheCount: _allCache.length,
-        githubCacheCount: _githubCache.length,
-        docsCount: _docs.length,
-        runState: _state,
-        engines: _engines,
-        lastRefresh: _lastRefresh,
-        lastActivityAt: _lastActivityAt,
-        refreshTick: _refreshTick,
-        logs: _logs,
-        onNavigate: _navigate,
-        onCopyText: _copyText,
-        onCopyLines: _copyLines,
-        pulseValue: pulseValue,
-        provisionedPorts: _parseProvisionedPorts(),
-        balancers: _parseBalancers(),
-        activeSystemProxyPort: _activeSystemProxyPort,
-        onSetSystemProxy: _setSystemProxy,
-        onClearSystemProxy: _clearSystemProxy,
-        isPaused: _isPaused,
-        onTogglePause: _togglePause,
-        speedProfile: _speedProfile,
-        speedThreads: _speedThreads,
-        speedTimeout: _speedTimeout,
-        draftSpeedProfile: _draftSpeedProfile,
-        draftSpeedThreads: _draftSpeedThreads,
-        draftSpeedTimeout: _draftSpeedTimeout,
-        hasPendingSpeedChanges: _hasPendingSpeedChanges,
-        speedApplyInFlight: _speedApplyInFlight,
-        projectedScanDuration: _projectedScanTimeForDraft(),
-        onSpeedProfile: _setSpeedProfile,
-        onThreadsChanged: _setThreads,
-        onTimeoutChanged: _setTimeout,
-        onApplySpeedChanges: _applySpeedChanges,
-        clearAgeHours: _clearAgeHours,
-        onClearAgeChanged: _setClearAgeHours,
-        onClearOldConfigs: _clearOldConfigs,
-        onClearAliveConfigs: _clearAliveConfigs,
-        manualConfigCtl: _manualConfigCtl,
-        onAddManualConfigs: _addManualConfigs,
-        onRunCycle: _runCycleNow,
-        onRefreshProvisionedPorts: _refreshProvisionedPortsNow,
-        onRecheckLivePorts: _recheckLiveProvisionedPortsNow,
-        onReprovisionPorts: _reprovisionPortsNow,
-        onLoadRawFiles: _loadRawFilesNow,
-        onLoadBundleFiles: _loadBundleFilesNow,
-        onDetectCensorship: _detectCensorshipNow,
-      ),
-      HunterNavSection.configs => ConfigsSection(
-        listKind: _configKind,
+        availableConfigsCount: availableConfigsCount,
+        checkedConfigsCount: checkedConfigsCount,
+        noticeMessage: _noticeMessage,
+        errorMessage: _lastError,
+        onConnect: _start,
+        onDisconnect: _stop,
+      );
+    }
+    if (_nav == HunterNavSection.configs) {
+      return SimpleConfigsSection(
         searchController: _searchCtl,
-        allCacheConfigs: _allCache,
-        githubCacheConfigs: _githubCache,
+        liveConfigs: liveConfigs,
+        lastRefresh: _lastRefresh,
+        onSearchChanged: () => setState(() {}),
+        onCopyText: _copyText,
+        onCopyLines: _copyLines,
+      );
+    }
+    if (_nav == HunterNavSection.about) {
+      return SimpleAboutSection(bundledConfigsCount: _bundledCount);
+    }
+    if (_nav == HunterNavSection.advanced || _nav == HunterNavSection.statistics || _nav == HunterNavSection.logs || _nav == HunterNavSection.docs) {
+      final int initialAdvancedTab = _nav == HunterNavSection.advanced ? _advancedTabIndex : _advancedTabIndexForSection(_nav);
+      return AdvancedWorkbenchSection(
+        initialTabIndex: initialAdvancedTab,
+        availableConfigsCount: availableConfigsCount,
+        checkedConfigsCount: checkedConfigsCount,
+        logCount: _logs.length,
+        docsCount: _docs.length,
+        processInfo: _process == null ? 'Not running' : 'PID ${_process!.pid}',
+        onTabChanged: (int index) {
+          if (_advancedTabIndex == index) return;
+          setState(() => _advancedTabIndex = index);
+          _scheduleUiStatePersist();
+        },
+        statisticsChild: StatisticsSection(
+        status: _status,
+        history: _history,
         silverConfigs: _silverConfigs,
         goldConfigs: _goldConfigs,
         balancerConfigs: _balancerConfigs,
         geminiConfigs: _geminiConfigs,
-        allRecords: _allRecords,
+        allCacheCount: _allCache.length,
+        githubCacheCount: _githubCache.length,
+        docsCount: _docs.length,
+        runState: _state,
+        engines: _engines,
         lastRefresh: _lastRefresh,
-        onKindChanged: _setConfigKind,
-        onSearchChanged: () => setState(() {}),
-        onRefresh: _refresh,
+        lastActivityAt: _lastActivityAt,
+        refreshTick: _refreshTick,
+        logs: _logs,
+        onNavigate: _navigate,
         onCopyText: _copyText,
         onCopyLines: _copyLines,
-        onSpeedTest: _speedTest,
-      ),
-      HunterNavSection.logs => LogsSection(
-        logs: _logs,
-        logScrollController: _logScroll,
-        autoScroll: _autoScroll,
-        onAutoScrollChanged: (bool v) => setState(() => _autoScroll = v),
-        onCopyLogs: _copyLogs,
-        onClearLogs: _clearLogs,
-        logMemoryBytes: _logBytes,
-      ),
-      HunterNavSection.docs => DocsSection(
-        docs: _docs,
-        selectedDocPath: _selectedDocPath,
-        selectedDocContent: _selectedDocContent,
-        loading: _docsLoading,
-        error: _docsError,
-        onRefresh: _loadDocs,
-        onOpenDoc: _openDoc,
-        onCopyText: _copyText,
-      ),
-      HunterNavSection.advanced => AdvancedSection(
-        cliPathController: _cliPath,
-        configPathController: _configPath,
-        xrayPathController: _xrayPath,
-        singboxPathController: _singboxPath,
-        mihomoPathController: _mihomoPath,
-        torPathController: _torPath,
-        multiproxyPortController: _multiproxyPort,
-        geminiPortController: _geminiPort,
-        maxTotalController: _maxTotal,
-        maxWorkersController: _maxWorkers,
-        scanLimitController: _scanLimit,
-        sleepSecondsController: _sleepSeconds,
-        tgEnabled: _tgEnabled,
-        tgApiIdController: _tgApiId,
-        tgApiHashController: _tgApiHash,
-        tgPhoneController: _tgPhone,
-        tgTargetsController: _tgTargets,
-        tgLimitController: _tgLimit,
-        tgTimeoutMsController: _tgTimeout,
-        workingDir: _effectiveWd(),
-        processInfo: _process == null ? 'Not running' : 'PID ${_process!.pid}',
-        engines: _engines,
-        onTgEnabledChanged: (bool v) => setState(() => _tgEnabled = v),
-        onSaveRuntimeSettings: _saveRuntimeSettings,
-        onSaveTelegram: _saveTelegramSettings,
-        onRefresh: _refresh,
-        onCopyText: _copyText,
-        githubUrlsController: _githubUrls,
-        onSaveGithubUrls: _saveGithubUrls,
-        onResetGithubUrls: _resetGithubUrls,
-        onImportConfigFile: _importConfigFile,
-        onExportConfigDb: _exportConfigDb,
-      ),
-      HunterNavSection.about => AboutSection(bundledConfigsCount: _bundledCount),
+        pulseValue: pulseValue,
+        provisionedPorts: _parseProvisionedPorts(),
+        balancers: _parseBalancers(),
+        activeSystemProxyPort: _activeSystemProxyPort,
+        onSetSystemProxy: _setSystemProxy,
+        onClearSystemProxy: _clearSystemProxy,
+        isPaused: _isPaused,
+        onTogglePause: _togglePause,
+        speedProfile: _speedProfile,
+        speedThreads: _speedThreads,
+        speedTimeout: _speedTimeout,
+        draftSpeedProfile: _draftSpeedProfile,
+        draftSpeedThreads: _draftSpeedThreads,
+        draftSpeedTimeout: _draftSpeedTimeout,
+        hasPendingSpeedChanges: _hasPendingSpeedChanges,
+        speedApplyInFlight: _speedApplyInFlight,
+        projectedScanDuration: _projectedScanTimeForDraft(),
+        onSpeedProfile: _setSpeedProfile,
+        onThreadsChanged: _setThreads,
+        onTimeoutChanged: _setTimeout,
+        onApplySpeedChanges: _applySpeedChanges,
+        clearAgeHours: _clearAgeHours,
+        onClearAgeChanged: _setClearAgeHours,
+        onClearOldConfigs: _clearOldConfigs,
+        onClearAliveConfigs: _clearAliveConfigs,
+        manualConfigCtl: _manualConfigCtl,
+        onAddManualConfigs: _addManualConfigs,
+        onRunCycle: _runCycleNow,
+        onRefreshProvisionedPorts: _refreshProvisionedPortsNow,
+        onRecheckLivePorts: _recheckLiveProvisionedPortsNow,
+        onReprovisionPorts: _reprovisionPortsNow,
+        onLoadRawFiles: _loadRawFilesNow,
+        onLoadBundleFiles: _loadBundleFilesNow,
+        onDetectCensorship: _detectCensorshipNow,
+        ),
+        configsChild: ConfigsSection(
+          listKind: _configKind,
+          searchController: _searchCtl,
+          allCacheConfigs: _allCache,
+          githubCacheConfigs: _githubCache,
+          silverConfigs: _silverConfigs,
+          goldConfigs: _goldConfigs,
+          balancerConfigs: _balancerConfigs,
+          geminiConfigs: _geminiConfigs,
+          allRecords: _allRecords,
+          lastRefresh: _lastRefresh,
+          onKindChanged: _setConfigKind,
+          onSearchChanged: () => setState(() {}),
+          onRefresh: _refresh,
+          onCopyText: _copyText,
+          onCopyLines: _copyLines,
+          onSpeedTest: _speedTest,
+        ),
+        logsChild: LogsSection(
+          logs: _logs,
+          logScrollController: _logScroll,
+          autoScroll: _autoScroll,
+          onAutoScrollChanged: (bool v) => setState(() => _autoScroll = v),
+          onCopyLogs: _copyLogs,
+          onClearLogs: _clearLogs,
+          logMemoryBytes: _logBytes,
+        ),
+        docsChild: DocsSection(
+          docs: _docs,
+          selectedDocPath: _selectedDocPath,
+          selectedDocContent: _selectedDocContent,
+          loading: _docsLoading,
+          error: _docsError,
+          onRefresh: _loadDocs,
+          onOpenDoc: _openDoc,
+          onCopyText: _copyText,
+        ),
+        runtimeChild: AdvancedSection(
+          cliPathController: _cliPath,
+          configPathController: _configPath,
+          xrayPathController: _xrayPath,
+          singboxPathController: _singboxPath,
+          mihomoPathController: _mihomoPath,
+          torPathController: _torPath,
+          multiproxyPortController: _multiproxyPort,
+          geminiPortController: _geminiPort,
+          maxTotalController: _maxTotal,
+          maxWorkersController: _maxWorkers,
+          scanLimitController: _scanLimit,
+          sleepSecondsController: _sleepSeconds,
+          tgEnabled: _tgEnabled,
+          tgApiIdController: _tgApiId,
+          tgApiHashController: _tgApiHash,
+          tgPhoneController: _tgPhone,
+          tgTargetsController: _tgTargets,
+          tgLimitController: _tgLimit,
+          tgTimeoutMsController: _tgTimeout,
+          workingDir: _effectiveWd(),
+          processInfo: _process == null ? 'Not running' : 'PID ${_process!.pid}',
+          engines: _engines,
+          onTgEnabledChanged: (bool v) => setState(() => _tgEnabled = v),
+          onSaveRuntimeSettings: _saveRuntimeSettings,
+          onSaveTelegram: _saveTelegramSettings,
+          onRefresh: _refresh,
+          onCopyText: _copyText,
+          githubUrlsController: _githubUrls,
+          onSaveGithubUrls: _saveGithubUrls,
+          onResetGithubUrls: _resetGithubUrls,
+          onImportConfigFile: _importConfigFile,
+          onExportConfigDb: _exportConfigDb,
+        ),
+      );
+    }
+    return SimpleDashboardSection(
+      runState: _state,
+      availableConfigsCount: availableConfigsCount,
+      checkedConfigsCount: checkedConfigsCount,
+      noticeMessage: _noticeMessage,
+      errorMessage: _lastError,
+      onConnect: _start,
+      onDisconnect: _stop,
+    );
+  }
+
+  List<String> _liveConfigs() {
+    return <String>{
+      ..._goldConfigs,
+      ..._silverConfigs,
+      ..._balancerConfigs.map((HunterLatencyConfig item) => item.uri),
+      ..._geminiConfigs.map((HunterLatencyConfig item) => item.uri),
+    }.toList(growable: false);
+  }
+
+  int _availableConfigsCount(List<String> liveConfigs) {
+    final Map<String, dynamic>? db = _status?['db'] is Map<String, dynamic>
+        ? _status!['db'] as Map<String, dynamic>
+        : null;
+    final int alive = (db?['alive'] as num?)?.toInt() ?? 0;
+    return alive > liveConfigs.length ? alive : liveConfigs.length;
+  }
+
+  int _checkedConfigsCount() {
+    final Map<String, dynamic>? db = _status?['db'] is Map<String, dynamic>
+        ? _status!['db'] as Map<String, dynamic>
+        : null;
+    return (db?['tested_unique'] as num?)?.toInt() ?? 0;
+  }
+
+  int _advancedTabIndexForSection(HunterNavSection section) {
+    return switch (section) {
+      HunterNavSection.statistics => 0,
+      HunterNavSection.logs => 2,
+      HunterNavSection.docs => 3,
+      HunterNavSection.advanced => _advancedTabIndex,
+      _ => 0,
     };
   }
 
@@ -2792,9 +2839,9 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
 
   String _stateLabel() {
     return switch (_state) {
-      HunterRunState.stopped => 'OFFLINE',
+      HunterRunState.stopped => 'IDLE',
       HunterRunState.starting => 'STARTING',
-      HunterRunState.running => 'RUNNING',
+      HunterRunState.running => 'DISCOVERING',
       HunterRunState.stopping => 'STOPPING',
     };
   }

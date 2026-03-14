@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import '../theme.dart';
 
-const String kCliVersion = '1.2.1';
-const String kDashboardVersion = '1.2.1';
+const String kCliVersion = '1.2.2';
+const String kDashboardVersion = '1.2.2';
 
 /// Structured changelog entries for display in About and Docs sections.
 class ChangelogEntry {
@@ -19,6 +19,13 @@ class ChangelogItem {
 }
 
 const List<ChangelogEntry> kChangelog = <ChangelogEntry>[
+  ChangelogEntry(version: '1.2.2', date: '2026-03-14', items: <ChangelogItem>[
+    ChangelogItem(tag: 'UI', description: 'Simplified dashboard now shows live Available now and Checked counters for config discovery'),
+    ChangelogItem(tag: 'UI', description: 'Main dashboard messaging now clearly states that discovery runs continuously in cycles'),
+    ChangelogItem(tag: 'NEW', description: 'Restored a dedicated Advanced workspace that consolidates Stats, Configs, Logs, Docs, and Runtime controls'),
+    ChangelogItem(tag: 'FIX', description: 'Advanced tab selection no longer resets during routine live rebuilds and status refreshes'),
+    ChangelogItem(tag: 'FIX', description: 'Legacy statistics, logs, and docs navigation now opens the correct Advanced tab reliably'),
+  ]),
   ChangelogEntry(version: '1.2.1', date: '2026-03-13', items: <ChangelogItem>[
     ChangelogItem(tag: 'NEW', description: 'Deep LIVE RECHECK workflow — tests live configs sequentially through xray, sing-box, and mihomo using temporary random local ports'),
     ChangelogItem(tag: 'NEW', description: 'Pause-before-test + cleanup decision flow — after recheck you can clear dead configs, clear all tested configs, or continue/resume safely'),

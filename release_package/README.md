@@ -1,4 +1,4 @@
-# Hunter VPN Release Package v1.2.1
+# Hunter VPN Release Package v1.2.2
 
 ## Status
 
@@ -8,11 +8,11 @@
 
 ## Included Highlights
 
-- Deep live recheck via `xray`, `sing-box`, and `mihomo`
-- Runtime-wide pause/resume coordination during maintenance
-- Post-recheck cleanup flow for dead configs or all tested configs
-- Realtime WebSocket control with immediate command acknowledgements
-- Adaptive command timeout handling for long-running operations
+- Live `Available now` and `Checked` discovery counters on the simplified dashboard
+- Continuous-cycle messaging for repeated config discovery passes
+- Restored `Advanced` workspace with Stats, Configs, Logs, Docs, and Runtime tabs
+- Stable Advanced tab behavior during live refreshes and rebuilds
+- Legacy advanced navigation now opens the matching tab reliably
 
 ## Package Contents
 
@@ -33,4 +33,4 @@ runtime/
 - The dashboard executable is the current Windows release build.
 - The CLI binary is the current C++ release build.
 - Proxy core binaries are bundled in the installer staging under `bin/`.
-- This package is intended for publication as the `v1.2.1` release line.
+- This package is intended for publication as the `v1.2.2` release line.

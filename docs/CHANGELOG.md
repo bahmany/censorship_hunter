@@ -1,5 +1,20 @@
 # Hunter Changelog
 
+## v1.2.2 — 2026-03-14
+
+### Bug Fixes
+- **Advanced tabs now stay selected correctly** — Routine live rebuilds and status refreshes no longer force the Advanced page back to an older tab.
+- **Legacy advanced navigation is now stable** — Links to Statistics, Logs, and Docs correctly open the matching tab inside the new Advanced workspace.
+
+### New Features
+- **Advanced workspace restored** — All professional tools are available again in a dedicated tabbed page with Stats, Configs, Logs, Docs, and Runtime sections.
+
+### UI / Dashboard
+- **Live discovery counters on the main dashboard** — The simplified home screen now shows `Available now` and `Checked` counts.
+- **Continuous-cycle messaging** — The dashboard explicitly explains that Hunter keeps scanning in repeated discovery cycles.
+
+---
+
 ## v1.2.0 — 2026-03-13
 
 ### Bug Fixes

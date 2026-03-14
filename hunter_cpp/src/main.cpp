@@ -57,7 +57,7 @@ static LONG WINAPI unhandledExceptionFilter(EXCEPTION_POINTERS* ep) {
 #ifdef _WIN32
 static BOOL WINAPI consoleHandler(DWORD signal) {
     if (signal == CTRL_C_EVENT || signal == CTRL_BREAK_EVENT) {
-        std::cout << "\n[Hunter] Shutting down..." << std::endl;
+        std::cout << "\n[Hunter] Stopping discovery..." << std::endl;
         g_running = false;
         if (g_orchestrator) g_orchestrator->stop();
         return 1;
@@ -66,25 +66,25 @@ static BOOL WINAPI consoleHandler(DWORD signal) {
 }
 #else
 void signalHandler(int signum) {
-    std::cout << "\n[Hunter] Shutting down..." << std::endl;
+    std::cout << "\n[Hunter] Stopping discovery..." << std::endl;
     g_running = false;
     if (g_orchestrator) g_orchestrator->stop();
 }
 #endif
 
 void printUsage(const char* prog) {
-    std::cout << "Hunter C++ — Autonomous Proxy Config Hunter\n"
+    std::cout << "Hunter C++ — Fresh V2Ray Config Discovery for Restricted Iranian Networks\n"
               << "Version " << hunter::constants::HUNTER_VERSION << "\n\n"
               << "Usage:\n"
               << "  " << prog << " [options]\n\n"
               << "Options:\n"
-              << "  --config <path>      Config file (default: runtime/hunter_config.json)\n"
-              << "  --xray <path>        XRay binary path (default: bin/xray.exe)\n"
+              << "  --config <path>      Runtime config file (default: runtime/hunter_config.json)\n"
+              << "  --xray <path>        XRay binary used for validation (default: bin/xray.exe)\n"
               << "  --help               Show this help\n\n"
               << "Environment variables:\n"
-              << "  HUNTER_GITHUB_BG_CAP       GitHub background fetch cap (default: 150000)\n"
-              << "  HUNTER_GITHUB_BG_ENABLED   Enable/disable GitHub BG (default: true)\n"
-              << "  HUNTER_BG_VALIDATION_BATCH Background validation batch size (default: 120)\n"
+              << "  HUNTER_GITHUB_BG_CAP       GitHub background fetch cap for fresh config discovery (default: 150000)\n"
+              << "  HUNTER_GITHUB_BG_ENABLED   Enable/disable GitHub background discovery (default: true)\n"
+              << "  HUNTER_BG_VALIDATION_BATCH Background validation batch size for discovered configs (default: 120)\n"
               << "  TELEGRAM_BOT_TOKEN         Telegram bot token\n"
               << "  CHAT_ID                    Telegram chat/group ID\n"
               << std::endl;
@@ -139,9 +139,9 @@ int main(int argc, char* argv[]) {
     hunter::HunterConfig config;
     if (hunter::utils::fileExists(config_path)) {
         config.loadFromFile(config_path);
-        std::cout << "Config loaded from " << config_path << std::endl;
+        std::cout << "Runtime config loaded from " << config_path << std::endl;
     } else {
-        std::cout << "No config file at " << config_path << ", creating with defaults" << std::endl;
+        std::cout << "No runtime config found at " << config_path << ", creating a discovery-ready default config" << std::endl;
         config.saveToFile(config_path);
     }
 
@@ -171,7 +171,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "[Realtime] Failed to start websocket bridge" << std::endl;
     }
 
-    std::cout << "Starting autonomous hunting service..." << std::endl;
+    std::cout << "Starting fresh V2Ray config discovery service..." << std::endl;
 
     // Stdin reader thread: reads JSON-line commands from Flutter UI process stdin
     std::thread stdin_reader([&orchestrator]() {
@@ -201,6 +201,6 @@ int main(int argc, char* argv[]) {
     // Cleanup
     g_orchestrator = nullptr;
 
-    std::cout << "Hunter stopped." << std::endl;
+    std::cout << "Hunter discovery stopped." << std::endl;
     return 0;
 }
