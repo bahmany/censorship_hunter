@@ -2595,10 +2595,13 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
         runState: _state,
         availableConfigsCount: availableConfigsCount,
         checkedConfigsCount: checkedConfigsCount,
+        liveConfigs: liveConfigs,
         noticeMessage: _noticeMessage,
         errorMessage: _lastError,
         onConnect: _start,
         onDisconnect: _stop,
+        onCopyText: _copyText,
+        onCopyLines: _copyLines,
       );
     }
     if (_nav == HunterNavSection.configs) {
@@ -2759,10 +2762,13 @@ class _HunterPageState extends State<HunterPage> with WindowListener, TickerProv
       runState: _state,
       availableConfigsCount: availableConfigsCount,
       checkedConfigsCount: checkedConfigsCount,
+      liveConfigs: liveConfigs,
       noticeMessage: _noticeMessage,
       errorMessage: _lastError,
       onConnect: _start,
       onDisconnect: _stop,
+      onCopyText: _copyText,
+      onCopyLines: _copyLines,
     );
   }
 
