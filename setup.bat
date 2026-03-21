@@ -32,7 +32,7 @@ if not exist "cache" mkdir cache
 echo [INFO] Checking XRay binary...
 if not exist "bin\xray.exe" (
     echo [INFO] Downloading XRay binary...
-    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/XTLS/Xray-core/releases/download/v1.8.6/Xray-windows-64.zip' -OutFile 'xray.zip'"
+    powershell -Command "$proxy = New-Object System.Net.WebProxy('http://127.0.0.1:11808'); $wc = New-Object System.Net.WebClient; $wc.Proxy = $proxy; $wc.DownloadFile('https://github.com/XTLS/Xray-core/releases/download/v1.8.6/Xray-windows-64.zip', 'xray.zip')"
     if exist "xray.zip" (
         powershell -Command "Expand-Archive -Path 'xray.zip' -DestinationPath 'bin' -Force"
         del xray.zip
@@ -56,13 +56,11 @@ if not exist "bin\xray.exe" (
 echo [INFO] Checking geosite data...
 if not exist "bin\geosite.dat" (
     echo [INFO] Downloading geosite data...
-    powershell -Command "Invoke-WebRequest -Uri 'https://github.com/v2fly/domain-list-community/releases/download/20240329122116/geosite.dat' -OutFile 'bin\geosite.dat'"
+    powershell -Command "$proxy = New-Object System.Net.WebProxy('http://127.0.0.1:11808'); $wc = New-Object System.Net.WebClient; $wc.Proxy = $proxy; $wc.DownloadFile('https://github.com/v2fly/domain-list-community/releases/download/20240329122116/geosite.dat', 'bin\geosite.dat')"
     if exist "bin\geosite.dat" (
         echo [OK] Geosite data downloaded successfully
     ) else (
-        echo [ERROR] Failed to download geosite data
-        pause
-        exit /b 1
+        echo [WARN] Failed to download geosite data, continuing without it
     )
 ) else (
     echo [OK] Geosite data already exists
