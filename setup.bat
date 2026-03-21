@@ -28,56 +28,41 @@ if not exist "config\import" mkdir config\import
 if not exist "logs" mkdir logs
 if not exist "cache" mkdir cache
 
-:: Download XRay binary if not exists
-echo [INFO] Checking XRay binary...
-if not exist "bin\xray.exe" (
-    echo [INFO] Downloading XRay binary...
-    powershell -Command "$proxy = New-Object System.Net.WebProxy('http://127.0.0.1:11808'); $wc = New-Object System.Net.WebClient; $wc.Proxy = $proxy; $wc.DownloadFile('https://github.com/XTLS/Xray-core/releases/download/v1.8.6/Xray-windows-64.zip', 'xray.zip')"
-    if exist "xray.zip" (
-        powershell -Command "Expand-Archive -Path 'xray.zip' -DestinationPath 'bin' -Force"
-        del xray.zip
-        if exist "bin\xray.exe" (
-            echo [OK] XRay binary downloaded successfully
-        ) else (
-            echo [ERROR] Failed to extract XRay binary
-            pause
-            exit /b 1
-        )
-    ) else (
-        echo [ERROR] Failed to download XRay binary
-        pause
-        exit /b 1
-    )
-) else (
+:: Copy XRay binary from release_package if exists
+echo [INFO] Setting up XRay binary...
+if exist "release_package\bin\xray.exe" (
+    copy "release_package\bin\xray.exe" "bin\xray.exe" >nul
+    echo [OK] XRay binary copied from release_package
+) else if exist "bin\xray.exe" (
     echo [OK] XRay binary already exists
-)
-
-:: Download geosite data if not exists
-echo [INFO] Checking geosite data...
-if not exist "bin\geosite.dat" (
-    echo [INFO] Downloading geosite data...
-    powershell -Command "$proxy = New-Object System.Net.WebProxy('http://127.0.0.1:11808'); $wc = New-Object System.Net.WebClient; $wc.Proxy = $proxy; $wc.DownloadFile('https://github.com/v2fly/domain-list-community/releases/download/20240329122116/geosite.dat', 'bin\geosite.dat')"
-    if exist "bin\geosite.dat" (
-        echo [OK] Geosite data downloaded successfully
-    ) else (
-        echo [WARN] Failed to download geosite data, continuing without it
-    )
 ) else (
-    echo [OK] Geosite data already exists
+    echo [WARN] XRay binary not found. Please place xray.exe in bin\ directory manually.
 )
 
-:: Check if huntercensor.exe exists
-echo [INFO] Checking Hunter binary...
+:: Copy geosite data if exists
+echo [INFO] Setting up geosite data...
+if exist "release_package\bin\geosite.dat" (
+    copy "release_package\bin\geosite.dat" "bin\geosite.dat" >nul
+    echo [OK] Geosite data copied from release_package
+) else if exist "bin\geosite.dat" (
+    echo [OK] Geosite data already exists
+) else (
+    echo [WARN] Geosite data not found. Iranian domain routing will use fallback method.
+)
+
+:: Copy huntercensor.exe from available sources
+echo [INFO] Setting up Hunter binary...
 if exist "hunter_cpp\build\huntercensor.exe" (
     copy "hunter_cpp\build\huntercensor.exe" "bin\huntercensor.exe" >nul
-    echo [OK] Hunter binary copied to bin directory
+    echo [OK] Hunter binary copied from build directory
+) else if exist "release_package\hountersansor.exe" (
+    copy "release_package\hountersansor.exe" "bin\huntercensor.exe" >nul
+    echo [OK] Hunter binary copied from release_package
 ) else if exist "bin\huntercensor.exe" (
     echo [OK] Hunter binary already exists
 ) else (
-    echo [ERROR] Hunter binary not found
-    echo Please build the project first:
-    echo   cd hunter_cpp
-    echo   mkdir build && cd build
+    echo [ERROR] Hunter binary not found. Please build the project first.
+    echo   cd hunter_cpp ^&^& mkdir build ^&^& cd build
     echo   cmake -G Ninja -DCMAKE_BUILD_TYPE=Release ..
     echo   ninja
     pause
