@@ -33,6 +33,12 @@ if /i "%1"=="clean" (
     if exist build rmdir /s /q build
 )
 
+REM Ensure no running GUI instance keeps huntercensor.exe locked
+echo Closing running huntercensor processes if any...
+taskkill /F /IM huntercensor.exe >nul 2>&1
+if exist build\huntercensor.exe del /f /q build\huntercensor.exe >nul 2>&1
+if exist ..\bin\huntercensor.exe del /f /q ..\bin\huntercensor.exe >nul 2>&1
+
 REM Configure
 echo Configuring with CMake...
 cmake -S . -B build -G Ninja ^
@@ -56,11 +62,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
+if exist build\hountersansor_cli.exe del /f /q build\hountersansor_cli.exe >nul 2>&1
+if exist ..\bin\hountersansor_cli.exe del /f /q ..\bin\hountersansor_cli.exe >nul 2>&1
+
 echo.
 echo === Build succeeded ===
-echo Executable: build\hunter_cli.exe
+echo Executable: build\huntercensor.exe
 echo.
 echo To run:
-echo   build\hunter_cli.exe --config runtime\hunter_config.json
+echo   build\huntercensor.exe
 echo.
 pause

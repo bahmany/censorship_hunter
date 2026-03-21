@@ -62,7 +62,9 @@ set(TESTING_SOURCES
 # ─── Security Library Sources ───
 set(SECURITY_SOURCES
     src/security/dpi_evasion.cpp
+    src/security/switch_bypass.cpp
     src/security/obfuscation.cpp
+    src/security/packet_bypass.cpp
 )
 
 # ─── Telegram Library Sources ───
@@ -138,6 +140,8 @@ if(WIN32)
         ws2_32
         winhttp
         wininet
+        iphlpapi
+        icmp
     )
     target_compile_definitions(hunter_core PUBLIC CURL_STATICLIB)
 else()
@@ -151,44 +155,46 @@ set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
 # Unicode support
 add_definitions(-DUNICODE -D_UNICODE)
 
-# Console CLI executable
-add_executable(hunter_cli
-    src/main.cpp
-)
-target_link_options(hunter_cli PRIVATE -static)
-target_link_libraries(hunter_cli PRIVATE hunter_core)
-
-add_custom_command(TARGET hunter_cli POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_SOURCE_DIR}/../bin"
-    COMMAND powershell -NoProfile -Command "Copy-Item -Force -ErrorAction SilentlyContinue -LiteralPath '$<TARGET_FILE:hunter_cli>' -Destination '${CMAKE_SOURCE_DIR}/../bin/$<TARGET_FILE_NAME:hunter_cli>'"
-)
-
 # Windows GUI executable (Windows only)
 if(WIN32)
-    add_executable(hunter_ui
+    add_executable(huntercensor
         src/win32/win_main.cpp
-        src/win32/main_window.cpp
+        src/win32/imgui_app.cpp
         src/win32/resource.rc
+        third_party/imgui/imgui.cpp
+        third_party/imgui/imgui_draw.cpp
+        third_party/imgui/imgui_tables.cpp
+        third_party/imgui/imgui_widgets.cpp
+        third_party/imgui/backends/imgui_impl_win32.cpp
+        third_party/imgui/backends/imgui_impl_dx9.cpp
     )
-    target_link_options(hunter_ui PRIVATE -static -mwindows -municode)
-    target_link_libraries(hunter_ui PRIVATE 
+    target_include_directories(huntercensor PRIVATE
+        ${CMAKE_SOURCE_DIR}/third_party/imgui
+        ${CMAKE_SOURCE_DIR}/third_party/imgui/backends
+    )
+    target_link_options(huntercensor PRIVATE -static -mwindows -municode)
+    target_link_libraries(huntercensor PRIVATE 
         hunter_core 
         comctl32 
         shell32 
         dwmapi 
         uxtheme
+        d3d9
     )
-    set_target_properties(hunter_ui PROPERTIES
+    set_target_properties(huntercensor PROPERTIES
         WIN32_EXECUTABLE TRUE
     )
 
     set(_hunter_deploy_dir "${CMAKE_SOURCE_DIR}/../bin")
 
-    add_custom_command(TARGET hunter_ui POST_BUILD
+    add_custom_command(TARGET huntercensor POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "${_hunter_deploy_dir}"
-        COMMAND powershell -NoProfile -Command "Copy-Item -Force -ErrorAction SilentlyContinue -LiteralPath '$<TARGET_FILE:hunter_ui>' -Destination '${_hunter_deploy_dir}/$<TARGET_FILE_NAME:hunter_ui>'"
+        COMMAND powershell -NoProfile -Command "Copy-Item -Force -ErrorAction SilentlyContinue -LiteralPath '$<TARGET_FILE:huntercensor>' -Destination '${_hunter_deploy_dir}/$<TARGET_FILE_NAME:huntercensor>'"
     )
 
+    install(TARGETS huntercensor
+        RUNTIME DESTINATION bin
+    )
 endif()
 
 # Test executable
@@ -199,9 +205,8 @@ target_link_options(hunter_tests PRIVATE -static)
 target_link_libraries(hunter_tests PRIVATE hunter_core)
 
 # Install targets
-install(TARGETS hunter_core hunter_cli
+install(TARGETS hunter_core
     ARCHIVE DESTINATION lib
-    RUNTIME DESTINATION bin
 )
 
 install(DIRECTORY include/ DESTINATION include

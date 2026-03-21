@@ -173,10 +173,24 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     std::string outbound = parsed.toXrayOutboundJson(socks_port);
     if (outbound.empty()) return "";  // Unsupported protocol/cipher/transport
 
-    // Determine if TLS fragment should be applied (anti-DPI for Iranian censorship)
-    // Fragment splits ClientHello into small pieces to bypass SNI-based filtering
-    // Only applicable to TLS connections (not reality, not plain)
-    const bool use_fragment = (parsed.security == "tls");
+    // Apply TLS fragmentation for Iranian DPI bypass
+    // This splits ClientHello into small chunks to evade SNI-based filtering
+    const bool is_tls = (parsed.security == "tls");
+    const bool is_reality = (parsed.security == "reality");
+    
+    // Inject fragment settings into the outbound's streamSettings
+    if (is_tls && outbound.find("\"streamSettings\"") != std::string::npos) {
+        // Find tlsSettings and inject fragment
+        size_t tls_pos = outbound.find("\"tlsSettings\"");
+        if (tls_pos != std::string::npos) {
+            size_t brace_pos = outbound.find("{", tls_pos);
+            if (brace_pos != std::string::npos) {
+                std::string fragment_json = 
+                    "\"fragment\":{\"packets\":\"tlshello\",\"length\":\"100-200\",\"interval\":\"10-20\"},";
+                outbound.insert(brace_pos + 1, fragment_json);
+            }
+        }
+    }
 
     std::ostringstream ss;
     const bool use_mixed_inbound = (http_port > 0 && http_port == socks_port);
@@ -197,22 +211,10 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
        <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
        <<   "}],\n";
 
-    // Outbounds: proxy, direct, dns-out, and optionally fragment
-    if (use_fragment) {
-        // Insert sockopt with TLS fragment into proxy outbound's streamSettings
-        // We need to inject fragment into the outbound JSON
-        // Fragment outbound: proxy → fragment → internet
-        ss << "  \"outbounds\":[" << outbound
-           << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
-           << ",{\"protocol\":\"freedom\",\"tag\":\"fragment-out\",\"settings\":{\"domainStrategy\":\"AsIs\""
-           <<     ",\"fragment\":{\"packets\":\"tlshello\",\"length\":\"100-200\",\"interval\":\"10-20\"}"
-           <<   "}}"
-           << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
-    } else {
-        ss << "  \"outbounds\":[" << outbound 
-           << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
-           << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
-    }
+    // Outbounds with DPI bypass
+    ss << "  \"outbounds\":[" << outbound 
+       << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
+       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
 
     // Build inbound tags for DNS routing
     std::string client_inbounds = "\"mixed-in\"";

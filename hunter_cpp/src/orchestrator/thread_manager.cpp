@@ -12,6 +12,7 @@
 #include <iostream>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -456,9 +457,9 @@ void BaseWorker::runLoop() {
                 std::lock_guard<std::mutex> lock(status_mutex_);
                 status_.next_run_in = (double)remaining;
             }
-            int sleep_ms = std::min(remaining, 5) * 1000;
+            int sleep_ms = std::min(remaining, 1) * 1000;
             std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
-            remaining -= 5;
+            remaining -= 1;
         }
     }
     {
@@ -479,19 +480,29 @@ ConfigScannerWorker::ConfigScannerWorker(HunterOrchestrator* orch, std::atomic<b
 
 void ConfigScannerWorker::execute() {
     auto hw = getHardware();
+    auto task_metrics = HunterTaskManager::instance().getMetrics();
     { std::ostringstream _ls; _ls << "[Scanner] Starting cycle (mode=" << (int)hw.mode
               << ", RAM=" << hw.ram_percent << "%, workers=" << hw.io_pool_size << ")";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     updateExtra("mode", std::to_string((int)hw.mode));
     updateExtra("ram_percent", std::to_string(hw.ram_percent));
+    updateExtra("io_pending", std::to_string(task_metrics.io_pending));
+    updateExtra("io_active", std::to_string(task_metrics.io_active));
+    updateExtra("cpu_pending", std::to_string(task_metrics.cpu_pending));
+    updateExtra("cpu_active", std::to_string(task_metrics.cpu_active));
 
     orch_->config().set("max_total", hw.max_configs);
     orch_->config().set("max_workers", hw.io_pool_size);
 
+    const double now_ts = utils::nowTimestamp();
+    updateExtra("last_cycle_ts", std::to_string(now_ts));
     bool ran = orch_->runCycle();
     updateExtra("last_cycle_ok", ran ? "true" : "false");
     updateExtra("validated", std::to_string(orch_->lastValidatedCount()));
+    if (ran) {
+        updateExtra("last_cycle_success_ts", std::to_string(now_ts));
+    }
 
     // Adaptive interval
     // Default: continuous scanning (can be disabled via env HUNTER_CONTINUOUS=false)
@@ -773,6 +784,7 @@ void GitHubDownloaderWorker::execute() {
     updateExtra("github_untested", std::to_string(tag_stats.untested));
     updateExtra("github_needs_retest", std::to_string(tag_stats.needs_retest));
     updateExtra("downloads", std::to_string(download_count_));
+    updateExtra("last_success_ts", std::to_string(utils::nowTimestamp()));
 
     { std::ostringstream _ls; _ls << "[GitHubBG] Accepted " << refresh.valid_total << " valid configs from "
               << refresh.fetched_total << " fetched, appended " << refresh.appended << ", db+" << refresh.added;
@@ -852,13 +864,21 @@ void ValidatorWorker::execute() {
     }
 
     auto hw = HunterTaskManager::instance().getHardware();
+    auto task_metrics = HunterTaskManager::instance().getMetrics();
     int batch_size = std::max(5, std::min(50, orch_->chunkSize() * 2));
     if (hw.ram_percent >= 95.0f) batch_size = std::min(batch_size, 8);
     else if (hw.ram_percent >= 90.0f) batch_size = std::min(batch_size, 12);
     else if (hw.ram_percent >= 80.0f) batch_size = std::min(batch_size, 20);
+    const int io_pressure_limit = std::max(4, task_metrics.io_pool_size * 2);
+    if (task_metrics.io_pending >= io_pressure_limit) {
+        batch_size = std::max(4, std::min(batch_size, task_metrics.io_pool_size));
+    }
 
     int timeout_s = orch_->testTimeout();
     int max_concurrent = orch_->maxThreads();
+    if (task_metrics.io_pending >= io_pressure_limit) {
+        max_concurrent = std::max(2, std::min(max_concurrent, task_metrics.io_pool_size));
+    }
     network::ContinuousValidator validator(*db, batch_size, timeout_s, max_concurrent);
     auto [tested, passed] = validator.validateBatch();
 
@@ -883,6 +903,10 @@ void ValidatorWorker::execute() {
     updateExtra("effective_chunk_size", std::to_string(orch_->chunkSize()));
     updateExtra("active_test_processes", std::to_string(network::ProxyTester::activeTestCount()));
     updateExtra("max_test_processes", std::to_string(network::ProxyTester::maxConcurrentTestCount()));
+    updateExtra("task_io_pending", std::to_string(task_metrics.io_pending));
+    updateExtra("task_io_active", std::to_string(task_metrics.io_active));
+    updateExtra("task_cpu_pending", std::to_string(task_metrics.cpu_pending));
+    updateExtra("task_cpu_active", std::to_string(task_metrics.cpu_active));
 
     static uint64_t last_ms = 0;
     static int last_total_tests = 0;
@@ -936,13 +960,19 @@ void ValidatorWorker::execute() {
     updateExtra("history_json", hist.str());
 
     auto all_records = db->getAllRecords(500);
+    double latest_first_seen_ts = 0.0;
+    double latest_alive_test_ts = 0.0;
     static bool had_alive_configs = false;
     static uint64_t last_live_refresh_attempt_ms = 0;
     static uint64_t last_live_refresh_success_ms = 0;
     int alive_count_for_refresh = 0;
     for (auto& rec : all_records) {
+        if (rec.first_seen > latest_first_seen_ts) latest_first_seen_ts = rec.first_seen;
         if (rec.alive) alive_count_for_refresh++;
+        if (rec.alive && rec.last_tested > latest_alive_test_ts) latest_alive_test_ts = rec.last_tested;
     }
+    updateExtra("latest_first_seen_ts", std::to_string(latest_first_seen_ts));
+    updateExtra("latest_alive_test_ts", std::to_string(latest_alive_test_ts));
 
     // In continuous mode, validate more frequently (still can be overridden by env)
     const int env_interval = HunterConfig::getEnvInt("HUNTER_VALIDATOR_INTERVAL_S", -1);
@@ -962,7 +992,7 @@ void ValidatorWorker::execute() {
     const bool should_refresh_after_live = has_live_now && (!had_alive_configs ||
         (last_live_refresh_success_ms == 0 && (last_live_refresh_attempt_ms == 0 || (now_ms - last_live_refresh_attempt_ms) > 120000)));
 
-    // Write files FIRST so Flutter sees them immediately, then update balancers
+    // Write files FIRST so realtime consumers see them immediately, then update balancers
     if (stats.db.alive > 0) {
         const auto& healthy = healthy_pairs;
         std::cout << "[Validator] Alive=" << stats.db.alive << " healthy_from_db=" << healthy.size() << std::endl;
@@ -990,7 +1020,23 @@ void ValidatorWorker::execute() {
             for (auto& [uri, lat] : healthy) {
                 if (!bfirst) bcj << ",";
                 bfirst = false;
-                bcj << "{\"uri\":\"" << uri << "\",\"latency_ms\":" << lat << "}";
+                const auto it = std::find_if(all_records.begin(), all_records.end(),
+                    [&](const ConfigHealthRecord& rec) { return rec.uri == uri; });
+                utils::JsonBuilder item;
+                item.add("uri", uri)
+                    .add("latency_ms", lat);
+                if (it != all_records.end()) {
+                    item.add("engine_used", it->engine_used)
+                        .add("first_seen", it->first_seen)
+                        .add("last_alive", it->last_alive_time)
+                        .add("last_tested", it->last_tested)
+                        .add("total_tests", it->total_tests)
+                        .add("total_passes", it->total_passes)
+                        .add("consecutive_fails", it->consecutive_fails)
+                        .add("alive", it->alive)
+                        .add("tag", it->tag);
+                }
+                bcj << item.build();
             }
             bcj << "]}";
             std::string base = utils::dirName(orch_->config().stateFile());
@@ -1292,6 +1338,7 @@ ThreadManager::~ThreadManager() {
 }
 
 void ThreadManager::startAll() {
+    stop_event_ = false;
     auto hw = HunterTaskManager::instance().getHardware();
     std::cout << "ThreadManager starting - " << hw.cpu_count << " CPUs, "
               << hw.ram_total_gb << " GB RAM (" << hw.ram_percent << "% used)"

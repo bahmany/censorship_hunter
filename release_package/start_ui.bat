@@ -1,12 +1,12 @@
 @echo off
-echo Starting Hunter Dashboard UI...
+echo Starting huntercensor...
 echo.
 echo Features:
-echo - Dual-protocol display: SOCKS + HTTP ports
-echo - Copy buttons for each protocol
-echo - System proxy toggle
+echo - Native C++ Dear ImGui interface
+echo - Integrated configs, censorship tools, logs, and advanced controls
+echo - Single executable product path
 echo.
 
-hunter_dashboard.exe
+huntercensor.exe
 
 pause

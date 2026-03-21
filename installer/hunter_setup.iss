@@ -6,8 +6,7 @@
 #define MyAppName "Hunter VPN"
 #define MyAppVersion "1.2.2"
 #define MyAppPublisher "Hunter Project"
-#define MyAppExeName "hunter_dashboard.exe"
-#define MyAppCLIName "hunter_cli.exe"
+#define MyAppExeName "huntercensor.exe"
 #define MyStagingDir "D:\projects\v2ray\pythonProject1\hunter\installer\staging"
 
 [Setup]
@@ -55,21 +54,10 @@ Name: "desktopicon"; Description: "Create Desktop shortcut"; GroupDescription: "
 Name: "startupicon"; Description: "Start Hunter VPN at Windows startup"; GroupDescription: "Startup:"
 
 [Files]
-; Dashboard UI executable + Flutter runtime
-Source: "{#MyStagingDir}\hunter_dashboard.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStagingDir}\flutter_windows.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStagingDir}\screen_retriever_windows_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStagingDir}\system_tray_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStagingDir}\window_manager_plugin.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStagingDir}\data\*"; DestDir: "{app}\data"; Flags: ignoreversion recursesubdirs createallsubdirs
-
-; MSVC Runtime (needed by dashboard UI)
-Source: "{#MyStagingDir}\msvcp140.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStagingDir}\vcruntime140.dll"; DestDir: "{app}"; Flags: ignoreversion
-Source: "{#MyStagingDir}\vcruntime140_1.dll"; DestDir: "{app}"; Flags: ignoreversion
+; Native GUI application
+Source: "{#MyStagingDir}\huntercensor.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; CLI + proxy cores in bin\ (CLI is statically linked, no DLL deps)
-Source: "{#MyStagingDir}\bin\hunter_cli.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\xray.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\sing-box.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\mihomo-windows-amd64-compatible.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
@@ -92,8 +80,7 @@ Source: "{#MyStagingDir}\runtime\HUNTER_config_db.tsv"; DestDir: "{app}\runtime"
 Source: "{#MyStagingDir}\runtime\hunter_config.json"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 
 [Icons]
-Name: "{group}\Hunter VPN Dashboard"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"
-Name: "{group}\Hunter VPN CLI"; Filename: "{app}\bin\{#MyAppCLIName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"
+Name: "{group}\Hunter VPN"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"
 Name: "{group}\Uninstall Hunter VPN"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\Hunter VPN"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"; Tasks: desktopicon
 
@@ -102,11 +89,10 @@ Name: "{autodesktop}\Hunter VPN"; Filename: "{app}\{#MyAppExeName}"; IconFilenam
 Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "HunterVPN"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startupicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Hunter VPN Dashboard"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch Hunter VPN"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
 
 [UninstallRun]
-Filename: "taskkill"; Parameters: "/F /IM hunter_dashboard.exe"; Flags: runhidden; RunOnceId: "KillDashboard"
-Filename: "taskkill"; Parameters: "/F /IM hunter_cli.exe"; Flags: runhidden; RunOnceId: "KillCLI"
+Filename: "taskkill"; Parameters: "/F /IM huntercensor.exe"; Flags: runhidden; RunOnceId: "KillDashboard"
 Filename: "taskkill"; Parameters: "/F /IM xray.exe"; Flags: runhidden; RunOnceId: "KillXray"
 Filename: "taskkill"; Parameters: "/F /IM sing-box.exe"; Flags: runhidden; RunOnceId: "KillSingBox"
 Filename: "taskkill"; Parameters: "/F /IM mihomo-windows-amd64-compatible.exe"; Flags: runhidden; RunOnceId: "KillMihomo"
@@ -125,8 +111,7 @@ var
   ResultCode: Integer;
 begin
   Log('Killing running Hunter processes for update...');
-  Exec('taskkill', '/F /IM hunter_dashboard.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('taskkill', '/F /IM hunter_cli.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM huntercensor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM xray.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM sing-box.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM mihomo-windows-amd64-compatible.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

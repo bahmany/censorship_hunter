@@ -180,11 +180,11 @@ public:
     void writeStatusFile(const std::string& phase = "", int last_tested = 0, int last_passed = 0);
 
     // ─── Real-time UI Communication (stdin/stdout JSON lines) ───
-    /** Process a single JSON command line received from stdin (Flutter UI) */
+    /** Process a single JSON command line received from stdin or another local UI bridge */
     void processStdinCommand(const std::string& json_line);
     /** Process a realtime JSON command and return a JSON result payload */
     std::string processRealtimeCommand(const std::string& json_line);
-    /** Emit ##STATUS## JSON line to stdout for Flutter UI to parse in real-time */
+    /** Emit ##STATUS## JSON line to stdout for realtime consumers */
     void emitStatusJson(const std::string& phase = "running");
     /** Build the full status snapshot JSON used by websocket monitor + file state */
     std::string buildStatusJson(const std::string& phase = "", int last_tested = 0, int last_passed = 0);
@@ -249,7 +249,7 @@ private:
     std::map<std::string, std::vector<std::pair<std::string, float>>> cached_configs_;
     std::map<std::string, std::string> cached_engine_hints_;
     std::mutex cycle_lock_;
-    std::mutex state_mutex_;
+    mutable std::mutex state_mutex_;
     double start_time_ = 0.0;
 
     // Port provisioning (2901-2999)

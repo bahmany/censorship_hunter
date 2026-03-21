@@ -12,6 +12,7 @@
 #include <mutex>
 #include <cstdlib>
 #include <future>
+#include <sstream>
 #include <vector>
 
 #ifdef _WIN32
@@ -83,6 +84,46 @@ static bool useTcpPreScreen() {
 static bool keepFailedXrayArtifacts() {
     static int enabled = getEnvIntClamped("HUNTER_KEEP_FAILED_XRAY_CONFIG", 0, 0, 1);
     return enabled == 1;
+}
+
+static uint32_t fingerprintText(const std::string& value) {
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : value) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
+static std::string summarizeConfigForLog(const std::string& config_uri) {
+    std::string label = "uri";
+    auto parsed = UriParser::parse(config_uri);
+    if (parsed.has_value() && parsed->isValid() && !parsed->protocol.empty()) {
+        label = parsed->protocol;
+    }
+    std::ostringstream oss;
+    oss << label << "#" << std::hex << std::uppercase << fingerprintText(config_uri);
+    return oss.str();
+}
+
+static std::string makeRuntimeArtifactPath(const char* prefix, int port, const char* extension) {
+    static std::atomic<uint32_t> nonce{0};
+#ifdef _WIN32
+    const unsigned long pid = static_cast<unsigned long>(GetCurrentProcessId());
+#else
+    const unsigned long pid = static_cast<unsigned long>(getpid());
+#endif
+    std::random_device rd;
+    std::ostringstream oss;
+    oss << "runtime/" << prefix << "_" << port << "_"
+        << std::hex << std::uppercase << utils::nowMs() << "_"
+        << pid << "_" << nonce.fetch_add(1) << "_" << (rd() & 0xFFFFu)
+        << extension;
+    return oss.str();
+}
+
+static void logKeptArtifacts(const std::string& engine_name, int test_port) {
+    TLOG("  [" << engine_name << ":" << test_port << "] KEEP failure artifacts enabled");
 }
 
 static void onTestStarted() {
@@ -277,15 +318,14 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     s_active_tests++;
     
     // Extract short URI for logging
-    std::string short_uri = config_uri.substr(0, 40);
-    if (config_uri.size() > 40) short_uri += "...";
+    std::string short_uri = summarizeConfigForLog(config_uri);
     
     // TCP pre-screening: quick connect to proxy server to skip dead IPs
     auto parsed_opt = UriParser::parse(config_uri);
     if (useTcpPreScreen() && parsed_opt.has_value() && parsed_opt->isValid()) {
         if (!utils::tcpConnect(parsed_opt->address, parsed_opt->port, 2000)) {
             result.error_message = "Server unreachable";
-            TLOG("  [Pre] DEAD " << parsed_opt->address << ":" << parsed_opt->port);
+            TLOG("  [Pre] DEAD " << short_uri);
             s_active_tests--;
             return result;
         }
@@ -302,7 +342,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     }
     
     // Write config to temp file
-    std::string temp_config = "runtime/temp_xray_test_" + std::to_string(test_port) + ".json";
+    std::string temp_config = makeRuntimeArtifactPath("temp_xray_test", test_port, ".json");
     if (!utils::saveJsonFile(temp_config, config_json)) {
         result.error_message = "Failed to write temp config";
         s_active_tests--;
@@ -311,7 +351,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     
 #ifdef _WIN32
     // Capture XRay stdout (XRay writes errors to stdout, not stderr)
-    std::string xray_out_path = "runtime/temp_xray_out_" + std::to_string(test_port) + ".txt";
+    std::string xray_out_path = makeRuntimeArtifactPath("temp_xray_out", test_port, ".txt");
     SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -328,7 +368,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     si.hStdInput = NULL;
     
     std::string cmd = "\"" + xray_path_ + "\" run -c \"" + temp_config + "\"";
-    TLOG("  [Test:" << test_port << "] Starting xray: " << cmd);
+    TLOG("  [Test:" << test_port << "] Starting xray process");
     char cmd_buf[4096];
     strncpy(cmd_buf, cmd.c_str(), sizeof(cmd_buf) - 1);
     cmd_buf[sizeof(cmd_buf) - 1] = 0;
@@ -339,7 +379,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
         TLOG("  [Test:" << test_port << "] FAIL " << short_uri << " - CreateProcess failed");
         if (hOutFile != INVALID_HANDLE_VALUE) CloseHandle(hOutFile);
         if (keepFailedXrayArtifacts()) {
-            TLOG("  [Test:" << test_port << "] KEEP xray artifacts cfg=" << temp_config << " log=" << xray_out_path);
+            logKeptArtifacts("Test", test_port);
         } else {
             std::remove(temp_config.c_str());
             std::remove(xray_out_path.c_str());
@@ -383,7 +423,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
             }
         }
         if (keepFailedXrayArtifacts()) {
-            TLOG("  [Test:" << test_port << "] KEEP xray artifacts cfg=" << temp_config << " log=" << xray_out_path);
+            logKeptArtifacts("Test", test_port);
         } else {
             std::remove(temp_config.c_str());
             std::remove(xray_out_path.c_str());
@@ -432,9 +472,10 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
         result.download_speed_kbps = speed;
         TLOG("  [Test:" << test_port << "] OK   " << short_uri << " - " << speed << " KB/s");
     } else if (telegram_ok) {
-        result.success = false;
+        result.success = true;
         result.telegram_only = true;
-        result.download_speed_kbps = 0.0f;
+        result.download_speed_kbps = 0.1f;
+        TLOG("  [Test:" << test_port << "] TG-OK " << short_uri << " (Telegram-only, HTTP blocked by DPI)");
     } else {
         result.error_message = "All connectivity tests failed";
         TLOG("  [Test:" << test_port << "] FAIL " << short_uri << " - all tests failed");
@@ -598,9 +639,10 @@ static ProxyTestResult runEngineTest(
         result.download_speed_kbps = speed;
         TLOG("  [" << engine_name << ":" << test_port << "] OK   " << short_uri << " - " << speed << " KB/s");
     } else if (telegram_ok) {
-        result.success = false;
+        result.success = true;
         result.telegram_only = true;
-        result.download_speed_kbps = 0.0f;
+        result.download_speed_kbps = 0.1f;
+        TLOG("  [" << engine_name << ":" << test_port << "] TG-OK " << short_uri << " (Telegram-only, HTTP blocked by DPI)");
     } else {
         result.error_message = "All connectivity tests failed";
         TLOG("  [" << engine_name << ":" << test_port << "] FAIL " << short_uri << " - all tests failed");
@@ -627,8 +669,7 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
     }
     s_active_tests++;
     
-    std::string short_uri = config_uri.substr(0, 40);
-    if (config_uri.size() > 40) short_uri += "...";
+    std::string short_uri = summarizeConfigForLog(config_uri);
     
     // Parse URI and generate sing-box config
     auto parsed_opt = UriParser::parse(config_uri);
@@ -646,7 +687,7 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
         return result;
     }
     
-    std::string temp_config = "runtime/temp_singbox_test_" + std::to_string(test_port) + ".json";
+    std::string temp_config = makeRuntimeArtifactPath("temp_singbox_test", test_port, ".json");
     if (!utils::saveJsonFile(temp_config, config_json)) {
         result.error_message = "Failed to write temp config";
         s_active_tests--;
@@ -654,7 +695,7 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
     }
     
 #ifdef _WIN32
-    std::string log_file = "runtime/temp_singbox_out_" + std::to_string(test_port) + ".txt";
+    std::string log_file = makeRuntimeArtifactPath("temp_singbox_out", test_port, ".txt");
     std::string cmd = "\"" + singbox_path_ + "\" run -c \"" + temp_config + "\"";
     result = runEngineTest(cmd, temp_config, log_file, test_port, short_uri, "sing-box", timeout_seconds);
 #else
@@ -683,8 +724,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     }
     s_active_tests++;
     
-    std::string short_uri = config_uri.substr(0, 40);
-    if (config_uri.size() > 40) short_uri += "...";
+    std::string short_uri = summarizeConfigForLog(config_uri);
     
     // Parse URI and generate mihomo config
     auto parsed_opt = UriParser::parse(config_uri);
@@ -703,7 +743,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     }
     
     // mihomo uses .yaml config files
-    std::string temp_config = "runtime/temp_mihomo_test_" + std::to_string(test_port) + ".yaml";
+    std::string temp_config = makeRuntimeArtifactPath("temp_mihomo_test", test_port, ".yaml");
     {
         std::ofstream ofs(temp_config);
         if (!ofs) {
@@ -715,7 +755,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     }
     
 #ifdef _WIN32
-    std::string log_file = "runtime/temp_mihomo_out_" + std::to_string(test_port) + ".txt";
+    std::string log_file = makeRuntimeArtifactPath("temp_mihomo_out", test_port, ".txt");
     std::string cmd = "\"" + mihomo_path_ + "\" -f \"" + temp_config + "\"";
     result = runEngineTest(cmd, temp_config, log_file, test_port, short_uri, "mihomo", timeout_seconds);
 #else
@@ -875,7 +915,7 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
     }
 
     // Write config and start single xray process
-    std::string config_path = "runtime/temp_xray_batch_" + std::to_string(base_port) + ".json";
+    std::string config_path = makeRuntimeArtifactPath("temp_xray_batch", base_port, ".json");
     if (!utils::saveJsonFile(config_path, batch_config)) {
         for (auto& r : results) {
             if (r.error_message.empty()) r.error_message = "Failed to write batch config";
@@ -884,7 +924,7 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
     }
 
 #ifdef _WIN32
-    std::string log_path = "runtime/temp_xray_batch_out_" + std::to_string(base_port) + ".txt";
+    std::string log_path = makeRuntimeArtifactPath("temp_xray_batch_out", base_port, ".txt");
     SECURITY_ATTRIBUTES sa = {};
     sa.nLength = sizeof(sa);
     sa.bInheritHandle = TRUE;
@@ -905,7 +945,7 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
     strncpy(cmd_buf, cmd.c_str(), sizeof(cmd_buf) - 1);
     cmd_buf[sizeof(cmd_buf) - 1] = 0;
 
-    TLOG("[BatchTest] Starting single xray process: " << cmd);
+    TLOG("[BatchTest] Starting single xray process");
 
     if (!CreateProcessA(NULL, cmd_buf, NULL, NULL, TRUE,
                         CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
@@ -966,8 +1006,7 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
         size_t idx = orig_idx;
         int p = port;
         futures.push_back(std::async(std::launch::async, [this, idx, p, quick_timeout, dl_timeout, &results]() {
-            std::string short_uri = results[idx].uri.substr(0, 40);
-            if (results[idx].uri.size() > 40) short_uri += "...";
+            std::string short_uri = summarizeConfigForLog(results[idx].uri);
 
             float speed = -1.0f;
             for (int t = 0; t < NUM_TEST_URLS && speed <= 0.0f; t++) {
@@ -986,10 +1025,10 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
                 results[idx].download_speed_kbps = speed;
                 TLOG("  [Batch:" << p << "] OK   " << short_uri << " - " << speed << " KB/s");
             } else if (telegram_ok) {
-                results[idx].success = false;
+                results[idx].success = true;
                 results[idx].telegram_only = true;
-                results[idx].download_speed_kbps = 0.0f;
-                TLOG("  [Batch:" << p << "] TG-ONLY " << short_uri);
+                results[idx].download_speed_kbps = 0.1f;
+                TLOG("  [Batch:" << p << "] TG-OK " << short_uri << " (Telegram-only)");
             } else {
                 results[idx].error_message = "All connectivity tests failed";
                 TLOG("  [Batch:" << p << "] FAIL " << short_uri);

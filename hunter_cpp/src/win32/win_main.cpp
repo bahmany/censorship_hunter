@@ -1,12 +1,13 @@
-#include "win32/main_window.h"
+#include "win32/imgui_app.h"
 #include "resource.h"
 #include <windows.h>
+#include <string>
 
 static void AppendUiLog(const wchar_t* line) {
     wchar_t path[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, path);
     if (n == 0 || n >= MAX_PATH) return;
-    lstrcatW(path, L"hunter_ui.log");
+    lstrcatW(path, L"huntercensor_ui.log");
 
     HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (h == INVALID_HANDLE_VALUE) return;
@@ -24,6 +25,10 @@ static void AppendUiLog(const wchar_t* line) {
     CloseHandle(h);
 }
 
+static bool PathExists(const std::wstring& path) {
+    return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
 static void SetCwdToExeDir() {
     wchar_t path[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
@@ -31,10 +36,35 @@ static void SetCwdToExeDir() {
     wchar_t* last = wcsrchr(path, L'\\');
     if (!last) return;
     *last = 0;
+
+    std::wstring probe = path;
+    for (int i = 0; i < 5; ++i) {
+        if (PathExists(probe + L"\\bin\\xray.exe")) {
+            SetCurrentDirectoryW(probe.c_str());
+            CreateDirectoryW(L"runtime", nullptr);
+            return;
+        }
+        size_t sep = probe.find_last_of(L"\\/");
+        if (sep == std::wstring::npos) break;
+        probe.resize(sep);
+    }
+
     SetCurrentDirectoryW(path);
 
     // Ensure local runtime folder exists for relative paths (runtime/...) when launched from bin
     CreateDirectoryW(L"runtime", nullptr);
+}
+
+static void EnableDpiAwareness() {
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+    if (user32) {
+        using SetDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
+        auto set_context = reinterpret_cast<SetDpiAwarenessContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+        if (set_context && set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+            return;
+        }
+    }
+    SetProcessDPIAware();
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
@@ -45,11 +75,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
 
     SetCwdToExeDir();
 
-    // Enable modern visual styles
-    SetProcessDPIAware();
+    EnableDpiAwareness();
 
     // Create and show main window
-    hunter::win32::MainWindow mainWindow;
+    hunter::win32::ImGuiApp mainWindow;
 
     if (!mainWindow.Create(hInstance, nCmdShow)) {
         AppendUiLog(L"MainWindow::Create failed");
@@ -58,24 +87,5 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     }
 
     AppendUiLog(L"MainWindow::Create ok, entering message loop");
-
-    // Message loop
-    MSG msg;
-    while (true) {
-        BOOL ok = GetMessageW(&msg, nullptr, 0, 0);
-        if (ok > 0) {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-            continue;
-        }
-        if (ok == 0) {
-            // WM_QUIT
-            AppendUiLog(L"GetMessageW returned 0 (WM_QUIT)");
-            return (int)msg.wParam;
-        }
-        // ok == -1
-        AppendUiLog(L"GetMessageW returned -1");
-        MessageBoxW(nullptr, L"GetMessageW failed (returned -1).", L"Hunter UI Error", MB_OK | MB_ICONERROR | MB_TOPMOST);
-        return 2;
-    }
+    return mainWindow.Run();
 }

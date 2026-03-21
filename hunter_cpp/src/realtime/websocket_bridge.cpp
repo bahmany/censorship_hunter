@@ -27,6 +27,8 @@ namespace hunter {
 namespace realtime {
 namespace {
 
+WebSocketBridge* g_active_bridge = nullptr;
+
 #ifdef _WIN32
 using native_socket_t = SOCKET;
 static constexpr native_socket_t kInvalidSocket = INVALID_SOCKET;
@@ -300,6 +302,7 @@ bool WebSocketBridge::start() {
         return false;
     }
     running_ = true;
+    g_active_bridge = this;
     control_thread_ = std::thread(&WebSocketBridge::controlLoop, this);
     monitor_accept_thread_ = std::thread(&WebSocketBridge::monitorAcceptLoop, this);
     monitor_publish_thread_ = std::thread(&WebSocketBridge::monitorPublishLoop, this);
@@ -308,6 +311,7 @@ bool WebSocketBridge::start() {
 
 void WebSocketBridge::stop() {
     if (!running_.exchange(false)) return;
+    if (g_active_bridge == this) g_active_bridge = nullptr;
     closeSocketFd(control_listener_);
     closeSocketFd(monitor_listener_);
     control_listener_ = -1;
@@ -481,6 +485,10 @@ void WebSocketBridge::broadcastMonitorJson(const std::string& json_payload) {
     }
 }
 
+void WebSocketBridge::broadcastMonitorEvent(const std::string& type, const std::string& raw_json) {
+    broadcastMonitorJson(makeEvent(type, raw_json));
+}
+
 void WebSocketBridge::removeDeadMonitorClients() {
     std::lock_guard<std::mutex> lock(monitor_clients_mutex_);
     monitor_clients_.erase(
@@ -614,6 +622,12 @@ void WebSocketBridge::monitorPublishLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     }
+}
+
+bool broadcastGlobalMonitorEvent(const std::string& type, const std::string& raw_json) {
+    if (!g_active_bridge || !g_active_bridge->isRunning()) return false;
+    g_active_bridge->broadcastMonitorEvent(type, raw_json);
+    return true;
 }
 
 } // namespace realtime

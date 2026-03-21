@@ -173,7 +173,7 @@ int main(int argc, char* argv[]) {
 
     std::cout << "Starting fresh V2Ray config discovery service..." << std::endl;
 
-    // Stdin reader thread: reads JSON-line commands from Flutter UI process stdin
+    // Stdin reader thread: reads JSON-line commands from stdin for local automation or bridging
     std::thread stdin_reader([&orchestrator]() {
         std::string line;
         while (g_running.load() && std::getline(std::cin, line)) {

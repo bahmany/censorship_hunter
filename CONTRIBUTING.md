@@ -28,15 +28,6 @@ ninja
 ./hunter_tests.exe
 ```
 
-### Flutter UI
-
-```powershell
-cd hunter_flutter_ui
-flutter pub get
-flutter analyze
-flutter build windows --release
-```
-
 ## Code Style
 
 ### C++
@@ -47,12 +38,6 @@ flutter build windows --release
 - **Namespaces**: `hunter::`, `hunter::network::`, `hunter::proxy::`, etc.
 - **Documentation**: Doxygen-style `@brief` comments on public APIs
 - **Concurrency**: Use `std::atomic` for flags, `std::mutex` for shared state, avoid raw `new`/`delete`
-
-### Dart/Flutter
-
-- **Style**: Follow Dart effective style guide
-- **Analysis**: Code must pass `flutter analyze` with zero issues
-- **Widgets**: Prefer `StatelessWidget` with const constructors where possible
 
 ## Pull Request Guidelines
 
@@ -73,9 +58,9 @@ When reporting bugs, please include:
 
 ## Architecture Notes
 
-- The C++ backend (`hunter_cli`) is the core engine — it runs autonomously
-- The Flutter UI (`hunter_dashboard`) is a thin monitoring/control layer
-- Communication is via stdin/stdout JSON lines (primary) and file-based status (secondary)
+- The native app (`hountersansor`) is the primary product surface
+- The console app (`hountersansor_cli`) exposes the orchestrator runtime and realtime command/status surface
+- Communication is via direct orchestrator calls in the native app, websocket realtime channels, and file-based runtime state
 - All network operations go through `libcurl` with configurable timeouts
 - The `ConfigDatabase` is in-memory only — persistence is handled by `SmartCache` writing to files
 

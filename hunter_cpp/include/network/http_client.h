@@ -135,6 +135,7 @@ public:
 private:
     HttpClient& http_;
     std::atomic<int> direct_works_{-1};  // -1=unknown, 0=no, 1=yes
+    double last_direct_check_ts_ = 0.0;
     int direct_fail_streak_ = 0;
 
     // Circuit breaker

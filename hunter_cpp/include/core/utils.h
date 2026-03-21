@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <functional>
 #include <regex>
+#include <ctime>
 #include <mutex>
 
 // ─── Platform network headers (must be before namespace) ───
@@ -43,6 +44,11 @@ uint64_t nowMs();
  * @brief SHA1 hash of a string, returned as hex
  */
 std::string sha1Hex(const std::string& input);
+
+/**
+ * @brief Convert uint64_t to hex string (e.g. "7f8a1b2c3000")
+ */
+std::string toHex(uint64_t value);
 
 /**
  * @brief Base64 decode
@@ -269,6 +275,9 @@ private:
 
 /**
  * @brief Thread-safe ring buffer for recent log lines (dashboard display)
+ *
+ * Supports a generation counter so consumers can efficiently detect new
+ * entries without copying the entire buffer every frame.
  */
 class LogRingBuffer {
 public:
@@ -279,8 +288,45 @@ public:
 
     void push(const std::string& line) {
         std::lock_guard<std::mutex> lock(mu_);
-        buf_[write_pos_ % CAPACITY] = line;
+        std::string stamped = line;
+        const bool has_timestamp = stamped.size() >= 11 && stamped[0] == '[' && stamped[3] == ':' && stamped[6] == ':' && stamped[9] == ']';
+        if (!has_timestamp) {
+            std::time_t now = std::time(nullptr);
+            std::tm tm{};
+#ifdef _WIN32
+            localtime_s(&tm, &now);
+#else
+            localtime_r(&now, &tm);
+#endif
+            char buf[16];
+            std::strftime(buf, sizeof(buf), "%H:%M:%S", &tm);
+            stamped = std::string("[") + buf + "] " + stamped;
+        }
+        buf_[write_pos_ % CAPACITY] = std::move(stamped);
         write_pos_++;
+    }
+
+    /** Return the current write position (generation). */
+    size_t generation() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return write_pos_;
+    }
+
+    /** Fetch lines written since |since| up to |max_count|.
+     *  Updates |since| to the new generation. */
+    std::vector<std::string> fetchSince(size_t& since, int max_count = 500) const {
+        std::lock_guard<std::mutex> lock(mu_);
+        std::vector<std::string> result;
+        if (since >= write_pos_) return result;
+        size_t available = write_pos_ - since;
+        if (available > CAPACITY) { since = write_pos_ - CAPACITY; available = CAPACITY; }
+        if (available > (size_t)max_count) { since = write_pos_ - max_count; available = max_count; }
+        result.reserve(available);
+        for (size_t i = since; i < write_pos_; ++i) {
+            result.push_back(buf_[i % CAPACITY]);
+        }
+        since = write_pos_;
+        return result;
     }
 
     std::vector<std::string> recent(int n) const {
@@ -295,7 +341,7 @@ public:
 
 private:
     LogRingBuffer() : write_pos_(0) {}
-    static constexpr size_t CAPACITY = 200;
+    static constexpr size_t CAPACITY = 2000;
     std::string buf_[CAPACITY];
     size_t write_pos_;
     mutable std::mutex mu_;

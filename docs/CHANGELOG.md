@@ -61,7 +61,6 @@
 - **Config scraping** — Telegram channels, GitHub repositories, HTTP/anti-censorship sources.
 - **XRay-based proxy testing** — Automated config validation with latency measurement.
 - **Load balancing** — Main + Gemini balancers with XRay leastPing strategy.
-- **Flutter desktop dashboard** — Start/Stop controls, log viewer, config browser with copy/export.
-- **System tray** — Minimize to tray, notifications for new configs.
-- **Bundled seed configs** — First-run bootstrap with pre-packaged working configs.
-- **Single instance enforcement** — Prevents multiple dashboard instances.
+- **Native Windows app** — Start/Stop controls, log viewer, config browser, censorship tools, and advanced runtime controls.
+- **Direct native control surface** — Integrated monitoring and orchestration in a single executable.
+- **Lightweight packaging** — No extra desktop runtime payload.

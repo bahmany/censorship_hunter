@@ -192,7 +192,7 @@ void test_logRingBuffer() {
     ring.push("line3");
     auto recent = ring.recent(2);
     CHECK(recent.size() == 2, "should return 2 recent lines");
-    CHECK(recent[0] == "line2" && recent[1] == "line3", "recent order wrong");
+    CHECK(recent[0].find("line2") != std::string::npos && recent[1].find("line3") != std::string::npos, "recent order wrong");
     PASS();
 }
 

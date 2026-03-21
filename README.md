@@ -6,11 +6,10 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
-[![Flutter](https://img.shields.io/badge/Flutter-3.11-02569B.svg)](https://flutter.dev)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20x64-0078D6.svg)](#system-requirements)
 [![Release](https://img.shields.io/github/v/release/bahmany/censorship_hunter)](https://github.com/bahmany/censorship_hunter/releases)
 
-*A high-performance C++ backend with a modern Flutter desktop UI that autonomously discovers, benchmarks, and load-balances proxy configurations from 20+ public sources — designed for environments with heavy internet restrictions.*
+*A native C++ application with Dear ImGui that autonomously discovers, benchmarks, and load-balances proxy configurations from 20+ public sources — designed for environments with heavy internet restrictions.*
 
 </div>
 
@@ -43,23 +42,23 @@ The project consists of two main components:
 
 | Component | Technology | Description |
 |-----------|------------|-------------|
-| **Backend Engine** (`hunter_cli`) | C++17, CMake, libcurl, zlib | Autonomous orchestrator with 9 concurrent worker threads |
-| **Desktop UI** (`hunter_dashboard`) | Flutter 3.11, Dart | Real-time monitoring dashboard with neon dark theme |
+| **Native App** (`hountersansor`) | C++17, Dear ImGui, Win32, DirectX9 | Integrated monitoring and control UI |
+| **Console App** (`hountersansor_cli`) | C++17, CMake, libcurl, zlib | Autonomous orchestrator with 9 concurrent worker threads |
 
-Communication between the UI and backend uses **bidirectional JSON lines over stdin/stdout**, with file-based status updates as a secondary channel.
+The native UI talks directly to the orchestrator and also exposes websocket-based realtime control and monitoring channels.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│                   Flutter Desktop UI                     │
-│  Dashboard │ Configs │ Logs │ Advanced │ About           │
+│                 Native App (hountersansor)               │
+│  Home │ Configs │ Censorship │ Logs │ Advanced          │
 │  ─────────────────────────────────────────────────────── │
-│  stdin JSON commands ↓          ↑ ##STATUS## JSON lines  │
-└─────────────────────────┬───────┴───────────────────────┘
+│  Direct orchestrator calls + realtime monitor/control    │
+└─────────────────────────┬───────────────────────────────┘
                           │
 ┌─────────────────────────▼───────────────────────────────┐
-│                 C++ Orchestrator (hunter_cli)             │
+│              C++ Orchestrator (hountersansor_cli)        │
 │                                                           │
 │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐ │
 │  │ Config   │  │ GitHub   │  │Continuous│  │Aggressive│ │
@@ -108,18 +107,13 @@ Communication between the UI and backend uses **bidirectional JSON lines over st
 - **Hardware-Aware Scaling** — Detects CPU count and RAM, adjusts thread pools and batch sizes dynamically
 - **Crash Resilience** — SEH exception handler (Windows), crash logging to `runtime/hunter_crash.log`, graceful shutdown on CTRL+C
 
-### Desktop UI (Flutter)
+### Native UI (Dear ImGui)
 
-- **Real-time Dashboard** — Arc gauges, sparkline trends, alive config count, engine status, provisioned port status with health indicators
-- **Config Browser** — 6 tabs (Alive, Silver, Balancer, Gemini, All Cache, GitHub) with per-row copy, speed test, and QR code generation
-- **Log Viewer** — Color-coded console output with auto-scroll, 100KB memory cap with oldest-line trimming
-- **Advanced Controls** — Pause/Resume, speed profiles (Low/Medium/High), thread count slider (1–50), test timeout slider (1–10s), config age cleanup, manual config addition, GitHub source URL editor
-- **System Proxy Integration** — One-click "USE" button sets Windows system proxy to any active port; "CLEAR" removes it
-- **System Tray** — Minimize to tray on close, context menu (Show/Start/Stop/Exit), tooltip updates on new config discovery
-- **QR Code** — Pure-Dart QR encoder (no external dependencies) for sharing config URIs to mobile devices
-- **Bundled Seed Configs** — Ships with initial config files in `assets/configs/` that are copied to `Documents/Hunter/config` on first run
-- **Single Instance Lock** — File-based exclusive lock prevents multiple dashboard instances
-- **Window Auto-Adapt** — Detects screen resolution, sets window to 75% × 85% clamped between 900×600 and 1800×1200
+- **Simple Main Pages** — Home, Configs, Censorship, and Logs for day-to-day use
+- **Advanced Workspace** — Runtime paths, Telegram settings, GitHub sources, provisioning, cleanup, and technical controls grouped together
+- **Direct Orchestrator Integration** — Start/Stop, pause/resume, cycle control, import/export, and live state access from one native process
+- **Realtime Discovery View** — Live discovery logs and censorship diagnostics in the native app
+- **Native Windows Shell** — Win32 + DirectX9 rendering with no extra desktop runtime payload
 
 ## Quick Start
 
@@ -127,7 +121,7 @@ Communication between the UI and backend uses **bidirectional JSON lines over st
 
 1. Download the latest `.zip` from [Releases](https://github.com/bahmany/censorship_hunter/releases)
 2. Extract to any folder
-3. Run `hunter_dashboard.exe`
+3. Run `hountersansor.exe`
 4. Click **START** — the backend begins autonomous discovery immediately
 5. Configure your browser to use `127.0.0.1:10808` as a SOCKS5 proxy
 
@@ -150,7 +144,6 @@ To also scrape configs from Telegram channels, configure in the Advanced tab:
 | [MSYS2](https://www.msys2.org/) | Latest | C++ toolchain (UCRT64 environment) |
 | [CMake](https://cmake.org/) | ≥ 3.16 | C++ build system |
 | [Ninja](https://ninja-build.org/) | Latest | Fast build backend |
-| [Flutter SDK](https://flutter.dev/) | ≥ 3.11 | Desktop UI framework |
 | [Visual Studio](https://visualstudio.microsoft.com/) | 2022+ | Windows SDK & C++ desktop workload |
 
 ### Build C++ Backend
@@ -164,17 +157,7 @@ mkdir build && cd build
 cmake .. -G Ninja
 ninja
 
-# Output: hunter_cpp/build/hunter_cli.exe (also copied to bin/)
-```
-
-### Build Flutter UI
-
-```powershell
-cd hunter_flutter_ui
-flutter pub get
-flutter build windows --release
-
-# Output: hunter_flutter_ui/build/windows/x64/runner/Release/hunter_dashboard.exe
+# Output: hunter_cpp/build/hountersansor.exe and hunter_cpp/build/hountersansor_cli.exe
 ```
 
 ### Run Tests
@@ -187,7 +170,7 @@ cd hunter_cpp/build
 
 ## Configuration
 
-The backend reads configuration from `runtime/hunter_config.json` (auto-created with defaults on first run). The UI can modify settings live via stdin JSON commands.
+The backend reads configuration from `runtime/hunter_config.json` (auto-created with defaults on first run). The native UI can modify settings live through the orchestrator runtime command surface.
 
 Key configuration options are also available through environment variables. See [`.env.example`](.env.example) for the full list.
 
@@ -225,25 +208,6 @@ hunter/
 │   ├── src/                       # Implementation files (mirrors include/ layout)
 │   └── tests/
 │       └── test_core.cpp          # 21 unit tests
-│
-├── hunter_flutter_ui/             # Flutter desktop UI
-│   ├── lib/
-│   │   ├── main.dart              # App entry, process management, stdin/stdout IPC
-│   │   ├── theme.dart             # "Racing Neon" dark color palette
-│   │   ├── models.dart            # Enums and data classes
-│   │   ├── services.dart          # File I/O, engine detection, speed test helpers
-│   │   └── widgets/
-│   │       ├── dashboard_section  # Gauges, alive configs, port status, controls
-│   │       ├── configs_section    # 6-tab config browser with copy/QR/speed test
-│   │       ├── logs_section       # Color-coded log viewer
-│   │       ├── advanced_section   # Speed controls, GitHub URL editor, Telegram
-│   │       ├── about_section      # Project info
-│   │       ├── gauge_painter      # Arc gauge + sparkline custom painters
-│   │       ├── qr_painter         # Pure-Dart QR encoder (no deps)
-│   │       └── qr_dialog          # QR code display dialog
-│   ├── assets/configs/            # Bundled seed configurations
-│   ├── pubspec.yaml               # Dependencies: window_manager, system_tray, etc.
-│   └── windows/                   # Windows runner (Visual Studio project)
 │
 ├── config/                        # Runtime config directory
 │   └── import/                    # Drop .txt files here for auto-import
@@ -323,11 +287,11 @@ Configs are scored by anti-censorship features:
 
 | Symptom | Cause | Solution |
 |---------|-------|----------|
-| `hunter_cli.exe` not found | Backend binary missing from `bin/` | Re-extract from release ZIP or build from source |
+| `hountersansor_cli.exe` not found | Backend binary missing from `bin/` | Re-extract from release ZIP or build from source |
 | DLL errors on launch | Antivirus quarantined files | Add extraction folder to antivirus exclusions |
 | Port 10808 already in use | Another proxy or previous instance | Kill the process using the port, or change port in `runtime/hunter_config.json` |
 | No configs appearing | No internet, or all sources blocked | Check connectivity; try adding manual configs via Advanced tab |
-| UI won't start | Missing `data/` folder | Ensure `data/` with `app.so` exists alongside `hunter_dashboard.exe` |
+| UI won't start | Native app files missing or blocked | Ensure `hountersansor.exe` exists alongside the bundled engines and runtime files |
 | Slow config discovery | Default speed profile is conservative | Switch to "High" speed profile in dashboard controls |
 | Configs found but proxy not working | Balancer has no healthy backends yet | Wait for benchmarking to complete (watch Gold count in dashboard) |
 

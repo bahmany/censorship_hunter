@@ -38,6 +38,7 @@ public:
             std::lock_guard<std::mutex> lock(mutex_);
             if (stop_) throw std::runtime_error("ThreadPool is stopped");
             tasks_.emplace([task]() { (*task)(); });
+            pending_.fetch_add(1);
         }
         cv_.notify_one();
         return future;
@@ -45,6 +46,7 @@ public:
 
     size_t size() const { return workers_.size(); }
     size_t pendingTasks() const;
+    size_t activeTasks() const;
     void resize(size_t new_size);
 
 private:
@@ -53,6 +55,8 @@ private:
     std::mutex mutex_;
     std::condition_variable cv_;
     std::atomic<bool> stop_{false};
+    std::atomic<size_t> pending_{0};
+    std::atomic<size_t> active_{0};
     std::string name_prefix_;
 
     void workerLoop(int id);
@@ -111,6 +115,8 @@ public:
         int cpu_pool_size;
         int io_pending;
         int cpu_pending;
+        int io_active;
+        int cpu_active;
     };
     Metrics getMetrics() const;
 

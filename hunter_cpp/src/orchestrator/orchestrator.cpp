@@ -4,6 +4,7 @@
 #include "core/constants.h"
 #include "core/task_manager.h"
 #include "network/proxy_tester.h"
+#include "realtime/websocket_bridge.h"
 
 #include <iostream>
 #include <iomanip>
@@ -250,11 +251,15 @@ void HunterOrchestrator::initComponents() {
 
 void HunterOrchestrator::start() {
     stop_requested_ = false;
-    start_time_ = utils::nowTimestamp();
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        start_time_ = utils::nowTimestamp();
+    }
 
     std::string runtime_dir = utils::dirName(config_.stateFile());
     if (runtime_dir.empty()) runtime_dir = "runtime";
     const std::string stop_flag = runtime_dir + "/stop.flag";
+    const std::string cmd_file = runtime_dir + "/hunter_command.json";
 
     // ═══ PHASE -1: Kill processes occupying required ports ═══
     killPortOccupants();
@@ -302,8 +307,15 @@ void HunterOrchestrator::start() {
     // This ensures the UI gets status updates and validation starts quickly.
 
     // ═══ PHASE 1: Immediate connectivity from cached configs ═══
-    auto main_cached = cached_configs_.find("HUNTER_balancer_cache.json");
-    auto gemini_cached = cached_configs_.find("HUNTER_gemini_balancer_cache.json");
+    std::vector<std::pair<std::string, float>> main_cached_configs;
+    std::vector<std::pair<std::string, float>> gemini_cached_configs;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        auto main_cached = cached_configs_.find("HUNTER_balancer_cache.json");
+        if (main_cached != cached_configs_.end()) main_cached_configs = main_cached->second;
+        auto gemini_cached = cached_configs_.find("HUNTER_gemini_balancer_cache.json");
+        if (gemini_cached != cached_configs_.end()) gemini_cached_configs = gemini_cached->second;
+    }
 
     // Also load working configs from SmartCache as fallback
     std::vector<std::pair<std::string, float>> fallback_configs;
@@ -318,10 +330,10 @@ void HunterOrchestrator::start() {
 
     // Start main balancer with cached configs
     if (balancer_) {
-        if (main_cached != cached_configs_.end() && !main_cached->second.empty()) {
-            if (balancer_->start(main_cached->second)) {
+        if (!main_cached_configs.empty()) {
+            if (balancer_->start(main_cached_configs)) {
                 std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
-                          << " <- " << main_cached->second.size() << " cached configs" << std::endl;
+                          << " <- " << main_cached_configs.size() << " cached configs" << std::endl;
             } else {
                 utils::LogRingBuffer::instance().push(
                     "[Startup] Main balancer failed on port " + std::to_string(config_.multiproxyPort()));
@@ -343,10 +355,10 @@ void HunterOrchestrator::start() {
 
     // Start gemini balancer with cached configs
     if (gemini_balancer_) {
-        if (gemini_cached != cached_configs_.end() && !gemini_cached->second.empty()) {
-            if (gemini_balancer_->start(gemini_cached->second)) {
+        if (!gemini_cached_configs.empty()) {
+            if (gemini_balancer_->start(gemini_cached_configs)) {
                 std::cout << "[Startup] Gemini balancer :" << config_.geminiPort()
-                          << " <- " << gemini_cached->second.size() << " cached configs" << std::endl;
+                          << " <- " << gemini_cached_configs.size() << " cached configs" << std::endl;
             } else {
                 utils::LogRingBuffer::instance().push(
                     "[Startup] Gemini balancer failed on port " + std::to_string(config_.geminiPort()));
@@ -393,6 +405,20 @@ void HunterOrchestrator::start() {
         // Quick test: try 3 small parallel batches (total ~60 configs)
         // Workers are already running so validator will also be testing
         for (int attempt = 0; attempt < 3 && !stop_requested_.load(); attempt++) {
+            if (utils::fileExists(stop_flag)) {
+                try { std::filesystem::remove(stop_flag); } catch (...) {}
+                std::cout << "\n[Hunter] stop.flag detected, shutting down..." << std::endl;
+                stop();
+                break;
+            }
+            if (utils::fileExists(cmd_file)) {
+                try {
+                    std::string cmd_json = utils::loadJsonFile(cmd_file);
+                    std::filesystem::remove(cmd_file);
+                    processStdinCommand(cmd_json);
+                } catch (...) {}
+                if (stop_requested_.load()) break;
+            }
             auto healthy = config_db_ ? config_db_->getHealthyConfigs(5) : std::vector<std::pair<std::string,float>>{};
             if (!healthy.empty()) {
                 std::cout << "[Emergency] Found " << healthy.size() << " working configs from validator" << std::endl;
@@ -402,8 +428,23 @@ void HunterOrchestrator::start() {
                 }
                 break;
             }
-            // Give validator time to test some configs
-            std::this_thread::sleep_for(std::chrono::seconds(10));
+            for (int wait_step = 0; wait_step < 50 && !stop_requested_.load(); ++wait_step) {
+                if (utils::fileExists(stop_flag)) {
+                    try { std::filesystem::remove(stop_flag); } catch (...) {}
+                    std::cout << "\n[Hunter] stop.flag detected, shutting down..." << std::endl;
+                    stop();
+                    break;
+                }
+                if (utils::fileExists(cmd_file)) {
+                    try {
+                        std::string cmd_json = utils::loadJsonFile(cmd_file);
+                        std::filesystem::remove(cmd_file);
+                        processStdinCommand(cmd_json);
+                    } catch (...) {}
+                    if (stop_requested_.load()) break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            }
             writeStatusFile("bootstrap");
         }
     }
@@ -417,7 +458,6 @@ void HunterOrchestrator::start() {
     }
 
     // ═══ PHASE 5: Main loop with real-time status emission ═══
-    const std::string cmd_file = runtime_dir + "/hunter_command.json";
     int provision_tick = 0;
     int dashboard_tick = 0;
     int db_save_tick = 0;
@@ -429,13 +469,13 @@ void HunterOrchestrator::start() {
             break;
         }
 
-        // Fallback: read command file if stdin isn't used (standalone CLI)
         if (utils::fileExists(cmd_file)) {
             try {
                 std::string cmd_json = utils::loadJsonFile(cmd_file);
                 std::filesystem::remove(cmd_file);
                 processStdinCommand(cmd_json);
             } catch (...) {}
+            if (stop_requested_.load()) break;
         }
 
         // Emit real-time status to stdout (##STATUS## line every 2s)
@@ -858,6 +898,7 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
         else if (json_line.find("\"load_bundle_files\"") != std::string::npos) command = "load_bundle_files";
         else if (json_line.find("\"detect_censorship\"") != std::string::npos) command = "detect_censorship";
         else if (json_line.find("\"update_runtime_settings\"") != std::string::npos) command = "update_runtime_settings";
+        else if (json_line.find("\"edge_router_bypass\"") != std::string::npos) command = "edge_router_bypass";
         else if (json_line.find("\"stop\"") != std::string::npos) command = "stop";
         else if (json_line.find("\"get_status\"") != std::string::npos) command = "get_status";
         else if (json_line.find("\"ping\"") != std::string::npos) command = "ping";
@@ -1036,8 +1077,77 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
             message = "raw_loaded_" + std::to_string(loadRawConfigFiles());
         } else if (command == "load_bundle_files") {
             message = "bundle_loaded_" + std::to_string(loadBundleConfigs());
-        } else if (command == "detect_censorship") {
-            message = detectCensorship() ? "censored" : "open";
+        } else if (command == "detect_censorship" || command == "probe_censorship") {
+            if (dpi_evasion_) {
+                auto pr = dpi_evasion_->probeWithDetails();
+                auto& m = pr.metrics;
+                std::ostringstream dd;
+                dd << "{\"censored\":" << (m.network_type == "censored" ? "true" : "false")
+                   << ",\"cdn_reachable\":" << (m.cdn_reachable ? "true" : "false")
+                   << ",\"google_reachable\":" << (m.google_reachable ? "true" : "false")
+                   << ",\"telegram_reachable\":" << (m.telegram_reachable ? "true" : "false")
+                   << ",\"pressure\":\"" << jsonEscape(m.pressure_level) << "\""
+                   << ",\"strategy\":\"" << jsonEscape(m.strategy) << "\""
+                   << ",\"network_type\":\"" << jsonEscape(m.network_type) << "\""
+                   << ",\"recommended_strategy\":\"" << jsonEscape(pr.recommended_strategy) << "\""
+                   << ",\"total_duration_ms\":" << pr.total_duration_ms
+                   << ",\"probe_steps\":[";
+                for (size_t i = 0; i < pr.steps.size(); i++) {
+                    auto& s = pr.steps[i];
+                    if (i > 0) dd << ",";
+                    dd << "{\"target\":\"" << jsonEscape(s.target) << "\""
+                       << ",\"category\":\"" << jsonEscape(s.category) << "\""
+                       << ",\"method\":\"" << jsonEscape(s.method) << "\""
+                       << ",\"success\":" << (s.success ? "true" : "false")
+                       << ",\"latency_ms\":" << s.latency_ms
+                       << ",\"detail\":\"" << jsonEscape(s.detail) << "\"}";
+                }
+                dd << "]}";
+                data_json = dd.str();
+                message = m.network_type == "censored" ? "censored" : "open";
+            } else {
+                bool c = detectCensorship();
+                message = c ? "censored" : "open";
+                data_json = "{\"censored\":" + std::string(c ? "true" : "false") + ",\"probe_steps\":[]}";
+            }
+        } else if (command == "discover_exit_ip") {
+            if (dpi_evasion_) {
+                auto emit_discovery_event = [&](const std::string& line) {
+                    utils::JsonBuilder progress_json;
+                    progress_json.add("command", "discover_exit_ip")
+                                 .add("line", line)
+                                 .add("ts", utils::nowTimestamp());
+                    realtime::broadcastGlobalMonitorEvent("discovery_log", progress_json.build());
+                };
+                emit_discovery_event("[DISCOVERY] discover_exit_ip command accepted");
+                auto dr = dpi_evasion_->discoverExitIp(emit_discovery_event);
+                std::ostringstream dd;
+                dd << "{\"default_gateway\":\"" << jsonEscape(dr.default_gateway) << "\""
+                   << ",\"gateway_mac\":\"" << jsonEscape(dr.gateway_mac) << "\""
+                   << ",\"local_ip\":\"" << jsonEscape(dr.local_ip) << "\""
+                   << ",\"public_ip\":\"" << jsonEscape(dr.public_ip) << "\""
+                   << ",\"isp_info\":\"" << jsonEscape(dr.isp_info) << "\""
+                   << ",\"suggested_exit_ip\":\"" << jsonEscape(dr.suggested_exit_ip) << "\""
+                   << ",\"suggested_iface\":\"" << jsonEscape(dr.suggested_iface) << "\""
+                   << ",\"total_duration_ms\":" << dr.total_duration_ms
+                   << ",\"trace_hops\":[";
+                for (size_t i = 0; i < dr.trace_hops.size(); i++) {
+                    auto& h = dr.trace_hops[i];
+                    if (i > 0) dd << ",";
+                    dd << "{\"ttl\":" << h.ttl
+                       << ",\"ip\":\"" << jsonEscape(h.ip) << "\""
+                       << ",\"latency_ms\":" << h.latency_ms
+                       << ",\"is_domestic\":" << (h.is_domestic ? "true" : "false")
+                       << "}";
+                }
+                dd << "]}";
+                data_json = dd.str();
+                message = dr.suggested_exit_ip;
+                emit_discovery_event("[DISCOVERY] discover_exit_ip command finished");
+            } else {
+                ok = false;
+                message = "dpi_evasion_not_initialized";
+            }
         } else if (command == "update_runtime_settings") {
             bool any_change = false;
             bool engine_paths_changed = false;
@@ -1226,6 +1336,28 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                     ? (any_change ? "runtime_settings_applied_restart_required_for_ports" : "restart_required_for_ports")
                     : (any_change ? "runtime_settings_applied" : "no_runtime_changes");
             }
+        } else if (command == "edge_router_bypass") {
+            std::string target_mac = extractString("target_mac");
+            std::string exit_ip = extractString("exit_ip");
+            std::string iface = extractString("interface");
+            if (iface.empty()) iface = "eth0";
+
+            if (target_mac.empty() || exit_ip.empty()) {
+                ok = false;
+                message = "target_mac and exit_ip required";
+            } else {
+                if (dpi_evasion_) {
+                    bool success = dpi_evasion_->attemptEdgeRouterBypass(target_mac, exit_ip, iface);
+                    message = success ? "edge_router_bypass_active" : "edge_router_bypass_failed";
+                    utils::JsonBuilder dj;
+                    dj.add("active", dpi_evasion_->isEdgeRouterBypassActive())
+                      .add("status", dpi_evasion_->getEdgeRouterBypassStatus());
+                    data_json = dj.build();
+                } else {
+                    ok = false;
+                    message = "dpi_evasion_not_initialized";
+                }
+            }
         } else if (command == "stop") {
             stop_requested_ = true;
             message = "stop_requested";
@@ -1284,7 +1416,12 @@ void HunterOrchestrator::emitStatusJson(const std::string& phase) {
         db_total = s.total; db_alive = s.alive; db_tested = s.tested_unique;
     }
     auto sp = getSpeedProfile();
-    double uptime = utils::nowTimestamp() - start_time_;
+    double start_time = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        start_time = start_time_;
+    }
+    double uptime = utils::nowTimestamp() - start_time;
     const double ts = utils::nowTimestamp();
     const double ts_ms = ts * 1000.0;
     // Emit compact status line
@@ -1428,6 +1565,7 @@ bool HunterOrchestrator::runCycle() {
     last_validated_count_ = (int)all_configs.size();
 
     if (!all_configs.empty()) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         last_good_configs_ = std::vector<std::pair<std::string, float>>(
             all_configs.begin(), all_configs.begin() + std::min((int)all_configs.size(), 200));
     }
@@ -1837,6 +1975,7 @@ void HunterOrchestrator::loadBalancerCache(const std::string& name, proxy::Multi
     }
 
     if (!configs.empty()) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         cached_configs_[name] = configs;
         std::cout << "[Cache] Loaded " << configs.size() << " cached configs from " << name << std::endl;
     }
@@ -1909,6 +2048,7 @@ void HunterOrchestrator::provisionPorts() {
         best = config_db_->getHealthyConfigs(PROVISION_PORT_COUNT);
     }
     if (best.empty()) {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         auto it = cached_configs_.find("HUNTER_balancer_cache.json");
         if (it != cached_configs_.end()) best = it->second;
     }
@@ -2355,6 +2495,7 @@ std::vector<HunterOrchestrator::PortSlot> HunterOrchestrator::getProvisionedPort
 
 int HunterOrchestrator::cachedConfigCount() const {
     int total = 0;
+    std::lock_guard<std::mutex> lock(state_mutex_);
     for (auto& [_, v] : cached_configs_) total += (int)v.size();
     return total;
 }
@@ -2364,6 +2505,7 @@ void HunterOrchestrator::printStartupBanner() {
 
     int cached_main = 0, cached_gemini = 0;
     {
+        std::lock_guard<std::mutex> lock(state_mutex_);
         auto it = cached_configs_.find("HUNTER_balancer_cache.json");
         if (it != cached_configs_.end()) cached_main = (int)it->second.size();
         it = cached_configs_.find("HUNTER_gemini_balancer_cache.json");
@@ -2475,7 +2617,12 @@ void HunterOrchestrator::printDashboard() {
     const char* spinner[] = {"\xe2\x97\x89", "\xe2\x97\x8b", "\xe2\x97\x89", "\xe2\x97\x8b"};  // ◉ ◯
     const char* spin = spinner[s_dashboard_frame % 4];
 
-    double uptime = utils::nowTimestamp() - start_time_;
+    double start_time = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        start_time = start_time_;
+    }
+    double uptime = utils::nowTimestamp() - start_time;
     int up_h = (int)(uptime / 3600);
     int up_m = ((int)uptime % 3600) / 60;
     int up_s = (int)uptime % 60;
@@ -3024,9 +3171,15 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
         gem_running = gem_status.running;
     }
 
-    double uptime = utils::nowTimestamp() - start_time_;
+    double start_time = 0.0;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        start_time = start_time_;
+    }
+    double uptime = utils::nowTimestamp() - start_time;
     int pending_unique = db_untested + db_stale;
     const HardwareSnapshot hw = HunterTaskManager::instance().getHardware();
+    const HunterTaskManager::Metrics task_metrics = HunterTaskManager::instance().getMetrics();
     const orchestrator::ThreadManager::Status tm_status = thread_manager_
         ? thread_manager_->getStatus()
         : orchestrator::ThreadManager::Status{};
@@ -3084,16 +3237,27 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
     std::ostringstream alive_json;
     alive_json << "[";
     bool alive_first = true;
+    double latest_found_ts = 0.0;
+    double latest_alive_ts = 0.0;
+    double latest_alive_test_ts = 0.0;
     for (auto& rec : healthy_records) {
         if (!alive_first) alive_json << ",";
         alive_first = false;
+        latest_found_ts = std::max(latest_found_ts, rec.first_seen);
+        latest_alive_ts = std::max(latest_alive_ts, rec.last_alive_time);
+        latest_alive_test_ts = std::max(latest_alive_test_ts, rec.last_tested);
         utils::JsonBuilder item;
         item.add("uri", rec.uri)
             .add("latency_ms", rec.latency_ms)
             .add("engine_used", rec.engine_used)
             .add("first_seen", rec.first_seen)
             .add("last_alive", rec.last_alive_time)
-            .add("total_tests", rec.total_tests);
+            .add("last_tested", rec.last_tested)
+            .add("total_tests", rec.total_tests)
+            .add("total_passes", rec.total_passes)
+            .add("consecutive_fails", rec.consecutive_fails)
+            .add("alive", rec.alive)
+            .add("tag", rec.tag);
         alive_json << item.build();
     }
     alive_json << "]";
@@ -3217,9 +3381,68 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
              .add("mode", resourceModeName(hw.mode))
              .add("io_pool_size", hw.io_pool_size)
              .add("cpu_pool_size", hw.cpu_pool_size)
+             .add("io_pending", task_metrics.io_pending)
+             .add("cpu_pending", task_metrics.cpu_pending)
+             .add("io_active", task_metrics.io_active)
+             .add("cpu_active", task_metrics.cpu_active)
              .add("max_configs", hw.max_configs)
              .add("scan_chunk", hw.scan_chunk)
              .add("thread_count", tm_status.hardware.thread_count);
+
+    double last_download_success_ts = 0.0;
+    double last_scan_cycle_ts = 0.0;
+    std::string censorship_strategy = "none";
+    std::string censorship_network = "unknown";
+    std::string censorship_pressure = "normal";
+    bool censorship_cdn_ok = false;
+    bool censorship_google_ok = false;
+    bool censorship_telegram_ok = false;
+    auto github_worker_it = tm_status.workers.find("github_bg");
+    if (github_worker_it != tm_status.workers.end()) {
+        last_download_success_ts = parseExtraDouble(github_worker_it->second.extra, "last_success_ts", 0.0);
+    }
+    auto scanner_worker_it = tm_status.workers.find("config_scanner");
+    if (scanner_worker_it != tm_status.workers.end()) {
+        last_scan_cycle_ts = parseExtraDouble(scanner_worker_it->second.extra, "last_cycle_success_ts", 0.0);
+    }
+    auto validator_worker_it = tm_status.workers.find("validator");
+    if (validator_worker_it != tm_status.workers.end()) {
+        latest_found_ts = std::max(latest_found_ts, parseExtraDouble(validator_worker_it->second.extra, "latest_first_seen_ts", 0.0));
+        latest_alive_test_ts = std::max(latest_alive_test_ts, parseExtraDouble(validator_worker_it->second.extra, "latest_alive_test_ts", 0.0));
+    }
+    if (dpi_evasion_) {
+        auto dpi_metrics = dpi_evasion_->getMetrics();
+        censorship_strategy = dpi_metrics.strategy;
+        censorship_network = dpi_metrics.network_type;
+        censorship_pressure = dpi_metrics.pressure_level;
+        censorship_cdn_ok = dpi_metrics.cdn_reachable;
+        censorship_google_ok = dpi_metrics.google_reachable;
+        censorship_telegram_ok = dpi_metrics.telegram_reachable;
+    }
+
+    utils::JsonBuilder activityj;
+    activityj.add("last_discovery_ts", latest_found_ts)
+             .add("last_alive_confirmation_ts", latest_alive_ts)
+             .add("last_healthy_test_ts", latest_alive_test_ts)
+             .add("last_successful_download_ts", last_download_success_ts)
+             .add("last_scan_cycle_ts", last_scan_cycle_ts);
+
+    bool edge_bypass_active = false;
+    std::string edge_bypass_status = "inactive";
+    if (dpi_evasion_) {
+        edge_bypass_active = dpi_evasion_->isEdgeRouterBypassActive();
+        edge_bypass_status = dpi_evasion_->getEdgeRouterBypassStatus();
+    }
+
+    utils::JsonBuilder censorshipj;
+    censorshipj.add("strategy", censorship_strategy)
+               .add("network_type", censorship_network)
+               .add("pressure_level", censorship_pressure)
+               .add("cdn_reachable", censorship_cdn_ok)
+               .add("google_reachable", censorship_google_ok)
+               .add("telegram_reachable", censorship_telegram_ok)
+               .add("edge_router_bypass_active", edge_bypass_active)
+               .add("edge_router_bypass_status", edge_bypass_status);
 
     utils::JsonBuilder runtimej;
     runtimej.add("multiproxy_port", config_.multiproxyPort())
@@ -3253,6 +3476,8 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
         .addRaw("validator", valj.build())
         .addRaw("speed", speedj.build())
         .addRaw("hardware", hardwarej.build())
+        .addRaw("activity", activityj.build())
+        .addRaw("censorship", censorshipj.build())
         .addRaw("runtime_config", runtimej.build())
         .addRaw("workers", workers_json.str())
         .addRaw("alive_configs", alive_json.str())

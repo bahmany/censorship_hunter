@@ -1,6 +1,9 @@
 #include "resource.h"
 #include <windows.h>
 
+// UAC Manifest - Require Administrator privileges
+1 RT_MANIFEST "huntercensor.exe.manifest"
+
 // Version information
 1 VERSIONINFO
 FILEVERSION 1,0,0,0

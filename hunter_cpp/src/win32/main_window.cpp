@@ -2,6 +2,7 @@
 #include "resource.h"
 #include "core/config.h"
 #include "core/utils.h"
+#include "cache/smart_cache.h"
 #include "orchestrator/orchestrator.h"
 
 #include <commctrl.h>
@@ -839,22 +840,58 @@ void MainWindow::DrainLogs() {
 
 void MainWindow::ForceCycle() {
     AddLogEntry(L"INFO", L"Force cycle requested");
-    // TODO: Implement force cycle
+    if (!orchestrator_ || !orchestrator_running_.load()) {
+        AddLogEntry(L"WARNING", L"Hunter is not running; cannot force a cycle");
+        return;
+    }
+    try {
+        const bool ok = orchestrator_->runCycle();
+        AddLogEntry(ok ? L"SUCCESS" : L"WARNING", ok ? L"Manual cycle completed" : L"Manual cycle skipped or failed");
+    } catch (const std::exception& e) {
+        AddLogEntry(L"ERROR", std::wstring(L"Manual cycle failed: ") + std::wstring(e.what(), e.what() + strlen(e.what())));
+    }
 }
 
 void MainWindow::ClearCache() {
     AddLogEntry(L"INFO", L"Clearing cache...");
-    // TODO: Implement cache clearing
+    try {
+        cache::SmartCache("runtime").clear();
+        AddLogEntry(L"SUCCESS", L"Runtime cache files cleared");
+    } catch (const std::exception& e) {
+        AddLogEntry(L"ERROR", std::wstring(L"Failed to clear runtime cache: ") + std::wstring(e.what(), e.what() + strlen(e.what())));
+    }
 }
 
 void MainWindow::ExportConfigs() {
     AddLogEntry(L"INFO", L"Exporting configs...");
-    // TODO: Implement config export
+    if (!orchestrator_ || !orchestrator_->configDb()) {
+        AddLogEntry(L"WARNING", L"Config database is unavailable");
+        return;
+    }
+    const std::string base = utils::dirName(config_.stateFile()).empty() ? "runtime" : utils::dirName(config_.stateFile());
+    const std::string export_path = base + "/HUNTER_config_db_export.txt";
+    const std::set<std::string> all_uris = orchestrator_->configDb()->getAllUris();
+    const std::vector<std::string> lines(all_uris.begin(), all_uris.end());
+    if (utils::writeLines(export_path, lines)) {
+        AddLogEntry(L"SUCCESS", std::wstring(L"Configs exported to ") + std::wstring(export_path.begin(), export_path.end()));
+    } else {
+        AddLogEntry(L"ERROR", std::wstring(L"Failed to export configs to ") + std::wstring(export_path.begin(), export_path.end()));
+    }
 }
 
 void MainWindow::ConfigureTelegram() {
     AddLogEntry(L"INFO", L"Opening Telegram configuration...");
-    // TODO: Implement Telegram config dialog
+    const std::string config_path = "runtime/hunter_config.json";
+    if (!utils::fileExists(config_path)) {
+        config_.saveToFile(config_path);
+    }
+    const std::wstring wide_path(config_path.begin(), config_path.end());
+    const HINSTANCE result = ShellExecuteW(hwnd_, L"open", L"notepad.exe", wide_path.c_str(), nullptr, SW_SHOWNORMAL);
+    if ((INT_PTR)result <= 32) {
+        AddLogEntry(L"ERROR", L"Failed to open runtime/hunter_config.json in Notepad");
+    } else {
+        AddLogEntry(L"SUCCESS", L"Opened runtime/hunter_config.json for Telegram editing");
+    }
 }
 
 } // namespace win32

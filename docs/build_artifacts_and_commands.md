@@ -2,7 +2,7 @@
 
 ## Important Realtime Commands
 
-The dashboard communicates with the CLI using JSON commands. The most important commands currently exposed by the orchestrator are:
+The native app communicates with the orchestrator using runtime commands. The most important commands currently exposed by the orchestrator are:
 
 - `pause`
 - `resume`
@@ -51,19 +51,9 @@ The dashboard communicates with the CLI using JSON commands. The most important 
 
 Built artifacts are typically generated here:
 
-- `hunter_cpp\build\hunter_cli.exe`
+- `hunter_cpp\build\hountersansor.exe`
+- `hunter_cpp\build\hountersansor_cli.exe`
 - `hunter_cpp\build\hunter_tests.exe`
-- `hunter_cpp\build\hunter_ui.exe`
-
-### Flutter Windows
-
-Standard runner output:
-
-- `hunter_flutter_ui\build\windows\x64\runner\Release\hunter_dashboard.exe`
-
-Flutter app payload:
-
-- `hunter_flutter_ui\build\windows\x64\runner\Release\data\app.so`
 
 ## Build notes
 
@@ -74,17 +64,6 @@ Project helper script:
 - `hunter_cpp\build.bat`
 
 The script configures the MSYS2 UCRT64 toolchain and runs a Ninja build.
-
-### Flutter UI
-
-Typical commands:
-
-```powershell
-flutter analyze
-flutter build windows --release
-```
-
-If the local machine does not have a suitable Visual Studio Windows desktop toolchain, a normal Windows runner rebuild can fail even if Dart code itself is valid.
 
 ## Test notes
 
@@ -104,7 +83,7 @@ hunter_cpp\build\hunter_tests.exe
 
 ## Recommended artifact handling
 
-- keep the built CLI and dashboard together with the `bin\`, `config\`, and `runtime\` directories
+- keep the built native app and console app together with the `bin\`, `config\`, and `runtime\` directories
 - archive exported DB snapshots after successful long runs
 - keep a known-good export for rollback/testing
 - if you want reproducible user imports, store them as named text files and import them explicitly instead of pasting large blobs into the UI

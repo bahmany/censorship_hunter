@@ -33,6 +33,7 @@ public:
     bool isRunning() const { return running_.load(); }
 
     void broadcastMonitorJson(const std::string& json_payload);
+    void broadcastMonitorEvent(const std::string& type, const std::string& raw_json);
 
 private:
     struct ClientConn {
@@ -79,6 +80,8 @@ private:
     std::string makeLogEvent(const std::vector<std::string>& lines) const;
     static std::string httpWebSocketAcceptValue(const std::string& key);
 };
+
+bool broadcastGlobalMonitorEvent(const std::string& type, const std::string& raw_json);
 
 } // namespace realtime
 } // namespace hunter

@@ -134,8 +134,18 @@ const std::vector<int> ConfigFetcher::EXTRA_PROXY_PORTS = {
 ConfigFetcher::ConfigFetcher(HttpClient& http) : http_(http) {}
 
 bool ConfigFetcher::checkDirectAccess() {
-    if (direct_works_.load() != -1) return direct_works_.load() == 1;
+    // Re-check every 5 minutes instead of caching forever (Bug fix for Iran)
+    double now = utils::nowTimestamp();
+    if (direct_works_.load() != -1 && (now - last_direct_check_ts_) < 300.0) {
+        return direct_works_.load() == 1;
+    }
+    last_direct_check_ts_ = now;
+    // Try multiple endpoints — raw.githubusercontent.com may be blocked
     int code = http_.head("https://raw.githubusercontent.com", 4000);
+    if (code <= 0 || code >= 500) {
+        // Fallback: try Cloudflare (more likely to work in Iran)
+        code = http_.head("https://cp.cloudflare.com/cdn-cgi/trace", 3000);
+    }
     bool ok = code > 0 && code < 500;
     direct_works_ = ok ? 1 : 0;
     return ok;
@@ -164,8 +174,9 @@ bool ConfigFetcher::isCircuitOpen(const std::string& url) {
     std::lock_guard<std::mutex> lock(cb_mutex_);
     auto it = failed_urls_.find(url);
     if (it == failed_urls_.end()) return false;
+    // Iran-optimized: 120s cooldown instead of 600s — network fluctuates rapidly
     if (it->second.fail_count >= 3) {
-        if (utils::nowTimestamp() - it->second.last_fail < 600.0) return true;
+        if (utils::nowTimestamp() - it->second.last_fail < 120.0) return true;
         failed_urls_.erase(it);
     }
     return false;

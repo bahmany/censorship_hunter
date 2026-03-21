@@ -5,31 +5,73 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.3.0] - 2026-03-21
+
+### Added
+
+#### Packet-Level DPI Bypass System
+- **TLS ClientHello Fragmentation**: Splits TLS handshake into 100-200 byte chunks with 10-20ms delays to bypass SNI-based filtering
+- **TTL Manipulation**: Configurable packet TTL to expire before DPI boxes (hop 8-12)
+- **TCP Fragmentation**: Forces small MSS (536) and disables Nagle's algorithm for additional evasion
+- **Domain Fronting**: CDN-based destination hiding for compatible proxies
+- **Fake SNI Injection**: Decoy SNI handshake for experimental evasion
+- **GoodbyeDPI-style Methods**: HTTP Host fragmentation, TCP window manipulation, fake packet injection
+
+#### Edge Router Bypass Enhancements
+- **Domestic Zone Filtering**: Bypass methods now apply ONLY to Iranian/domestic hops (not international)
+- **MAC Address Display**: Shows resolved MAC addresses for each domestic hop in logs
+- **Manual Testing API**: `testBypassOnSpecificIp()` for targeted bypass testing
+- **Domestic Hop Discovery**: `getDomesticHopsWithMac()` returns list of domestic hops with MAC addresses
+- **Transparent Logging**: Detailed step-by-step bypass execution logs with hop categorization
+
+#### XRay Integration
+- **Automatic Fragmentation**: All TLS proxy connections automatically use ClientHello fragmentation
+- **Config Injection**: Fragment settings injected into XRay streamSettings transparently
+- **Zero Configuration**: Bypass enabled by default, no user setup required
+
+### Changed
+
+#### DPI Evasion Strategy
+- **From Route Injection to Packet-Level**: Shifted from ineffective local route injection to proven packet manipulation
+- **Targeted Application**: Bypass methods now target only domestic (Iranian) network equipment
+- **Enhanced Logging**: Added MAC address display and domestic hop categorization
+
+### Technical Details
+
+#### Packet Bypass Implementation
+- **Files Added**: `include/security/packet_bypass.h` (352 lines), `src/security/packet_bypass.cpp` (485 lines)
+- **API Classes**: `PacketBypass`, `GoodbyeDpiBypass`, `IranianDpiBypass`
+- **XRay Config**: Automatic `"fragment": {"packets": "tlshello", "length": "100-200", "interval": "10-20"}`
+
+#### Edge Router Bypass
+- **Domestic Detection**: Uses `isLikelyIranianIp()` to filter Iranian IP ranges
+- **MAC Resolution**: ARP resolution for each domestic hop with fallback handling
+- **Manual Controls**: API for testing specific IPs and retrieving hop information
+
 ## [1.2.2] - 2026-03-14
 
 ### Added
 
-#### Flutter Desktop UI (`hunter_dashboard`)
-- Dedicated `Advanced` workspace that consolidates Stats, Configs, Logs, Docs, and Runtime tools into one page
-- Live `Available now` and `Checked` discovery counters on the simplified dashboard
+#### Native App (`hountersansor`)
+- Dedicated `Advanced` workspace that consolidates stats, configs, logs, and runtime tools into one page
+- Live discovery counters and simplified main pages for daily operation
 
 ### Changed
 
-#### Flutter Desktop UI (`hunter_dashboard`)
-- Main dashboard messaging now clearly explains that config discovery runs continuously in repeated cycles
+#### Native App (`hountersansor`)
+- Main UI messaging now clearly explains that config discovery runs continuously in repeated cycles
 
 ### Fixed
 
-#### Flutter Desktop UI (`hunter_dashboard`)
-- Advanced tab selection no longer resets during routine live rebuilds and status refreshes
-- Legacy statistics, logs, and docs navigation now opens the matching Advanced tab reliably
-- Added widget coverage for Advanced tab persistence and external tab switching
+#### Native App (`hountersansor`)
+- Advanced page selection no longer resets during routine live refreshes
+- Navigation across stats, logs, and advanced controls now lands on the intended section reliably
 
 ## [1.0.0] - 2026-03-11
 
 ### Added
 
-#### C++ Backend (`hunter_cli`)
+#### C++ Core (`hountersansor_cli`)
 - Autonomous orchestrator with 9 concurrent worker threads (ConfigScanner, GitHubDownloader, ContinuousValidator, AggressiveHarvester, BalancerMonitor, HealthMonitor, TelegramPublisher, DpiPressure, ImportWatcher)
 - Multi-protocol URI parser supporting VMess, VLESS, Trojan, Shadowsocks, SSR, Hysteria2, and TUIC
 - XRay-based proxy benchmarking with Gold/Silver/Dead tier classification
@@ -40,26 +82,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stealth obfuscation engine (SNI randomization, TLS fingerprint rotation, WebSocket path obfuscation)
 - Telegram Bot API reporter with proxy fallback for censored networks
 - Smart file-persistent config cache with deduplication and age-based staleness
-- Import watcher for `config/import/` folder (auto-processes dropped .txt files)
+- Import watcher for `config/import/` folder (auto-processes dropped `.txt` files)
 - Hardware-aware resource scaling (CPU/RAM detection, adaptive thread pools)
 - Crash resilience with SEH exception handler and crash logging
-- Bidirectional stdin/stdout JSON communication with Flutter UI
+- Realtime command and status surfaces for local UI and automation
 - Config scraping from 20+ GitHub repositories, anti-censorship aggregators, and Iran-priority sources
 - Pause/Resume and dynamic speed profiles (Low/Medium/High) with live thread/timeout adjustment
 - 21 unit tests covering core utilities, models, URI parser, and ConfigDatabase
 
-#### Flutter Desktop UI (`hunter_dashboard`)
-- Real-time monitoring dashboard with arc gauges, sparkline trends, and live status indicators
-- 6-tab config browser (Alive, Silver, Balancer, Gemini, All Cache, GitHub) with per-row copy, speed test, and QR code
-- Color-coded log viewer with auto-scroll and 100KB memory cap
-- Advanced controls: speed profiles, thread/timeout sliders, config age cleanup, manual config input, GitHub source URL editor
-- System proxy integration (one-click set/clear Windows proxy per active port)
-- System tray with minimize-on-close, context menu, and tooltip notifications
-- Pure-Dart QR code encoder for sharing config URIs to mobile devices
-- Bundled seed configurations copied to Documents/Hunter/config on first run
-- Single-instance enforcement via file-based exclusive lock
-- Window auto-adaptation to screen resolution (75%×85%, clamped 900×600 to 1800×1200)
-- "Racing Neon" dark theme with color psychology palette
+#### Native App (`hountersansor`)
+- Real-time monitoring and control UI built directly into the native Windows executable
+- Config browser, log viewer, censorship tools, and advanced runtime controls in one process
+- Lightweight native shell without extra desktop runtime payload
 
 [1.2.2]: https://github.com/bahmany/censorship_hunter/releases/tag/v1.2.2
 [1.0.0]: https://github.com/bahmany/censorship_hunter/releases/tag/v1.0.0

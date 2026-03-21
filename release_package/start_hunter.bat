@@ -1,18 +1,14 @@
 @echo off
-echo Starting Hunter VPN CLI...
+echo Starting Hunter VPN...
 echo.
 echo Features:
-echo - Dual-protocol: SOCKS + HTTP ports
-echo - TLS fragment anti-DPI
-echo - Smart routing for Iran
+echo - Native C++ Dear ImGui interface
+echo - Integrated configs, censorship tools, logs, and advanced controls
+echo - Single executable product path
 echo.
-echo The CLI will start on ports:
-echo - SOCKS: 2901-2910
-echo - HTTP: 3001-3010
-echo.
-echo Press Ctrl+C to stop
+echo The native app will open the full dashboard experience.
 echo.
 
-hunter_cli.exe
+huntercensor.exe
 
 pause

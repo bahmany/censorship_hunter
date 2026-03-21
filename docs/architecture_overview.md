@@ -4,29 +4,29 @@
 
 Hunter has two main applications:
 
-- `hunter_cli.exe`
+- `hountersansor.exe`
+  - The native C++ Dear ImGui application.
+  - Hosts the main monitoring and control interface for everyday use and advanced operations.
+
+- `hountersansor_cli.exe`
   - The C++ orchestrator and scanning engine.
   - Owns discovery, validation, balancers, cache files, runtime status, and proxy process lifecycle.
 
-- `hunter_dashboard.exe`
-  - The Flutter desktop UI.
-  - Starts and monitors the CLI, sends commands over stdin JSON, reads live stdout/status, and renders dashboard/configs/logs/docs/advanced screens.
-
 ## Runtime Communication Model
 
-The dashboard and backend use a hybrid control model:
+The native app and backend use a hybrid control model:
 
 - **Primary control channel**
-  - JSON commands are written to CLI stdin.
-  - CLI emits lightweight realtime status lines to stdout.
+  - The native app can invoke orchestrator actions directly.
+  - Realtime commands and monitor snapshots are also available over websocket.
 
 - **Secondary file-based state**
   - The CLI continuously writes runtime artifacts into `runtime\`.
-  - The dashboard periodically reads those files for richer state like config lists, balancer caches, and full status snapshots.
+  - The native app can read those files for richer state like config lists, balancer caches, and full status snapshots.
 
 ## Main Runtime Files
 
-These files are the authoritative runtime outputs the dashboard reads:
+These files are the authoritative runtime outputs the native app reads:
 
 - `runtime\HUNTER_status.json`
   - Main status snapshot.

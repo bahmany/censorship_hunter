@@ -72,6 +72,12 @@ std::string sha1Hex(const std::string& input) {
     return std::string(hex);
 }
 
+std::string toHex(uint64_t value) {
+    char buf[20];
+    snprintf(buf, sizeof(buf), "%llx", (unsigned long long)value);
+    return std::string(buf);
+}
+
 // ─── Base64 ───
 static const std::string B64="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 

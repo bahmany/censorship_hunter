@@ -27,8 +27,11 @@ ThreadPool::~ThreadPool() {
 }
 
 size_t ThreadPool::pendingTasks() const {
-    // Note: not locked for performance, approximate
-    return 0; // Would need atomic counter for accurate count
+    return pending_.load();
+}
+
+size_t ThreadPool::activeTasks() const {
+    return active_.load();
 }
 
 void ThreadPool::resize(size_t new_size) {
@@ -45,12 +48,14 @@ void ThreadPool::workerLoop(int id) {
             if (stop_ && tasks_.empty()) return;
             task = std::move(tasks_.front());
             tasks_.pop();
+            pending_.fetch_sub(1);
         }
+        active_.fetch_add(1);
         try {
             task();
         } catch (...) {
-            // Swallow exceptions in pool workers
         }
+        active_.fetch_sub(1);
     }
 }
 
@@ -92,7 +97,10 @@ HunterTaskManager::Metrics HunterTaskManager::getMetrics() const {
     return Metrics{
         io_pool_ ? (int)io_pool_->size() : 0,
         cpu_pool_ ? (int)cpu_pool_->size() : 0,
-        0, 0
+        io_pool_ ? (int)io_pool_->pendingTasks() : 0,
+        cpu_pool_ ? (int)cpu_pool_->pendingTasks() : 0,
+        io_pool_ ? (int)io_pool_->activeTasks() : 0,
+        cpu_pool_ ? (int)cpu_pool_->activeTasks() : 0
     };
 }
 

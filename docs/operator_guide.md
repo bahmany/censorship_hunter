@@ -2,15 +2,14 @@
 
 ## First Launch
 
-1. Start `hunter_dashboard.exe`
+1. Start `hountersansor.exe`
 2. Verify the paths in **Advanced**:
-   - `CLI Executable`
    - `Config File`
    - `XRay Path`
    - `Sing-box Path`
    - `Mihomo Path`
 3. Click **START**
-4. Watch the **Logs** and **Dashboard** sections for startup progress
+4. Watch the **Logs** and **Home** sections for startup progress
 
 ## What to expect during startup
 
@@ -27,9 +26,9 @@ A normal startup can look like this:
 This is expected on heavily filtered networks.
 Do not treat `0 alive` in the first minute as a final result.
 
-## Important Dashboard Areas
+## Important Main Areas
 
-### Dashboard
+### Home
 
 Use this page for:
 
