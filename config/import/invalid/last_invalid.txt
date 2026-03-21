@@ -7,3 +7,5 @@ vmess://      VMess (V2Ray)
 ✓ Checks ss:// has valid method:password or base64 encoding
 ✓ Checks vless:// and trojan:// have uuid@host:port format
 ✓ Checks vmess:// base64 payload is valid JSON with required fields
+# --- Import scan at Sat Mar 21 12:12:44 2026
+vmess://eyJ2IjogIjIiLCAicHMiOiAidGVzdCIsICJhZWRzIjogIjEyNy4wLjAuMSIsICJwb3J0IjogNDQzLCAiaWQiOiAiMTIzNDU2NzgtYWJjZC1lZmZoLTEyMzQtNDU2Nzg5MGFiY2QiLCAiYWlkIjogMCwgInNjeSI6ICJhdXRvIiwgInRscyI6ICJ0bHMiLCAidHlwZSI6ICJub25lIiwgImhvc3QiOiAidGVzdC5leGFtcGxlLmNvbSIsICJwYXRoIjogIi8ifQ==
