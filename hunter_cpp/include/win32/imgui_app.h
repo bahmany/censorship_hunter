@@ -13,18 +13,20 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <chrono>
 
 #include "core/config.h"
 #include "core/models.h"
 #include "orchestrator/orchestrator.h"
 #include "security/dpi_evasion.h"
+#include "win32/qr_code.h"
 
 namespace hunter {
 namespace win32 {
 
 class ImGuiApp {
 public:
-    enum class Page { Home, Configs, Censorship, Logs, Advanced };
+    enum class Page { Home, Configs, Censorship, Logs, Advanced, About };
     enum class ToastKind { Info, Success, Warning, Error };
 
     ImGuiApp();
@@ -32,6 +34,7 @@ public:
 
     bool Create(HINSTANCE hInstance, int nCmdShow);
     int Run();
+    void ArmPendingElevatedEdgeBypass();
 
 private:
     // ── Win32 / D3D9 ──
@@ -56,6 +59,7 @@ private:
     void EnsureOrchestrator();
     void StartHunter();
     void StopHunter();
+    void RequestStopHunter();
 
     // ── Background worker (keeps UI thread free) ──
     struct Snapshot {
@@ -85,7 +89,7 @@ private:
     std::thread bg_worker_;
     std::atomic<bool> bg_stop_{false};
     mutable std::mutex snap_mutex_;
-    Snapshot snap_;
+    std::shared_ptr<const Snapshot> snap_ptr_;
 
     // ── Async command queue (commands run off-UI-thread) ──
     struct CmdResult { bool ok; std::string message; };
@@ -104,23 +108,43 @@ private:
     // ── Real-time log consumer ──
     void ConsumeNewLogs();
     size_t log_generation_ = 0;
-    std::vector<std::string> ui_logs_;
+    std::deque<std::string> ui_logs_;
     static constexpr size_t MAX_UI_LOGS = 2000;
     std::atomic<unsigned long long> command_seq_{0};
 
     // ── Logging helpers ──
-    void AppendLog(const std::string& line);
+    void AppendLog(const std::string& line) const;
     void AppendDiscoveryLog(const std::string& line);
     void SetToast(const std::string& text, ToastKind kind, uint64_t duration_ms = 2500);
 
     // ── Async operations ──
     void RunProbeAsync();
     void RunDiscoveryAsync();
-    void RunEdgeBypassAsync();
+    void RunEdgeBypassAsync(const std::string& exit_ip_override = {});
     void ApplyAdvancedSettings();
     void ImportConfigsFromFile();
     void ExportConfigsToFile();
     void ApplyDiscoveryToEdgeInputs(const security::DpiEvasionOrchestrator::NetworkDiscoveryResult& result);
+
+    // ── Task tracking for real-time UI feedback ──
+    std::atomic<int> active_bypass_tasks_{0};
+    
+    // ── Progress tracking ──
+    struct ProgressTask {
+        std::string id;
+        std::string description;
+        float progress = 0.0f;  // 0.0 to 1.0
+        std::chrono::steady_clock::time_point start_time;
+        bool indeterminate = false;
+    };
+    mutable std::mutex progress_mutex_;
+    std::map<std::string, ProgressTask> progress_tasks_;
+    
+    void StartProgress(const std::string& id, const std::string& description, bool indeterminate = false);
+    void UpdateProgress(const std::string& id, float progress);
+    void CompleteProgress(const std::string& id);
+    void ClearProgress(const std::string& id);
+    ProgressTask GetProgress(const std::string& id) const;
 
     // ── JSON helpers ──
     std::string RunRealtimeCommand(const std::string& json);
@@ -138,6 +162,9 @@ private:
     std::string BuildJsonStringArray(const std::vector<std::string>& values) const;
     std::string JoinLogLines(const std::vector<std::string>& values) const;
     bool CopyTextToClipboard(const std::string& value) const;
+    bool SaveTextToFile(const std::string& path, const std::string& value) const;
+    bool SaveQrBitmapToFile(const std::string& path) const;
+    void OpenQrModal(const std::string& value);
 
     // ── Drawing ──
     void DrawFrame();
@@ -147,6 +174,8 @@ private:
     void DrawCensorshipPage();
     void DrawLogsPage();
     void DrawAdvancedPage();
+    void DrawAboutPage();
+    void DrawQrModal();
 
     // ── Drawing helpers ──
     void DrawCard(const char* label, const char* value);
@@ -175,6 +204,8 @@ private:
     mutable std::mutex orchestrator_call_mutex_;
     std::thread orchestrator_thread_;
     std::atomic<bool> orchestrator_running_{false};
+    std::atomic<bool> orchestrator_stopping_{false};
+    bool pending_auto_edge_bypass_ = false;
     std::atomic<bool> probe_in_flight_{false};
     std::atomic<bool> discovery_in_flight_{false};
     std::atomic<bool> edge_bypass_in_flight_{false};
@@ -201,6 +232,7 @@ private:
     bool auto_scroll_logs_ = true;
     bool show_only_errors_ = false;
     bool reveal_sensitive_network_data_ = false;
+    bool qr_popup_requested_ = false;
     int max_total_ = 1000;
     int max_workers_ = 12;
     int scan_limit_ = 50;
@@ -208,6 +240,9 @@ private:
     int telegram_limit_ = 50;
     int telegram_timeout_ms_ = 12000;
     int clear_old_hours_ = 168;
+    std::string qr_popup_uri_;
+    std::string qr_popup_error_;
+    qr::Matrix qr_popup_matrix_{};
 
     // ── Text buffers for input fields ──
     std::array<char, 512> xray_path_{};
@@ -225,6 +260,13 @@ private:
     std::array<char, 8192> telegram_targets_{};
     std::array<char, 16384> github_urls_{};
     std::array<char, 16384> manual_configs_{};
+
+    // ── Frame timing (60 fps cap) ──
+    std::chrono::steady_clock::time_point last_frame_time_{};
+
+    // ── Cached draw copies (avoid holding data_mutex_ while rendering) ──
+    std::vector<std::string> draw_discovery_logs_;
+    std::vector<std::string> draw_edge_logs_;
 
     // ── Toast / feedback ──
     std::string toast_text_;

@@ -160,6 +160,7 @@ if(WIN32)
     add_executable(huntercensor
         src/win32/win_main.cpp
         src/win32/imgui_app.cpp
+        src/win32/qr_code.cpp
         src/win32/resource.rc
         third_party/imgui/imgui.cpp
         third_party/imgui/imgui_draw.cpp

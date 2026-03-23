@@ -883,6 +883,10 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
             results[i].error_message = "Unsupported protocol for xray batch";
             continue;
         }
+        if (parsed->toXrayOutboundJson(0).empty()) {
+            results[i].error_message = "Unsupported config for xray batch";
+            continue;
+        }
         // Find a free port sequentially
         while (utils::isPortAlive(next_port, 50) && next_port < base_port + 500) {
             next_port++;
@@ -984,6 +988,18 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
         WaitForSingleObject(pi.hProcess, 3000);
         CloseHandle(pi.hProcess);
         CloseHandle(pi.hThread);
+        std::string xray_err = utils::loadJsonFile(log_path);
+        if (!xray_err.empty()) {
+            auto pos = xray_err.find("Failed to start");
+            if (pos == std::string::npos) pos = xray_err.find("failed to");
+            if (pos == std::string::npos) pos = xray_err.find("error");
+            if (pos != std::string::npos) {
+                std::string err_line = xray_err.substr(pos, 300);
+                auto nl = err_line.find('\n');
+                if (nl != std::string::npos) err_line = err_line.substr(0, nl);
+                TLOG("[BatchTest] XRAY: " << err_line);
+            }
+        }
         std::remove(config_path.c_str());
         std::remove(log_path.c_str());
         for (auto& r : results) {

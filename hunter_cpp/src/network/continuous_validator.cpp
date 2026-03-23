@@ -24,6 +24,53 @@
 namespace hunter {
 namespace network {
 
+ namespace {
+
+ bool looksLikeLiteralIp(const std::string& address) {
+     if (address.empty()) return false;
+     if (address.find(':') != std::string::npos) {
+         for (unsigned char c : address) {
+             if (!(std::isxdigit(c) || c == ':' || c == '.' || c == '[' || c == ']')) return false;
+         }
+         return true;
+     }
+     bool has_dot = false;
+     for (unsigned char c : address) {
+         if (c == '.') {
+             has_dot = true;
+             continue;
+         }
+         if (!std::isdigit(c)) return false;
+     }
+     return has_dot;
+ }
+
+ std::string endpointKeyForUri(const std::string& uri) {
+     auto parsed = UriParser::parse(uri);
+     if (parsed.has_value() && parsed->isValid()) {
+         std::string address = utils::trim(parsed->address);
+         std::transform(address.begin(), address.end(), address.begin(),
+                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+         if (looksLikeLiteralIp(address)) return address;
+     }
+     std::string fallback = utils::trim(uri);
+     std::transform(fallback.begin(), fallback.end(), fallback.begin(),
+                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+     return fallback;
+ }
+
+ bool isUsableResult(const ProxyTestResult& result) {
+     return result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
+ }
+
+ float healthMetricFromResult(const ProxyTestResult& result) {
+     if (!isUsableResult(result)) return 0.0f;
+     const float speed = std::max(result.download_speed_kbps, 0.1f);
+     return std::max(1.0f, 1000.0f / speed);
+ }
+
+ } // namespace
+
 // ═══════════════════════════════════════════════════════════════════
 // ConfigDatabase
 // ═══════════════════════════════════════════════════════════════════
@@ -31,7 +78,7 @@ namespace network {
 ConfigDatabase::ConfigDatabase(int max_size) : max_size_(max_size) {}
 
 std::string ConfigDatabase::hashUri(const std::string& uri) const {
-    return utils::sha1Hex(uri).substr(0, 16);
+    return utils::sha1Hex(endpointKeyForUri(uri)).substr(0, 16);
 }
 
 int ConfigDatabase::addConfigs(const std::set<std::string>& uris, const std::string& tag) {
@@ -496,7 +543,7 @@ bool ContinuousValidator::quickCheck(const std::string& uri) {
     tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
     
     ProxyTestResult result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s_);
-    return result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
+    return isUsableResult(result);
 }
 
 std::pair<int, int> ContinuousValidator::validateBatch() {
@@ -529,10 +576,11 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
         batch_tester.setXrayPath("bin/xray.exe");
         auto results = batch_tester.batchTestWithXray(xray_uris, base, test_timeout);
         for (auto& r : results) {
-            bool full_success = r.success && !r.telegram_only && r.download_speed_kbps > 0.0f;
+            bool usable_success = isUsableResult(r);
+            float health_metric = healthMetricFromResult(r);
             tested++;
-            if (full_success) passed++;
-            db_.updateHealth(r.uri, full_success, full_success ? r.download_speed_kbps : 0.0f, r.engine_used);
+            if (usable_success) passed++;
+            db_.updateHealth(r.uri, usable_success, health_metric, r.engine_used);
         }
     }
 
@@ -555,8 +603,9 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
                 local_tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
                 
                 ProxyTestResult result = local_tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_cap);
-                bool is_alive = result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
-                return {uri, is_alive, is_alive ? result.download_speed_kbps : 0.0f, result.engine_used};
+                bool is_alive = isUsableResult(result);
+                float health_metric = healthMetricFromResult(result);
+                return {uri, is_alive, health_metric, result.engine_used};
             }));
         }
 

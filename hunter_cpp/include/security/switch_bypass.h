@@ -4,10 +4,6 @@
 #include <string>
 #include <cstdint>
 
-#ifdef _WIN32
-#include <windows.h>
-#endif
-
 namespace hunter {
 namespace security {
 

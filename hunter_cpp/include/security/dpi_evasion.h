@@ -143,6 +143,23 @@ public:
                                  const std::string& iface = "eth0");
 
     /**
+     * @brief Edge Router DPI Bypass with progress callback
+     * 
+     * Same as attemptEdgeRouterBypass but provides real-time progress updates
+     * via callback to prevent UI from appearing frozen.
+     * 
+     * @param target_mac MAC address of ISP gateway
+     * @param exit_ip Foreign IP to route through
+     * @param interface Network interface (default: eth0)
+     * @param progress_cb Function called with progress updates, returns false to abort
+     * @return true if bypass successfully established
+     */
+    bool attemptEdgeRouterBypassWithProgress(const std::string& target_mac, 
+                                           const std::string& exit_ip,
+                                           const std::string& iface,
+                                           std::function<bool(const std::string&)> progress_cb);
+
+    /**
      * @brief Check if edge router bypass is active
      */
     bool isEdgeRouterBypassActive() const { return edge_bypass_active_.load(); }
@@ -265,6 +282,17 @@ public:
      * @brief Execute the complete bypass sequence
      */
     bool execute();
+
+    /**
+     * @brief Execute bypass with progress callback
+     * 
+     * Same as execute() but provides real-time progress updates via callback
+     * to prevent UI from appearing frozen during long operations.
+     * 
+     * @param progress_cb Function called with progress updates, returns false to abort
+     * @return true if bypass successfully established
+     */
+    bool executeWithProgress(std::function<bool(const std::string&)> progress_cb);
 
     /**
      * @brief Get current operation status

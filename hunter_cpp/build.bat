@@ -65,11 +65,25 @@ if errorlevel 1 (
 if exist build\hountersansor_cli.exe del /f /q build\hountersansor_cli.exe >nul 2>&1
 if exist ..\bin\hountersansor_cli.exe del /f /q ..\bin\hountersansor_cli.exe >nul 2>&1
 
+REM Copy to release_package
+echo Copying executables to release_package...
+if not exist ..\release_package mkdir ..\release_package
+copy /y build\huntercensor.exe ..\release_package\huntercensor.exe >nul
+copy /y build\hunter_tests.exe ..\release_package\hunter_tests.exe >nul
+if exist build\hunter_tests.exe (
+    echo Copied huntercensor.exe and hunter_tests.exe to release_package
+) else (
+    echo Copied huntercensor.exe to release_package
+)
+
 echo.
 echo === Build succeeded ===
 echo Executable: build\huntercensor.exe
+echo Also available in: ..\release_package\huntercensor.exe
 echo.
 echo To run:
 echo   build\huntercensor.exe
+echo   or
+echo   ..\release_package\huntercensor.exe
 echo.
 pause

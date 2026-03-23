@@ -35,8 +35,14 @@ size_t ThreadPool::activeTasks() const {
 }
 
 void ThreadPool::resize(size_t new_size) {
-    // Simplified: just log, actual resize is complex
-    (void)new_size;
+    if (new_size < 1) new_size = 1;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (stop_) return;
+    // Only grow — shrinking is complex; threads will naturally idle
+    while (workers_.size() < new_size) {
+        int id = static_cast<int>(workers_.size());
+        workers_.emplace_back(&ThreadPool::workerLoop, this, id);
+    }
 }
 
 void ThreadPool::workerLoop(int id) {
@@ -89,8 +95,19 @@ HardwareSnapshot HunterTaskManager::getHardware() {
 
 void HunterTaskManager::maybeResize() {
     auto hw = getHardware();
-    // Could resize pools based on hw.io_pool_size / cpu_pool_size
-    // For now, pools are fixed size at creation
+    if (!io_pool_ || !cpu_pool_) return;
+
+    const size_t current_io = io_pool_->size();
+    const size_t target_io = static_cast<size_t>(hw.io_pool_size);
+    const size_t current_cpu = cpu_pool_->size();
+    const size_t target_cpu = static_cast<size_t>(hw.cpu_pool_size);
+
+    if (target_io != current_io) {
+        io_pool_->resize(target_io);
+    }
+    if (target_cpu != current_cpu) {
+        cpu_pool_->resize(target_cpu);
+    }
 }
 
 HunterTaskManager::Metrics HunterTaskManager::getMetrics() const {

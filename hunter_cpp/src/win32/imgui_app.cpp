@@ -1,5 +1,6 @@
 // imgui_app.cpp — Complete UI rewrite with proper multithreading
 #include "core/utils.h"
+#include "core/task_manager.h"
 #include "win32/imgui_app.h"
 #include "orchestrator/orchestrator.h"
 
@@ -8,10 +9,12 @@
 #include "third_party/imgui/backends/imgui_impl_win32.h"
 
 #include <commdlg.h>
+#include <shellapi.h>
 #include <cmath>
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
@@ -32,6 +35,7 @@ const char* PageLabel(ImGuiApp::Page p) {
         case ImGuiApp::Page::Censorship: return " Censorship ";
         case ImGuiApp::Page::Logs:       return "  Logs  ";
         case ImGuiApp::Page::Advanced:   return " Advanced ";
+        case ImGuiApp::Page::About:      return "  About  ";
     }
     return "Home";
 }
@@ -64,13 +68,99 @@ std::string Trim(const std::string& v, size_t n = 120) {
     return v.substr(0, n - 3) + "...";
 }
 
+std::vector<std::string> DedupeStringsPreserveOrder(const std::vector<std::string>& input) {
+    std::set<std::string> seen;
+    std::vector<std::string> output;
+    output.reserve(input.size());
+    for (auto item : input) {
+        item = utils::trim(item);
+        if (item.empty()) continue;
+        if (seen.insert(item).second) output.push_back(std::move(item));
+    }
+    return output;
+}
+
+std::string JoinUniqueLinesText(const std::vector<std::string>& input) {
+    std::ostringstream out;
+    auto deduped = DedupeStringsPreserveOrder(input);
+    for (size_t i = 0; i < deduped.size(); ++i) {
+        if (i) out << "\n";
+        out << deduped[i];
+    }
+    return out.str();
+}
+
+std::string FindReadableFontPath() {
+    const char* candidates[] = {
+        "C:/Windows/Fonts/segoeui.ttf",
+        "C:/Windows/Fonts/tahoma.ttf",
+        "third_party/imgui/misc/fonts/Roboto-Medium.ttf"
+    };
+    for (const char* candidate : candidates) {
+        if (utils::fileExists(candidate)) return candidate;
+    }
+    return {};
+}
+
+bool ProcessIsElevated() {
+    HANDLE token = nullptr;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+    TOKEN_ELEVATION elevation{};
+    DWORD size = sizeof(elevation);
+    const bool ok = GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size) != FALSE;
+    CloseHandle(token);
+    return ok && elevation.TokenIsElevated != 0;
+}
+
+std::string PendingEdgeBypassPath() {
+    return "runtime/huntercensor_edge_bypass_resume.txt";
+}
+
+bool SavePendingEdgeBypassState(const std::string& gateway_mac, const std::string& exit_ip, const std::string& iface) {
+    std::ofstream out(PendingEdgeBypassPath(), std::ios::binary | std::ios::trunc);
+    if (!out) return false;
+    out << gateway_mac << "\n" << exit_ip << "\n" << iface << "\n";
+    return out.good();
+}
+
+bool LoadPendingEdgeBypassState(std::string& gateway_mac, std::string& exit_ip, std::string& iface) {
+    std::ifstream in(PendingEdgeBypassPath(), std::ios::binary);
+    if (!in) return false;
+    std::getline(in, gateway_mac);
+    std::getline(in, exit_ip);
+    std::getline(in, iface);
+    return !exit_ip.empty();
+}
+
+void ClearPendingEdgeBypassState() {
+    DeleteFileA(PendingEdgeBypassPath().c_str());
+}
+
+bool RelaunchElevatedForEdgeBypass(HWND hwnd) {
+    wchar_t exe_path[MAX_PATH]{};
+    const DWORD len = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return false;
+    const HINSTANCE rc = ShellExecuteW(hwnd, L"runas", exe_path, L"--resume-edge-bypass", nullptr, SW_SHOWNORMAL);
+    return reinterpret_cast<INT_PTR>(rc) > 32;
+}
+
 bool IContains(const std::string& text, const char* needle) {
     if (!needle || !*needle) return true;
-    std::string lo = text;
-    std::transform(lo.begin(), lo.end(), lo.begin(), [](unsigned char c){ return (char)std::tolower(c); });
-    std::string nl(needle);
-    std::transform(nl.begin(), nl.end(), nl.begin(), [](unsigned char c){ return (char)std::tolower(c); });
-    return lo.find(nl) != std::string::npos;
+    const size_t nlen = std::strlen(needle);
+    if (nlen > text.size()) return false;
+    const size_t limit = text.size() - nlen;
+    for (size_t i = 0; i <= limit; ++i) {
+        bool match = true;
+        for (size_t j = 0; j < nlen; ++j) {
+            if (std::tolower(static_cast<unsigned char>(text[i + j])) !=
+                std::tolower(static_cast<unsigned char>(needle[j]))) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
 }
 
 // Colour palette
@@ -80,6 +170,7 @@ static const ImVec4 COL_ACCENT   = {0.22f, 0.47f, 0.95f, 1.0f};
 static const ImVec4 COL_GREEN    = {0.18f, 0.80f, 0.44f, 1.0f};
 static const ImVec4 COL_RED      = {0.92f, 0.34f, 0.34f, 1.0f};
 static const ImVec4 COL_YELLOW   = {1.00f, 0.78f, 0.24f, 1.0f};
+static const ImVec4 COL_AMBER    = {1.00f, 0.65f, 0.10f, 1.0f};
 static const ImVec4 COL_CYAN     = {0.30f, 0.78f, 1.00f, 1.0f};
 static const ImVec4 COL_DIM      = {0.55f, 0.57f, 0.62f, 1.0f};
 static const ImVec4 COL_TEXT     = {0.88f, 0.90f, 0.94f, 1.0f};
@@ -227,11 +318,31 @@ void ImGuiApp::ReloadFonts() {
     ImFontConfig cfg{};
     cfg.OversampleH = 3;
     cfg.OversampleV = 2;
-    cfg.PixelSnapH = false;
-    cfg.RasterizerMultiply = 1.1f;
-    float sz = 16.0f * dpi_scale_;
-    if (!io.Fonts->AddFontFromFileTTF("third_party/imgui/misc/fonts/Roboto-Medium.ttf", sz, &cfg))
+    cfg.PixelSnapH = true;
+    cfg.RasterizerMultiply = 1.2f;
+    float sz = 17.0f * dpi_scale_;
+    const std::string font_path = FindReadableFontPath();
+    static const ImWchar arabic_ranges[] = {
+        0x0600, 0x06FF,
+        0x0750, 0x077F,
+        0x08A0, 0x08FF,
+        0xFB50, 0xFDFF,
+        0xFE70, 0xFEFF,
+        0,
+    };
+    static ImVector<ImWchar> glyph_ranges;
+    glyph_ranges.clear();
+    ImFontGlyphRangesBuilder builder;
+    builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
+    builder.AddRanges(io.Fonts->GetGlyphRangesCyrillic());
+    builder.AddRanges(arabic_ranges);
+    builder.BuildRanges(&glyph_ranges);
+    if (!font_path.empty()) {
+        if (!io.Fonts->AddFontFromFileTTF(font_path.c_str(), sz, &cfg, glyph_ranges.Data))
+            io.Fonts->AddFontDefault();
+    } else {
         io.Fonts->AddFontDefault();
+    }
     io.FontGlobalScale = 1.0f;
     if (d3d_device_) {
         ImGui_ImplDX9_InvalidateDeviceObjects();
@@ -327,6 +438,10 @@ ImGuiApp::~ImGuiApp() {
     if (hwnd_) { DestroyWindow(hwnd_); hwnd_ = nullptr; }
 }
 
+void ImGuiApp::ArmPendingElevatedEdgeBypass() {
+    pending_auto_edge_bypass_ = true;
+}
+
 // ── Background worker ──
 void ImGuiApp::StartBackgroundWorker() {
     bg_stop_ = false;
@@ -369,10 +484,16 @@ void ImGuiApp::StopBackgroundWorker() {
 }
 
 void ImGuiApp::BackgroundWorkerLoop() {
+    int resize_counter = 0;
     while (!bg_stop_.load()) {
-        Snapshot s = BuildSnapshot();
-        { std::lock_guard<std::mutex> lk(snap_mutex_); snap_ = std::move(s); }
-        for (int i = 0; i < 10 && !bg_stop_.load(); ++i)
+        auto s = std::make_shared<const Snapshot>(BuildSnapshot());
+        { std::lock_guard<std::mutex> lk(snap_mutex_); snap_ptr_ = std::move(s); }
+        // Adapt thread pools every ~10 snapshots (~20s) based on current RAM/CPU
+        if (++resize_counter >= 10) {
+            resize_counter = 0;
+            try { HunterTaskManager::instance().maybeResize(); } catch (...) {}
+        }
+        for (int i = 0; i < 20 && !bg_stop_.load(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
 }
@@ -456,8 +577,7 @@ void ImGuiApp::ConsumeNewLogs() {
     auto fresh = utils::LogRingBuffer::instance().fetchSince(log_generation_, 500);
     if (fresh.empty()) return;
     for (auto& l : fresh) ui_logs_.push_back(std::move(l));
-    if (ui_logs_.size() > MAX_UI_LOGS)
-        ui_logs_.erase(ui_logs_.begin(), ui_logs_.begin() + (int)(ui_logs_.size() - MAX_UI_LOGS));
+    while (ui_logs_.size() > MAX_UI_LOGS) ui_logs_.pop_front();
 }
 
 // ── Create / Run ──
@@ -497,17 +617,56 @@ bool ImGuiApp::Create(HINSTANCE hInstance, int nCmdShow) {
     ShowWindow(hwnd_, nCmdShow == 0 ? SW_SHOWDEFAULT : nCmdShow);
     UpdateWindow(hwnd_);
     StartBackgroundWorker();
+    if (pending_auto_edge_bypass_) {
+        pending_auto_edge_bypass_ = false;
+        std::string gateway_mac;
+        std::string exit_ip;
+        std::string iface;
+        if (LoadPendingEdgeBypassState(gateway_mac, exit_ip, iface)) {
+            security::DpiEvasionOrchestrator::NetworkDiscoveryResult pending;
+            pending.gateway_mac = gateway_mac;
+            pending.suggested_exit_ip = exit_ip;
+            pending.suggested_iface = iface;
+            {
+                std::lock_guard<std::mutex> lk(data_mutex_);
+                discovery_result_ = pending;
+                has_discovery_result_ = true;
+            }
+            page_ = Page::Censorship;
+            discovery_apply_requested_ = true;
+            ClearPendingEdgeBypassState();
+            AppendLog("[UI] Resuming elevated edge bypass after administrator approval");
+            SetToast("Administrator approval granted only for edge bypass", ToastKind::Info, 5000);
+            RunEdgeBypassAsync();
+        } else {
+            AppendLog("[ERR] Pending elevated edge bypass state was not found");
+        }
+    }
     AppendLog("[UI] huntercensor ready");
     return true;
 }
 
 int ImGuiApp::Run() {
     MSG msg{};
+    last_frame_time_ = std::chrono::steady_clock::now();
     while (msg.message != WM_QUIT) {
         while (PeekMessage(&msg, nullptr, 0U, 0U, PM_REMOVE)) {
             TranslateMessage(&msg); DispatchMessage(&msg);
         }
         if (msg.message == WM_QUIT) break;
+
+        // Frame rate limiter: target ~60 fps (16ms), drop to ~10 fps when minimized
+        {
+            const bool minimized = IsIconic(hwnd_) != 0;
+            const auto target = std::chrono::milliseconds(minimized ? 100 : 16);
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = now - last_frame_time_;
+            if (elapsed < target) {
+                const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(target - elapsed);
+                if (remaining.count() > 0) Sleep(static_cast<DWORD>(remaining.count()));
+            }
+            last_frame_time_ = std::chrono::steady_clock::now();
+        }
 
         ConsumeNewLogs();
         DrainCommandResults();
@@ -602,8 +761,8 @@ void ImGuiApp::SyncBuffersFromConfig() {
     CopyBuf(config_.getString("telegram_api_id",""), telegram_api_id_.data(), telegram_api_id_.size());
     CopyBuf(config_.getString("telegram_api_hash",""), telegram_api_hash_.data(), telegram_api_hash_.size());
     CopyBuf(config_.getString("telegram_phone",""), telegram_phone_.data(), telegram_phone_.size());
-    CopyBuf(JoinLines(config_.telegramTargets()), telegram_targets_.data(), telegram_targets_.size());
-    CopyBuf(JoinLines(config_.githubUrls()), github_urls_.data(), github_urls_.size());
+    CopyBuf(JoinUniqueLinesText(config_.telegramTargets()), telegram_targets_.data(), telegram_targets_.size());
+    CopyBuf(JoinUniqueLinesText(config_.githubUrls()), github_urls_.data(), github_urls_.size());
     CopyBuf(config_.getString("suggested_iface",""), edge_iface_.data(), edge_iface_.size());
     snapshot_config_limit_ = config_limit_;
     CopyBuf("runtime/HUNTER_config_db_export.txt", export_path_.data(), export_path_.size());
@@ -618,10 +777,11 @@ void ImGuiApp::EnsureOrchestrator() {
 }
 
 void ImGuiApp::StartHunter() {
-    if (orchestrator_running_.load()) { AppendLog("[UI] Already running"); return; }
+    if (orchestrator_running_.load() || orchestrator_stopping_.load()) { AppendLog("[UI] Already running or stopping"); return; }
     EnsureOrchestrator();
     JoinThread(orchestrator_thread_);
     AppendLog("[UI] Start requested");
+    orchestrator_stopping_ = false;
     orchestrator_running_ = true;
     orchestrator_thread_ = std::thread([this]{
         try {
@@ -635,12 +795,14 @@ void ImGuiApp::StartHunter() {
         catch (const std::exception& e) { AppendLog(std::string("[ERR] ") + e.what()); }
         catch (...) { AppendLog("[ERR] Unknown orchestrator error"); }
         orchestrator_running_ = false;
+        orchestrator_stopping_ = false;
         AppendLog("[UI] Orchestrator thread exited");
     });
     AppendLog("[UI] Hunter started");
 }
 
 void ImGuiApp::StopHunter() {
+    orchestrator_stopping_ = true;
     AppendLog("[UI] Stop requested");
     {
         std::lock_guard<std::mutex> lk(orchestrator_mutex_);
@@ -648,11 +810,19 @@ void ImGuiApp::StopHunter() {
     }
     JoinThread(orchestrator_thread_);
     orchestrator_running_ = false;
+    orchestrator_stopping_ = false;
     AppendLog("[UI] Hunter stopped");
 }
 
+void ImGuiApp::RequestStopHunter() {
+    if (!orchestrator_running_.load() || orchestrator_stopping_.exchange(true)) return;
+    SetToast("Stopping huntercensor...", ToastKind::Info, 2500);
+    AppendLog("[UI] Stop queued on command worker");
+    PostCommand([this] { StopHunter(); });
+}
+
 // ── Logging ──
-void ImGuiApp::AppendLog(const std::string& line) {
+void ImGuiApp::AppendLog(const std::string& line) const {
     utils::LogRingBuffer::instance().push(line);
 }
 
@@ -676,7 +846,15 @@ void ImGuiApp::SetToast(const std::string& text, ToastKind kind, uint64_t durati
 void ImGuiApp::RunProbeAsync() {
     if (probe_in_flight_.exchange(true)) return;
     EnsureOrchestrator();
-    JoinThread(probe_thread_);
+    
+    StartProgress("probe", "Probing censorship", true);
+    
+    // Non-blocking thread cleanup - don't block UI thread
+    if (probe_thread_.joinable()) {
+        probe_thread_.detach();
+        AppendLog("[UI] Previous probe still running, starting new one");
+    }
+    
     AppendLog("[UI] Starting censorship probe");
     probe_thread_ = std::thread([this]{
         try {
@@ -696,10 +874,16 @@ void ImGuiApp::RunProbeAsync() {
             } else AppendLog("[UI] DPI unavailable");
             { std::lock_guard<std::mutex> lk(data_mutex_); probe_result_ = std::move(r); }
             has_probe_result_ = true;
+            CompleteProgress("probe");
+            SetToast("Censorship probe completed", ToastKind::Success);
         } catch (const std::exception& e) {
+            ClearProgress("probe");
             AppendLog(std::string("[ERR] Probe thread exception: ") + e.what());
+            SetToast(std::string("Probe failed: ") + e.what(), ToastKind::Error);
         } catch (...) {
+            ClearProgress("probe");
             AppendLog("[ERR] Probe thread unknown exception");
+            SetToast("Probe failed with unknown error", ToastKind::Error);
         }
         probe_in_flight_ = false;
     });
@@ -709,7 +893,15 @@ void ImGuiApp::RunDiscoveryAsync() {
     if (discovery_in_flight_.exchange(true)) return;
     EnsureOrchestrator();
     { std::lock_guard<std::mutex> lk(data_mutex_); discovery_logs_.clear(); has_discovery_result_ = false; }
-    JoinThread(discovery_thread_);
+    
+    StartProgress("discovery", "Discovering exit IP", true);
+    
+    // Non-blocking thread cleanup - don't block UI thread
+    if (discovery_thread_.joinable()) {
+        discovery_thread_.detach();
+        AppendLog("[UI] Previous discovery still running, starting new one");
+    }
+    
     AppendDiscoveryLog("[DISCOVERY] Starting native discovery");
     discovery_thread_ = std::thread([this]{
         try {
@@ -732,17 +924,27 @@ void ImGuiApp::RunDiscoveryAsync() {
             }
             has_discovery_result_ = true;
             discovery_apply_requested_ = true;
+            CompleteProgress("discovery");
+            SetToast("Network discovery completed", ToastKind::Success);
         } catch (const std::exception& e) {
+            ClearProgress("discovery");
             AppendLog(std::string("[ERR] Discovery thread exception: ") + e.what());
+            SetToast(std::string("Discovery failed: ") + e.what(), ToastKind::Error);
         } catch (...) {
+            ClearProgress("discovery");
             AppendLog("[ERR] Discovery thread unknown exception");
+            SetToast("Discovery failed with unknown error", ToastKind::Error);
         }
         discovery_in_flight_ = false;
     });
 }
 
-void ImGuiApp::RunEdgeBypassAsync() {
-    if (edge_bypass_in_flight_.exchange(true)) return;
+void ImGuiApp::RunEdgeBypassAsync(const std::string& exit_ip_override) {
+    if (edge_bypass_in_flight_.exchange(true)) {
+        AppendLog("[UI] Edge bypass already running");
+        return;
+    }
+
     EnsureOrchestrator();
     security::DpiEvasionOrchestrator::NetworkDiscoveryResult discovered;
     {
@@ -753,36 +955,80 @@ void ImGuiApp::RunEdgeBypassAsync() {
             return;
         }
         discovered = discovery_result_;
+        edge_bypass_logs_.clear();
     }
+
     ApplyDiscoveryToEdgeInputs(discovered);
     std::string mac = discovered.gateway_mac;
-    std::string eip = discovered.suggested_exit_ip;
+    std::string eip = exit_ip_override.empty() ? discovered.suggested_exit_ip : exit_ip_override;
     std::string ifc = discovered.suggested_iface;
     if (eip.empty()) {
         AppendLog("[ERR] Discovery did not produce an exit target yet; run discovery again and inspect the discovery result");
         edge_bypass_in_flight_ = false;
         return;
     }
-    JoinThread(edge_bypass_thread_);
-    {
-        std::lock_guard<std::mutex> lk(data_mutex_);
-        edge_bypass_logs_.clear();
+
+    if (!ProcessIsElevated()) {
+        if (!SavePendingEdgeBypassState(mac, eip, ifc)) {
+            AppendLog("[ERR] Could not prepare elevated edge bypass handoff state");
+            SetToast("Could not prepare edge bypass elevation request", ToastKind::Error);
+            edge_bypass_in_flight_ = false;
+            return;
+        }
+        if (RelaunchElevatedForEdgeBypass(hwnd_)) {
+            AppendLog("[UI] Edge bypass requested administrator rights; scanning and discovery remain available without admin");
+            SetToast("Windows will ask for admin rights only for edge bypass", ToastKind::Info, 5000);
+            page_ = Page::Censorship;
+        } else {
+            ClearPendingEdgeBypassState();
+            AppendLog("[ERR] Edge bypass elevation request was canceled or failed");
+            SetToast("Edge bypass needs administrator approval only for route injection", ToastKind::Warning, 5000);
+        }
+        edge_bypass_in_flight_ = false;
+        return;
     }
-    AppendLog("[UI] Edge bypass requested from discovered targets only: gateway_mac=" + (mac.empty() ? std::string("(unresolved)") : mac) + " exit_ip=" + eip + " iface=" + (ifc.empty() ? std::string("(auto)") : ifc));
+
+    StartProgress("edge_bypass", "Executing edge bypass", true);
+    
+    JoinThread(edge_bypass_thread_);
+    AppendLog("[UI] Edge bypass requested: gateway_mac=" + (mac.empty() ? std::string("(unresolved)") : mac) + " exit_ip=" + eip + " iface=" + (ifc.empty() ? std::string("(auto)") : ifc));
+
     edge_bypass_thread_ = std::thread([this, mac, eip, ifc]{
         try {
             const uint64_t started_ms = utils::nowMs();
             bool ok = false;
             std::vector<std::string> edge_logs;
             std::string edge_status;
+            auto publish_edge_progress = [this, started_ms](const std::string& line) {
+                const std::string stamped = TimestampLogLine(line);
+                {
+                    std::lock_guard<std::mutex> lk(data_mutex_);
+                    edge_bypass_logs_.push_back(stamped);
+                    if (edge_bypass_logs_.size() > 500) {
+                        edge_bypass_logs_.erase(edge_bypass_logs_.begin(), edge_bypass_logs_.begin() + (int)(edge_bypass_logs_.size() - 500));
+                    }
+                }
+                AppendLog(line);
+            };
+
             hunter::security::DpiEvasionOrchestrator* dpi = nullptr;
             {
                 std::lock_guard<std::mutex> lk(orchestrator_mutex_);
                 if (orchestrator_) dpi = orchestrator_->dpiEvasion();
             }
             if (dpi) {
+                auto progress_cb = [&, this](const std::string& step) {
+                    const uint64_t elapsed = utils::nowMs() - started_ms;
+                    publish_edge_progress("[EDGE] " + step + " (+" + std::to_string(elapsed) + "ms)");
+                    if (elapsed > 30000) {
+                        publish_edge_progress("[EDGE] TIMEOUT: Bypass taking too long, aborting");
+                        return false;
+                    }
+                    return true;
+                };
+
                 std::lock_guard<std::mutex> call_lock(orchestrator_call_mutex_);
-                ok = dpi->attemptEdgeRouterBypass(mac, eip, ifc.empty() ? "eth0" : ifc);
+                ok = dpi->attemptEdgeRouterBypassWithProgress(mac, eip, ifc.empty() ? "eth0" : ifc, progress_cb);
                 edge_logs = dpi->getEdgeRouterBypassLog();
                 edge_status = dpi->getEdgeRouterBypassStatus();
             } else {
@@ -806,10 +1052,17 @@ void ImGuiApp::RunEdgeBypassAsync() {
             AppendLog(std::string(ok ? (local_only ? "[UI] Edge bypass produced local route evidence" : "[UI] Edge bypass active") : "[ERR] Edge bypass failed") +
                       " after " + std::to_string(utils::nowMs() - started_ms) + " ms :: " +
                       (edge_status.empty() ? "-" : edge_status));
+            
+            CompleteProgress("edge_bypass");
+            SetToast(ok ? "Edge bypass completed" : "Edge bypass failed", ok ? ToastKind::Success : ToastKind::Error);
         } catch (const std::exception& e) {
+            ClearProgress("edge_bypass");
             AppendLog(std::string("[ERR] Edge bypass thread exception: ") + e.what());
+            SetToast(std::string("Edge bypass failed: ") + e.what(), ToastKind::Error);
         } catch (...) {
+            ClearProgress("edge_bypass");
             AppendLog("[ERR] Edge bypass thread unknown exception");
+            SetToast("Edge bypass failed with unknown error", ToastKind::Error);
         }
         edge_bypass_in_flight_ = false;
     });
@@ -824,6 +1077,11 @@ void ImGuiApp::ApplyDiscoveryToEdgeInputs(const security::DpiEvasionOrchestrator
 
 // ── Advanced settings (async) ──
 void ImGuiApp::ApplyAdvancedSettings() {
+    const auto clean_targets = DedupeStringsPreserveOrder(SplitLines(telegram_targets_.data()));
+    const auto clean_github_urls = DedupeStringsPreserveOrder(SplitLines(github_urls_.data()));
+    CopyBuf(JoinUniqueLinesText(clean_targets), telegram_targets_.data(), telegram_targets_.size());
+    CopyBuf(JoinUniqueLinesText(clean_github_urls), github_urls_.data(), github_urls_.size());
+
     std::ostringstream cmd;
     cmd << "{\"command\":\"update_runtime_settings\""
         << ",\"xray_path\":\"" << JsonEscape(xray_path_.data()) << "\""
@@ -842,8 +1100,8 @@ void ImGuiApp::ApplyAdvancedSettings() {
         << ",\"telegram_phone\":\"" << JsonEscape(telegram_phone_.data()) << "\""
         << ",\"telegram_limit\":" << telegram_limit_
         << ",\"telegram_timeout_ms\":" << telegram_timeout_ms_
-        << ",\"targets_text\":\"" << JsonEscape(telegram_targets_.data()) << "\""
-        << ",\"github_urls_text\":\"" << JsonEscape(github_urls_.data()) << "\""
+        << ",\"targets_text\":\"" << JsonEscape(JoinUniqueLinesText(clean_targets)) << "\""
+        << ",\"github_urls_text\":\"" << JsonEscape(JoinUniqueLinesText(clean_github_urls)) << "\""
         << "}";
 
     config_.set("xray_path", std::string(xray_path_.data()));
@@ -858,8 +1116,8 @@ void ImGuiApp::ApplyAdvancedSettings() {
     config_.set("telegram_phone", std::string(telegram_phone_.data()));
     config_.set("telegram_limit", telegram_limit_);
     config_.set("telegram_timeout_ms", telegram_timeout_ms_);
-    config_.set("targets", BuildJsonStringArray(SplitLines(telegram_targets_.data())));
-    config_.setGithubUrls(SplitLines(github_urls_.data()));
+    config_.set("targets", BuildJsonStringArray(clean_targets));
+    config_.setGithubUrls(clean_github_urls);
     SaveConfigToDisk();
 
     RunCommandAsync(cmd.str());
@@ -982,33 +1240,147 @@ std::string ImGuiApp::JoinLogLines(const std::vector<std::string>& values) const
 }
 
 bool ImGuiApp::CopyTextToClipboard(const std::string& value) const {
-    if (value.empty()) return false;
+    if (value.empty()) {
+        AppendLog("[ERR] Copy to clipboard failed: empty text");
+        return false;
+    }
+    
     int wide_len = MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, nullptr, 0);
-    if (wide_len <= 0) return false;
+    if (wide_len <= 0) {
+        AppendLog("[ERR] Copy to clipboard failed: MultiByteToWideChar error " + std::to_string(GetLastError()));
+        return false;
+    }
+    
     HGLOBAL memory = GlobalAlloc(GMEM_MOVEABLE, static_cast<SIZE_T>(wide_len) * sizeof(wchar_t));
-    if (!memory) return false;
+    if (!memory) {
+        AppendLog("[ERR] Copy to clipboard failed: GlobalAlloc error " + std::to_string(GetLastError()));
+        return false;
+    }
+    
     wchar_t* buffer = static_cast<wchar_t*>(GlobalLock(memory));
     if (!buffer) {
+        AppendLog("[ERR] Copy to clipboard failed: GlobalLock error " + std::to_string(GetLastError()));
         GlobalFree(memory);
         return false;
     }
+    
     MultiByteToWideChar(CP_UTF8, 0, value.c_str(), -1, buffer, wide_len);
     GlobalUnlock(memory);
+    
     if (!OpenClipboard(hwnd_)) {
+        AppendLog("[ERR] Copy to clipboard failed: OpenClipboard error " + std::to_string(GetLastError()));
         GlobalFree(memory);
         return false;
     }
+    
     EmptyClipboard();
     if (!SetClipboardData(CF_UNICODETEXT, memory)) {
+        AppendLog("[ERR] Copy to clipboard failed: SetClipboardData error " + std::to_string(GetLastError()));
         CloseClipboard();
         GlobalFree(memory);
         return false;
     }
+    
     CloseClipboard();
+    // Don't free memory on success - clipboard owns it
     return true;
 }
 
-// ── Drawing helpers ──
+bool ImGuiApp::SaveTextToFile(const std::string& path, const std::string& value) const {
+    if (path.empty()) return false;
+    const std::string dir = utils::dirName(path);
+    if (!dir.empty()) utils::mkdirRecursive(dir);
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return false;
+    out.write(value.data(), static_cast<std::streamsize>(value.size()));
+    return out.good();
+}
+
+bool ImGuiApp::SaveQrBitmapToFile(const std::string& path) const {
+    if (path.empty() || !qr_popup_matrix_.valid()) return false;
+    const std::string dir = utils::dirName(path);
+    if (!dir.empty()) utils::mkdirRecursive(dir);
+
+    constexpr int border = 4;
+    constexpr int scale = 8;
+    const int matrix_size = qr_popup_matrix_.size;
+    const int width = (matrix_size + border * 2) * scale;
+    const int height = width;
+    const int row_stride = ((width * 3 + 3) / 4) * 4;
+    const uint32_t pixel_bytes = static_cast<uint32_t>(row_stride * height);
+    const uint32_t file_bytes = 54U + pixel_bytes;
+
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) return false;
+
+    auto write_u16 = [&out](uint16_t value) {
+        char buf[2] = {
+            static_cast<char>(value & 0xFFU),
+            static_cast<char>((value >> 8U) & 0xFFU)
+        };
+        out.write(buf, 2);
+    };
+    auto write_u32 = [&out](uint32_t value) {
+        char buf[4] = {
+            static_cast<char>(value & 0xFFU),
+            static_cast<char>((value >> 8U) & 0xFFU),
+            static_cast<char>((value >> 16U) & 0xFFU),
+            static_cast<char>((value >> 24U) & 0xFFU)
+        };
+        out.write(buf, 4);
+    };
+
+    out.put('B');
+    out.put('M');
+    write_u32(file_bytes);
+    write_u16(0);
+    write_u16(0);
+    write_u32(54);
+    write_u32(40);
+    write_u32(static_cast<uint32_t>(width));
+    write_u32(static_cast<uint32_t>(height));
+    write_u16(1);
+    write_u16(24);
+    write_u32(0);
+    write_u32(pixel_bytes);
+    write_u32(2835);
+    write_u32(2835);
+    write_u32(0);
+    write_u32(0);
+
+    std::vector<unsigned char> row(static_cast<size_t>(row_stride), 255U);
+    for (int y = height - 1; y >= 0; --y) {
+        std::fill(row.begin(), row.end(), 255U);
+        const int module_y = y / scale - border;
+        for (int x = 0; x < width; ++x) {
+            const int module_x = x / scale - border;
+            const bool black = module_x >= 0 && module_y >= 0 &&
+                               module_x < matrix_size && module_y < matrix_size &&
+                               qr_popup_matrix_.get(module_x, module_y);
+            if (black) {
+                const size_t p = static_cast<size_t>(x * 3);
+                row[p + 0] = 0;
+                row[p + 1] = 0;
+                row[p + 2] = 0;
+            }
+        }
+        out.write(reinterpret_cast<const char*>(row.data()), static_cast<std::streamsize>(row.size()));
+    }
+    return out.good();
+}
+
+void ImGuiApp::OpenQrModal(const std::string& value) {
+    qr_popup_uri_ = value;
+    qr_popup_error_.clear();
+    qr_popup_matrix_ = qr::Matrix{};
+    if (!qr::EncodeText(value, qr_popup_matrix_, qr_popup_error_)) {
+        AppendLog(std::string("[ERR] QR generation failed: ") + qr_popup_error_);
+    } else {
+        AppendLog(std::string("[UI] QR generated for config: ") + ShortenForLog(value, 96));
+    }
+    qr_popup_requested_ = true;
+}
+
 void ImGuiApp::DrawCard(const char* label, const char* value) {
     ImGui::BeginGroup();
     ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
@@ -1047,7 +1419,280 @@ void ImGuiApp::DrawStatusBadge(bool running) {
     ImGui::PopStyleColor(3);
 }
 
-// ── Main frame layout ──
+void ImGuiApp::DrawNavBar() {
+    std::shared_ptr<const Snapshot> sp;
+    { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+    static const Snapshot empty_snap;
+    const Snapshot& s = sp ? *sp : empty_snap;
+
+    const float bar_h = 88 * dpi_scale_;
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.08f, 0.11f, 1.0f));
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {12*dpi_scale_, 8*dpi_scale_});
+    ImGui::BeginChild("##navbar", ImVec2(0, bar_h), true);
+    ImGui::PopStyleVar();
+
+    ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
+    ImGui::Text("huntercensor");
+    ImGui::PopStyleColor();
+    ImGui::SameLine(0, 12*dpi_scale_);
+    DrawStatusBadge(orchestrator_running_.load());
+    ImGui::SameLine(0, 12*dpi_scale_);
+    ImGui::TextColored(COL_DIM, "Alive %d/%d  Avg %.0fms  Cycles %d",
+        s.db_alive, s.db_total, s.db_avg_latency, s.cycle_count);
+    ImGui::Separator();
+
+    const Page pages[] = {Page::Home, Page::Configs, Page::Censorship, Page::Logs, Page::Advanced, Page::About};
+    for (auto p : pages) {
+        bool sel = (page_ == p);
+        if (sel) {
+            ImGui::PushStyleColor(ImGuiCol_Button, COL_ACCENT);
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
+        }
+        if (ImGui::Button(PageLabel(p), {0, 30*dpi_scale_})) page_ = p;
+        if (sel) ImGui::PopStyleColor(2);
+        ImGui::SameLine(0, 4*dpi_scale_);
+    }
+
+    bool running = orchestrator_running_.load();
+    if (running) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f,0.22f,0.22f,1.0f));
+        if (ImGui::Button(orchestrator_stopping_.load() ? "Stopping..." : "Stop", {92*dpi_scale_, 30*dpi_scale_})) RequestStopHunter();
+        ImGui::PopStyleColor(2);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f,0.72f,0.36f,1.0f));
+        if (ImGui::Button("Start", {64*dpi_scale_, 30*dpi_scale_})) StartHunter();
+        ImGui::PopStyleColor(2);
+    }
+    ImGui::SameLine(0, 4*dpi_scale_);
+    if (ImGui::Button("Cycle", {56*dpi_scale_, 30*dpi_scale_}))
+        RunCommandAsync("{\"command\":\"run_cycle\"}");
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+}
+
+void ImGuiApp::DrawHomePage() {
+    std::shared_ptr<const Snapshot> sp;
+    { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+    static const Snapshot empty_snap;
+    const Snapshot& s = sp ? *sp : empty_snap;
+
+    ImGui::TextColored(COL_ACCENT, "Simple Dashboard");
+    ImGui::Spacing();
+    ImGui::TextWrapped("Start huntercensor, let it run, then copy or scan a working config. Most users only need this page.");
+    ImGui::TextColored(COL_YELLOW, "Important: finding fresh working configs may take hours or even days depending on network conditions. Leave the app running and check back later.");
+
+    if (ImGui::BeginTable("##stats", 4, ImGuiTableFlags_SizingStretchSame, ImVec2(0, 0))) {
+        ImGui::TableNextRow();
+        char buf[64];
+
+        ImGui::TableNextColumn();
+        DrawCard("Status", orchestrator_running_.load() ? "Running" : "Stopped");
+
+        ImGui::TableNextColumn();
+        snprintf(buf, sizeof(buf), "%d", s.db_alive);
+        DrawCard("Working", buf);
+
+        ImGui::TableNextColumn();
+        snprintf(buf, sizeof(buf), "%d", s.db_total);
+        DrawCard("Total", buf);
+
+        ImGui::TableNextColumn();
+        snprintf(buf, sizeof(buf), "%.0f ms", s.db_avg_latency);
+        DrawCard("Avg Latency", buf);
+
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::TextColored(COL_ACCENT, "Main Actions");
+    const bool running = orchestrator_running_.load();
+    if (running) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f,0.22f,0.22f,1.0f));
+        if (ImGui::Button(orchestrator_stopping_.load() ? "Stopping..." : "Stop Scan", {150*dpi_scale_, 34*dpi_scale_})) RequestStopHunter();
+        ImGui::PopStyleColor(2);
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f,0.72f,0.36f,1.0f));
+        if (ImGui::Button("Start Scan", {150*dpi_scale_, 34*dpi_scale_})) StartHunter();
+        ImGui::PopStyleColor(2);
+    }
+    ImGui::SameLine(0, 8*dpi_scale_);
+    {
+        const bool probing = probe_in_flight_.load();
+        if (probing) ImGui::BeginDisabled();
+        if (ImGui::Button("Probe Network", {150*dpi_scale_, 34*dpi_scale_})) RunProbeAsync();
+        if (probing) {
+            ImGui::EndDisabled();
+            auto probe_progress = GetProgress("probe");
+            if (!probe_progress.description.empty()) {
+                ImGui::SameLine(0, 8*dpi_scale_);
+                ImGui::TextColored(COL_AMBER, "%s...", probe_progress.description.c_str());
+            }
+        }
+    }
+    ImGui::SameLine(0, 8*dpi_scale_);
+    {
+        const bool disc = discovery_in_flight_.load();
+        if (disc) ImGui::BeginDisabled();
+        if (ImGui::Button("Discover Exit", {150*dpi_scale_, 34*dpi_scale_})) RunDiscoveryAsync();
+        if (disc) {
+            ImGui::EndDisabled();
+            auto discovery_progress = GetProgress("discovery");
+            if (!discovery_progress.description.empty()) {
+                ImGui::SameLine(0, 8*dpi_scale_);
+                ImGui::TextColored(COL_AMBER, "%s...", discovery_progress.description.c_str());
+            }
+        }
+    }
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Copy All Working", {170*dpi_scale_, 34*dpi_scale_})) {
+        if (s.healthy_records.empty()) {
+            SetToast("No working configs to copy yet", ToastKind::Warning);
+            AppendLog("[UI] Copy All Working: no working configs available");
+        } else {
+            std::vector<std::string> uris;
+            uris.reserve(s.healthy_records.size());
+            for (const auto& r : s.healthy_records) uris.push_back(r.uri);
+            const auto deduped = DedupeStringsPreserveOrder(uris);
+            const bool copied = CopyTextToClipboard(JoinUniqueLinesText(deduped));
+            AppendLog("[UI] Copy All Working: requested=" + std::to_string(uris.size()) + " unique=" + std::to_string(deduped.size()) + " success=" + (copied ? "true" : "false"));
+            SetToast(copied ? ("Copied " + std::to_string(deduped.size()) + " working configs") : "Failed to copy working configs", copied ? ToastKind::Success : ToastKind::Error);
+        }
+    }
+
+    ImGui::Spacing();
+    ImGui::TextColored(COL_DIM, "Need raw logs, import/export, source tuning, or maintenance? Use Configs, Censorship, Logs, or Advanced.");
+
+    ImGui::Spacing();
+    ImGui::TextColored(COL_ACCENT, "Ready Configs");
+    const auto unique_count = DedupeStringsPreserveOrder([&]{
+        std::vector<std::string> tmp; tmp.reserve(s.healthy_records.size());
+        for (const auto& r : s.healthy_records) tmp.push_back(r.uri);
+        return tmp;
+    }()).size();
+    ImGui::SameLine(0, 8*dpi_scale_);
+    ImGui::TextColored(COL_DIM, "%d working (%d unique)", (int)s.healthy_records.size(), (int)unique_count);
+
+    if (s.healthy_records.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(COL_DIM, "No working configs yet. Click Start Scan and keep the app open. When results arrive, you can copy one, copy all, save one, or show a QR code for mobile scan.");
+        return;
+    }
+
+    if (ImGui::Button("Open Full Config List", {190*dpi_scale_, 30*dpi_scale_})) page_ = Page::Configs;
+    ImGui::Spacing();
+
+    const int quick_items = (int)std::min<size_t>(s.healthy_records.size(), 8);
+    if (ImGui::BeginTable("##home_ready", 5,
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
+        ImVec2(0, 320*dpi_scale_)))
+    {
+        ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
+        ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
+        ImGui::TableSetupColumn("Last OK", ImGuiTableColumnFlags_WidthFixed, 130*dpi_scale_);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 190*dpi_scale_);
+        ImGui::TableSetupColumn("URI");
+        ImGui::TableHeadersRow();
+        for (int i = 0; i < quick_items; ++i) {
+            const auto& r = s.healthy_records[(size_t)i];
+            ImGui::PushID(r.uri.c_str());
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextColored(r.latency_ms < 500 ? COL_GREEN : r.latency_ms < 1500 ? COL_YELLOW : COL_RED, "%.0f", r.latency_ms);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(r.engine_used.empty() ? "-" : r.engine_used.c_str());
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(FmtTs(r.last_alive_time).c_str());
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Copy##home_one")) {
+                const bool copied = CopyTextToClipboard(r.uri);
+                SetToast(copied ? "Config copied" : "Failed to copy config", copied ? ToastKind::Success : ToastKind::Error);
+            }
+            ImGui::SameLine(0, 4*dpi_scale_);
+            if (ImGui::SmallButton("Save##home_one")) {
+                std::string path = SaveFileDialog("Text Files\0*.txt\0All Files\0*.*\0", "txt");
+                if (!path.empty()) {
+                    const bool saved = SaveTextToFile(path, r.uri + "\r\n");
+                    SetToast(saved ? "Config saved" : "Failed to save config", saved ? ToastKind::Success : ToastKind::Error);
+                }
+            }
+            ImGui::SameLine(0, 4*dpi_scale_);
+            if (ImGui::SmallButton("QR##home_one")) OpenQrModal(r.uri);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(Trim(r.uri, 220).c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+}
+
+void ImGuiApp::DrawQrModal() {
+    if (qr_popup_requested_) {
+        ImGui::OpenPopup("Config QR");
+        qr_popup_requested_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(620 * dpi_scale_, 0), ImGuiCond_FirstUseEver);
+    if (!ImGui::BeginPopupModal("Config QR", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    if (!qr_popup_error_.empty()) {
+        ImGui::TextColored(COL_RED, "%s", qr_popup_error_.c_str());
+    } else if (qr_popup_matrix_.valid()) {
+        const int total_modules = qr_popup_matrix_.size + 8;
+        const float module_px = std::max(4.0f * dpi_scale_, std::min(10.0f * dpi_scale_, 360.0f * dpi_scale_ / total_modules));
+        const float canvas = total_modules * module_px;
+        ImGui::Dummy(ImVec2(canvas, canvas));
+        const ImVec2 top_left = ImGui::GetItemRectMin();
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(top_left, ImVec2(top_left.x + canvas, top_left.y + canvas), IM_COL32(255, 255, 255, 255));
+        for (int y = 0; y < qr_popup_matrix_.size; ++y) {
+            for (int x = 0; x < qr_popup_matrix_.size; ++x) {
+                if (!qr_popup_matrix_.get(x, y)) continue;
+                const float x0 = top_left.x + (x + 4) * module_px;
+                const float y0 = top_left.y + (y + 4) * module_px;
+                draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + module_px, y0 + module_px), IM_COL32(0, 0, 0, 255));
+            }
+        }
+        ImGui::Spacing();
+    }
+
+    ImGui::TextColored(COL_ACCENT, "Config URI");
+    ImGui::PushTextWrapPos(580 * dpi_scale_);
+    ImGui::TextUnformatted(qr_popup_uri_.empty() ? "-" : qr_popup_uri_.c_str());
+    ImGui::PopTextWrapPos();
+    ImGui::Spacing();
+
+    if (ImGui::Button("Copy URI")) {
+        const bool copied = CopyTextToClipboard(qr_popup_uri_);
+        SetToast(copied ? "Config copied" : "Failed to copy config", copied ? ToastKind::Success : ToastKind::Error);
+    }
+    ImGui::SameLine(0, 6 * dpi_scale_);
+    if (ImGui::Button("Save URI")) {
+        std::string path = SaveFileDialog("Text Files\0*.txt\0All Files\0*.*\0", "txt");
+        if (!path.empty()) {
+            const bool saved = SaveTextToFile(path, qr_popup_uri_ + "\r\n");
+            SetToast(saved ? "Config saved" : "Failed to save config", saved ? ToastKind::Success : ToastKind::Error);
+        }
+    }
+    ImGui::SameLine(0, 6 * dpi_scale_);
+    if (!qr_popup_matrix_.valid()) ImGui::BeginDisabled();
+    if (ImGui::Button("Save QR BMP")) {
+        std::string path = SaveFileDialog("Bitmap Files\0*.bmp\0All Files\0*.*\0", "bmp");
+        if (!path.empty()) {
+            const bool saved = SaveQrBitmapToFile(path);
+            SetToast(saved ? "QR bitmap saved" : "Failed to save QR bitmap", saved ? ToastKind::Success : ToastKind::Error);
+        }
+    }
+    if (!qr_popup_matrix_.valid()) ImGui::EndDisabled();
+    ImGui::SameLine(0, 6 * dpi_scale_);
+    if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+
+    ImGui::EndPopup();
+}
+
 void ImGuiApp::DrawFrame() {
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
 
@@ -1086,154 +1731,20 @@ void ImGuiApp::DrawFrame() {
         case Page::Censorship: DrawCensorshipPage(); break;
         case Page::Logs:       DrawLogsPage(); break;
         case Page::Advanced:   DrawAdvancedPage(); break;
+        case Page::About:      DrawAboutPage(); break;
     }
+
+    DrawQrModal();
 
     ImGui::EndChild();
     ImGui::End();
 }
 
-// ── Navigation bar ──
-void ImGuiApp::DrawNavBar() {
-    Snapshot s;
-    { std::lock_guard<std::mutex> lk(snap_mutex_); s = snap_; }
-
-    const float bar_h = 88 * dpi_scale_;
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.08f, 0.08f, 0.11f, 1.0f));
-    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {12*dpi_scale_, 8*dpi_scale_});
-    ImGui::BeginChild("##navbar", ImVec2(0, bar_h), true);
-    ImGui::PopStyleVar();
-
-    ImGui::PushStyleColor(ImGuiCol_Text, COL_ACCENT);
-    ImGui::Text("huntercensor");
-    ImGui::PopStyleColor();
-    ImGui::SameLine(0, 12*dpi_scale_);
-    DrawStatusBadge(orchestrator_running_.load());
-    ImGui::SameLine(0, 12*dpi_scale_);
-    ImGui::TextColored(COL_DIM, "Alive %d/%d  Avg %.0fms  Cycles %d",
-        s.db_alive, s.db_total, s.db_avg_latency, s.cycle_count);
-    ImGui::Separator();
-
-    const Page pages[] = {Page::Home, Page::Configs, Page::Censorship, Page::Logs, Page::Advanced};
-    for (auto p : pages) {
-        bool sel = (page_ == p);
-        if (sel) {
-            ImGui::PushStyleColor(ImGuiCol_Button, COL_ACCENT);
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, COL_ACCENT);
-        }
-        if (ImGui::Button(PageLabel(p), {0, 30*dpi_scale_})) page_ = p;
-        if (sel) ImGui::PopStyleColor(2);
-        ImGui::SameLine(0, 4*dpi_scale_);
-    }
-
-    bool running = orchestrator_running_.load();
-    if (running) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f,0.22f,0.22f,1.0f));
-        if (ImGui::Button("Stop", {64*dpi_scale_, 30*dpi_scale_})) StopHunter();
-        ImGui::PopStyleColor(2);
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f,0.72f,0.36f,1.0f));
-        if (ImGui::Button("Start", {64*dpi_scale_, 30*dpi_scale_})) StartHunter();
-        ImGui::PopStyleColor(2);
-    }
-    ImGui::SameLine(0, 4*dpi_scale_);
-    if (ImGui::Button("Cycle", {56*dpi_scale_, 30*dpi_scale_}))
-        RunCommandAsync("{\"command\":\"run_cycle\"}");
-
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-}
-
-// ── Home page ──
-void ImGuiApp::DrawHomePage() {
-    Snapshot s;
-    { std::lock_guard<std::mutex> lk(snap_mutex_); s = snap_; }
-
-    ImGui::TextColored(COL_ACCENT, "Overview");
-    ImGui::Spacing();
-
-    // Stats cards row
-    if (ImGui::BeginTable("##stats", 4, ImGuiTableFlags_SizingStretchSame, ImVec2(0, 0))) {
-        ImGui::TableNextRow();
-        char buf[64];
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%d", s.cycle_count);
-        DrawCard("Cycles", buf);
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%d", s.db_alive);
-        DrawCard("Alive", buf);
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%d", s.db_total);
-        DrawCard("Total", buf);
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%.0f ms", s.db_avg_latency);
-        DrawCard("Avg Latency", buf);
-
-        ImGui::EndTable();
-    }
-
-    ImGui::Spacing();
-    if (ImGui::BeginTable("##sys", 4, ImGuiTableFlags_SizingStretchSame)) {
-        ImGui::TableNextRow();
-        char buf[64];
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%d cores", s.hardware.cpu_count);
-        DrawCard("CPU", buf);
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%.1f / %.1f GB", s.hardware.ram_used_gb, s.hardware.ram_total_gb);
-        DrawCard("RAM", buf);
-
-        ImGui::TableNextColumn();
-        DrawCard("Mode", ModeLbl(s.hardware.mode));
-
-        ImGui::TableNextColumn();
-        DrawCard("Speed", s.speed_profile.profile_name.empty() ? "-" : s.speed_profile.profile_name.c_str());
-
-        ImGui::EndTable();
-    }
-
-    ImGui::Spacing();
-    ImGui::Spacing();
-    ImGui::TextColored(COL_ACCENT, "Healthy Configs");
-    ImGui::Spacing();
-
-    const float avail_h = ImGui::GetContentRegionAvail().y - 8;
-    if (ImGui::BeginTable("##healthy", 4,
-        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
-        ImVec2(0, avail_h > 100 ? avail_h : 200)))
-    {
-        ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 80*dpi_scale_);
-        ImGui::TableSetupColumn("Engine",  ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
-        ImGui::TableSetupColumn("Last OK", ImGuiTableColumnFlags_WidthFixed, 130*dpi_scale_);
-        ImGui::TableSetupColumn("URI");
-        ImGui::TableHeadersRow();
-        for (auto& r : s.healthy_records) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextColored(r.latency_ms < 500 ? COL_GREEN : r.latency_ms < 1500 ? COL_YELLOW : COL_RED,
-                "%.0f", r.latency_ms);
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(r.engine_used.empty() ? "-" : r.engine_used.c_str());
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(FmtTs(r.last_alive_time).c_str());
-            ImGui::TableNextColumn(); ImGui::TextUnformatted(Trim(r.uri, 200).c_str());
-        }
-        ImGui::EndTable();
-    }
-    if (s.healthy_records.empty()) {
-        ImGui::TextColored(COL_DIM, "No healthy configs yet. Start the engine or run a cycle to populate this view.");
-    }
-}
-
-// ── Configs page ──
 void ImGuiApp::DrawConfigsPage() {
-    Snapshot s;
-    { std::lock_guard<std::mutex> lk(snap_mutex_); s = snap_; }
+    std::shared_ptr<const Snapshot> sp;
+    { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+    static const Snapshot empty_snap;
+    const Snapshot& s = sp ? *sp : empty_snap;
 
     ImGui::TextColored(COL_ACCENT, "Config Database");
     ImGui::Spacing();
@@ -1290,8 +1801,40 @@ void ImGuiApp::DrawConfigsPage() {
 
     // Table
     const auto& rows = show_alive_only_ ? s.healthy_records : s.all_records;
+    const auto unique_count = DedupeStringsPreserveOrder([&]{
+        std::vector<std::string> tmp; tmp.reserve(rows.size());
+        for (const auto& r : rows) tmp.push_back(r.uri);
+        return tmp;
+    }()).size();
+    
+    if (ImGui::Button(show_alive_only_ ? "Copy All Live" : "Copy All Visible")) {
+        if (rows.empty()) {
+            SetToast(show_alive_only_ ? "No live configs to copy" : "No configs to copy", ToastKind::Warning);
+            AppendLog("[UI] Copy All " + std::string(show_alive_only_ ? "Live" : "Visible") + 
+                      ": no configs available");
+        } else {
+            std::vector<std::string> uris;
+            uris.reserve(rows.size());
+            for (const auto& r : rows) uris.push_back(r.uri);
+            const auto deduped = DedupeStringsPreserveOrder(uris);
+            const bool copied = CopyTextToClipboard(JoinUniqueLinesText(deduped));
+            const float dedup_ratio = uris.empty() ? 0.0f : (float)deduped.size() / uris.size() * 100.0f;
+            char ratio_buf[32];
+            snprintf(ratio_buf, sizeof(ratio_buf), "%.1f%%", dedup_ratio);
+            AppendLog("[UI] Copy All " + std::string(show_alive_only_ ? "Live" : "Visible") + 
+                      ": requested=" + std::to_string(uris.size()) + 
+                      " unique=" + std::to_string(deduped.size()) + 
+                      " dedup=" + std::string(ratio_buf) +
+                      " success=" + (copied ? "true" : "false"));
+            SetToast(copied ? ("Copied " + std::to_string(deduped.size()) + " configs (" + 
+                     std::string(ratio_buf) + " dedup)") : "Failed to copy configs", 
+                     copied ? ToastKind::Success : ToastKind::Error);
+        }
+    }
+    ImGui::SameLine(0, 8*dpi_scale_);
+    ImGui::TextColored(COL_DIM, "Showing: %d (%d unique)", (int)rows.size(), (int)unique_count);
     const float avail_h = ImGui::GetContentRegionAvail().y - 4;
-    if (ImGui::BeginTable("##cfgtbl", 7,
+    if (ImGui::BeginTable("##cfgtbl", 8,
         ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
         ImVec2(0, avail_h > 100 ? avail_h : 200)))
     {
@@ -1301,9 +1844,11 @@ void ImGuiApp::DrawConfigsPage() {
         ImGui::TableSetupColumn("Tests",ImGuiTableColumnFlags_WidthFixed, 50*dpi_scale_);
         ImGui::TableSetupColumn("Passes", ImGuiTableColumnFlags_WidthFixed, 50*dpi_scale_);
         ImGui::TableSetupColumn("Tag",  ImGuiTableColumnFlags_WidthFixed, 80*dpi_scale_);
+        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 190*dpi_scale_);
         ImGui::TableSetupColumn("URI");
         ImGui::TableHeadersRow();
         for (auto& r : rows) {
+            ImGui::PushID(r.uri.c_str());
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::TextColored(r.alive ? COL_GREEN : COL_RED, r.alive ? "Y" : "N");
@@ -1312,7 +1857,23 @@ void ImGuiApp::DrawConfigsPage() {
             ImGui::TableNextColumn(); ImGui::Text("%d", r.total_tests);
             ImGui::TableNextColumn(); ImGui::Text("%d", r.total_passes);
             ImGui::TableNextColumn(); ImGui::TextUnformatted(r.tag.empty() ? "-" : r.tag.c_str());
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Copy")) {
+                const bool copied = CopyTextToClipboard(r.uri);
+                SetToast(copied ? "Config copied" : "Failed to copy config", copied ? ToastKind::Success : ToastKind::Error);
+            }
+            ImGui::SameLine(0, 4*dpi_scale_);
+            if (ImGui::SmallButton("Save")) {
+                std::string path = SaveFileDialog("Text Files\0*.txt\0All Files\0*.*\0", "txt");
+                if (!path.empty()) {
+                    const bool saved = SaveTextToFile(path, r.uri + "\r\n");
+                    SetToast(saved ? "Config saved" : "Failed to save config", saved ? ToastKind::Success : ToastKind::Error);
+                }
+            }
+            ImGui::SameLine(0, 4*dpi_scale_);
+            if (ImGui::SmallButton("QR")) OpenQrModal(r.uri);
             ImGui::TableNextColumn(); ImGui::TextUnformatted(Trim(r.uri, 200).c_str());
+            ImGui::PopID();
         }
         ImGui::EndTable();
     }
@@ -1323,8 +1884,10 @@ void ImGuiApp::DrawConfigsPage() {
 
 // ── Censorship page ──
 void ImGuiApp::DrawCensorshipPage() {
-    Snapshot s;
-    { std::lock_guard<std::mutex> lk(snap_mutex_); s = snap_; }
+    std::shared_ptr<const Snapshot> sp;
+    { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+    static const Snapshot empty_snap;
+    const Snapshot& s = sp ? *sp : empty_snap;
 
     ImGui::TextColored(COL_ACCENT, "Censorship Lab");
     ImGui::Spacing();
@@ -1334,14 +1897,30 @@ void ImGuiApp::DrawCensorshipPage() {
         bool probing = probe_in_flight_.load();
         if (probing) ImGui::BeginDisabled();
         if (ImGui::Button("Probe Censorship")) RunProbeAsync();
-        if (probing) ImGui::EndDisabled();
+        if (probing) {
+            ImGui::EndDisabled();
+            // Show progress indicator
+            auto probe_progress = GetProgress("probe");
+            if (!probe_progress.description.empty()) {
+                ImGui::SameLine(0, 8*dpi_scale_);
+                ImGui::TextColored(COL_AMBER, "%s...", probe_progress.description.c_str());
+            }
+        }
     }
     ImGui::SameLine(0, 8*dpi_scale_);
     {
         bool disc = discovery_in_flight_.load();
         if (disc) ImGui::BeginDisabled();
         if (ImGui::Button("Discover Exit IP")) RunDiscoveryAsync();
-        if (disc) ImGui::EndDisabled();
+        if (disc) {
+            ImGui::EndDisabled();
+            // Show progress indicator
+            auto discovery_progress = GetProgress("discovery");
+            if (!discovery_progress.description.empty()) {
+                ImGui::SameLine(0, 8*dpi_scale_);
+                ImGui::TextColored(COL_AMBER, "%s...", discovery_progress.description.c_str());
+            }
+        }
     }
 
     ImGui::Spacing();
@@ -1403,7 +1982,11 @@ void ImGuiApp::DrawCensorshipPage() {
     if (has_discovery_result_) {
         ImGui::Spacing();
         ImGui::TextColored(COL_ACCENT, "Discovery Result");
-        std::lock_guard<std::mutex> lk(data_mutex_);
+        security::DpiEvasionOrchestrator::NetworkDiscoveryResult discovery_view;
+        {
+            std::lock_guard<std::mutex> lk(data_mutex_);
+            discovery_view = discovery_result_;
+        }
         if (ImGui::BeginTable("##disc", 2, ImGuiTableFlags_RowBg|ImGuiTableFlags_Borders, ImVec2(0,0))) {
             auto row = [](const char* k, const std::string& v) {
                 ImGui::TableNextRow();
@@ -1412,22 +1995,27 @@ void ImGuiApp::DrawCensorshipPage() {
             };
             ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 140*1.0f);
             ImGui::TableSetupColumn("Value");
-            row("Local IP",     discovery_result_.local_ip);
-            row("Gateway",      discovery_result_.default_gateway);
-            row("Gateway MAC",  discovery_result_.gateway_mac);
-            row("Public IP",    discovery_result_.public_ip);
-            row("ISP",          discovery_result_.isp_info);
-            row("Interface",    discovery_result_.suggested_iface);
-            row("Exit IP",      discovery_result_.suggested_exit_ip);
-            char dur[32]; snprintf(dur, sizeof(dur), "%d ms", discovery_result_.total_duration_ms);
+            row("Local IP",     discovery_view.local_ip);
+            row("Gateway",      discovery_view.default_gateway);
+            row("Gateway MAC",  discovery_view.gateway_mac);
+            row("Public IP",    discovery_view.public_ip);
+            row("ISP",          discovery_view.isp_info);
+            row("Interface",    discovery_view.suggested_iface);
+            row("Exit IP",      discovery_view.suggested_exit_ip);
+            char dur[32]; snprintf(dur, sizeof(dur), "%d ms", discovery_view.total_duration_ms);
             row("Duration", dur);
             ImGui::EndTable();
         }
 
-        if (!discovery_result_.trace_hops.empty()) {
+        if (!discovery_view.trace_hops.empty()) {
             ImGui::Spacing();
+            if (edge_bypass_in_flight_.load()) {
+                ImGui::TextColored(COL_ACCENT, "Edge bypass running...");
+            } else {
+                ImGui::TextColored(COL_DIM, "Edge bypass idle");
+            }
             ImGui::TextColored(COL_ACCENT, "Trace Hops");
-            if (ImGui::BeginTable("##trace_hops", 5,
+            if (ImGui::BeginTable("##trace_hops", 6,
                 ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY, ImVec2(0, 150*dpi_scale_)))
             {
                 ImGui::TableSetupColumn("TTL", ImGuiTableColumnFlags_WidthFixed, 42*dpi_scale_);
@@ -1435,8 +2023,10 @@ void ImGuiApp::DrawCensorshipPage() {
                 ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 72*dpi_scale_);
                 ImGui::TableSetupColumn("Zone", ImGuiTableColumnFlags_WidthFixed, 92*dpi_scale_);
                 ImGui::TableSetupColumn("ASN / Host");
+                ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 116*dpi_scale_);
                 ImGui::TableHeadersRow();
-                for (const auto& hop : discovery_result_.trace_hops) {
+                for (const auto& hop : discovery_view.trace_hops) {
+                    ImGui::PushID((hop.ip + std::to_string(hop.ttl)).c_str());
                     ImGui::TableNextRow();
                     ImGui::TableNextColumn(); ImGui::Text("%d", hop.ttl);
                     ImGui::TableNextColumn(); ImGui::TextUnformatted(hop.ip.empty() ? "-" : hop.ip.c_str());
@@ -1447,6 +2037,19 @@ void ImGuiApp::DrawCensorshipPage() {
                     ImGui::TableNextColumn();
                     const std::string tail = !hop.asn_info.empty() ? hop.asn_info : hop.hostname;
                     ImGui::TextUnformatted(tail.empty() ? "-" : tail.c_str());
+                    ImGui::TableNextColumn();
+                    const bool can_bypass = !hop.ip.empty();
+                    if (!can_bypass) ImGui::BeginDisabled();
+                    if (ImGui::SmallButton("Bypass")) RunEdgeBypassAsync(hop.ip);
+                    if (!can_bypass) ImGui::EndDisabled();
+                    if (can_bypass) {
+                        ImGui::SameLine(0, 4*dpi_scale_);
+                        if (ImGui::SmallButton("Copy IP")) {
+                            const bool copied = CopyTextToClipboard(hop.ip);
+                            SetToast(copied ? "Route IP copied" : "Failed to copy route IP", copied ? ToastKind::Success : ToastKind::Error);
+                        }
+                    }
+                    ImGui::PopID();
                 }
                 ImGui::EndTable();
             }
@@ -1468,10 +2071,10 @@ void ImGuiApp::DrawCensorshipPage() {
                  copied ? ToastKind::Success : ToastKind::Error);
         AppendLog(copied ? "[UI] Discovery logs copied to clipboard" : "[ERR] Discovery logs copy failed");
     }
+    { std::lock_guard<std::mutex> lk(data_mutex_); draw_discovery_logs_ = discovery_logs_; }
     ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
     if (ImGui::BeginChild("##disclog", ImVec2(0, 190*dpi_scale_), true)) {
-        std::lock_guard<std::mutex> lk(data_mutex_);
-        for (auto& l : discovery_logs_) DrawLogLine(l);
+        for (auto& l : draw_discovery_logs_) DrawLogLine(l);
         if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
     }
     ImGui::EndChild();
@@ -1483,7 +2086,11 @@ void ImGuiApp::DrawCensorshipPage() {
         ImGui::Indent(8*dpi_scale_);
         ImGui::TextColored(COL_DIM, "This action is discovery-driven only. Manual MAC/IP/interface entry is disabled.");
         if (has_discovery_result_) {
-            std::lock_guard<std::mutex> lk(data_mutex_);
+            security::DpiEvasionOrchestrator::NetworkDiscoveryResult discovery_view;
+            {
+                std::lock_guard<std::mutex> lk(data_mutex_);
+                discovery_view = discovery_result_;
+            }
             if (ImGui::BeginTable("##edge_auto_targets", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders, ImVec2(0, 0))) {
                 ImGui::TableSetupColumn("Key", ImGuiTableColumnFlags_WidthFixed, 140*dpi_scale_);
                 ImGui::TableSetupColumn("Discovered value");
@@ -1492,24 +2099,33 @@ void ImGuiApp::DrawCensorshipPage() {
                     ImGui::TableNextColumn(); ImGui::TextColored(COL_DIM, "%s", key);
                     ImGui::TableNextColumn(); ImGui::TextUnformatted(value.empty() ? "-" : value.c_str());
                 };
-                edge_row("Gateway MAC", discovery_result_.gateway_mac);
-                edge_row("Exit IP", discovery_result_.suggested_exit_ip);
-                edge_row("Interface", discovery_result_.suggested_iface);
-                edge_row("Gateway", discovery_result_.default_gateway);
-                edge_row("Local IP", discovery_result_.local_ip);
-                edge_row("ISP", discovery_result_.isp_info);
+                edge_row("Gateway MAC", discovery_view.gateway_mac);
+                edge_row("Exit IP", discovery_view.suggested_exit_ip);
+                edge_row("Interface", discovery_view.suggested_iface);
+                edge_row("Gateway", discovery_view.default_gateway);
+                edge_row("Local IP", discovery_view.local_ip);
+                edge_row("ISP", discovery_view.isp_info);
                 ImGui::EndTable();
             }
         } else {
             ImGui::TextColored(COL_DIM, "Run Discover Exit IP first. The app will then use only discovered targets.");
         }
         ImGui::TextColored(COL_DIM, "Step 4: run discovery, review the discovered targets above, then execute the bypass and inspect the raw verification log below.");
+        ImGui::TextColored(COL_YELLOW, "On Windows, only Execute Bypass may ask for administrator approval. Scanning, discovery, copy, QR, and ordinary use do not require admin rights.");
         {
             bool busy = edge_bypass_in_flight_.load();
             bool ready = has_discovery_result_;
             if (busy || !ready) ImGui::BeginDisabled();
             if (ImGui::Button("Execute Bypass")) RunEdgeBypassAsync();
-            if (busy || !ready) ImGui::EndDisabled();
+            if (busy || !ready) {
+                ImGui::EndDisabled();
+                // Show progress indicator
+                auto bypass_progress = GetProgress("edge_bypass");
+                if (!bypass_progress.description.empty()) {
+                    ImGui::SameLine(0, 8*dpi_scale_);
+                    ImGui::TextColored(COL_AMBER, "%s...", bypass_progress.description.c_str());
+                }
+            }
         }
         ImGui::TextColored(COL_DIM, "Status: %s", s.edge_bypass_status.empty() ? "-" : s.edge_bypass_status.c_str());
         ImGui::TextColored(COL_ACCENT, "Edge Router Bypass Log");
@@ -1525,13 +2141,13 @@ void ImGuiApp::DrawCensorshipPage() {
                      copied ? ToastKind::Success : ToastKind::Error);
             AppendLog(copied ? "[UI] Edge bypass logs copied to clipboard" : "[ERR] Edge bypass logs copy failed");
         }
+        { std::lock_guard<std::mutex> lk(data_mutex_); draw_edge_logs_ = edge_bypass_logs_; }
         ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
         if (ImGui::BeginChild("##edgebypasslog", ImVec2(0, 200*dpi_scale_), true)) {
-            std::lock_guard<std::mutex> lk(data_mutex_);
-            if (edge_bypass_logs_.empty()) {
+            if (draw_edge_logs_.empty()) {
                 ImGui::TextColored(COL_DIM, "No edge bypass log yet. Run Discover Exit IP, review the discovered targets, then click Execute Bypass.");
             } else {
-                for (const auto& line : edge_bypass_logs_) DrawLogLine(line);
+                for (const auto& line : draw_edge_logs_) DrawLogLine(line);
                 if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY()) ImGui::SetScrollHereY(1.0f);
             }
         }
@@ -1606,10 +2222,14 @@ void ImGuiApp::DrawLogsPage() {
 
 // ── Advanced page ──
 void ImGuiApp::DrawAdvancedPage() {
-    Snapshot s;
-    { std::lock_guard<std::mutex> lk(snap_mutex_); s = snap_; }
+    std::shared_ptr<const Snapshot> sp;
+    { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+    static const Snapshot empty_snap;
+    const Snapshot& s = sp ? *sp : empty_snap;
 
     ImGui::TextColored(COL_ACCENT, "Advanced Settings");
+    ImGui::Spacing();
+    ImGui::TextColored(COL_DIM, "This page contains runtime tuning, source management, maintenance actions, and port details. Most users only need the Home page.");
     ImGui::Spacing();
 
     if (ImGui::BeginTabBar("##advtabs")) {
@@ -1656,8 +2276,27 @@ void ImGuiApp::DrawAdvancedPage() {
         // Sources tab
         if (ImGui::BeginTabItem("Sources")) {
             ImGui::Spacing();
+            auto source_lines = DedupeStringsPreserveOrder(SplitLines(github_urls_.data()));
+            ImGui::TextColored(COL_DIM, "Unique sources: %d", (int)source_lines.size());
             ImGui::InputTextMultiline("GitHub URLs", github_urls_.data(), github_urls_.size(),
                 ImVec2(-1, 200*dpi_scale_));
+            if (ImGui::Button("Normalize Sources")) {
+                CopyBuf(JoinUniqueLinesText(source_lines), github_urls_.data(), github_urls_.size());
+            }
+            ImGui::SameLine(0, 8*dpi_scale_);
+            if (ImGui::Button("Copy All Sources")) {
+                if (source_lines.empty()) {
+                    SetToast("No sources to copy", ToastKind::Warning);
+                    AppendLog("[UI] Copy All Sources: no sources available");
+                } else {
+                    const bool copied = CopyTextToClipboard(JoinUniqueLinesText(source_lines));
+                    AppendLog("[UI] Copy All Sources: unique=" + std::to_string(source_lines.size()) + 
+                              " success=" + (copied ? "true" : "false"));
+                    SetToast(copied ? ("Copied " + std::to_string(source_lines.size()) + " sources") : "Failed to copy sources", 
+                             copied ? ToastKind::Success : ToastKind::Error);
+                }
+            }
+            ImGui::SameLine(0, 8*dpi_scale_);
             if (ImGui::Button("Save Sources")) ApplyAdvancedSettings();
             ImGui::EndTabItem();
         }
@@ -1692,6 +2331,42 @@ void ImGuiApp::DrawAdvancedPage() {
         // Ports tab
         if (ImGui::BeginTabItem("Ports")) {
             ImGui::Spacing();
+            
+            // Count unique URIs
+            const auto unique_port_uris = DedupeStringsPreserveOrder([&]{
+                std::vector<std::string> tmp; tmp.reserve(s.provisioned_ports.size());
+                for (const auto& sl : s.provisioned_ports) {
+                    if (!sl.uri.empty()) tmp.push_back(sl.uri);
+                }
+                return tmp;
+            }());
+            
+            if (ImGui::Button("Copy All Port URIs")) {
+                if (unique_port_uris.empty()) {
+                    SetToast("No port URIs to copy", ToastKind::Warning);
+                    AppendLog("[UI] Copy All Port URIs: no port URIs available");
+                } else {
+                    std::vector<std::string> uris;
+                    uris.reserve(s.provisioned_ports.size());
+                    for (const auto& sl : s.provisioned_ports) {
+                        if (!sl.uri.empty()) uris.push_back(sl.uri);
+                    }
+                    const auto deduped = DedupeStringsPreserveOrder(uris);
+                    const bool copied = CopyTextToClipboard(JoinUniqueLinesText(deduped));
+                    const float dedup_ratio = uris.empty() ? 0.0f : (float)deduped.size() / uris.size() * 100.0f;
+                    char ratio_buf[32];
+                    snprintf(ratio_buf, sizeof(ratio_buf), "%.1f%%", dedup_ratio);
+                    AppendLog("[UI] Copy All Port URIs: requested=" + std::to_string(uris.size()) + 
+                              " unique=" + std::to_string(deduped.size()) + 
+                              " dedup=" + std::string(ratio_buf) +
+                              " success=" + (copied ? "true" : "false"));
+                    SetToast(copied ? ("Copied " + std::to_string(deduped.size()) + " port URIs (" + 
+                             std::string(ratio_buf) + " dedup)") : "Failed to copy port URIs", 
+                             copied ? ToastKind::Success : ToastKind::Error);
+                }
+            }
+            ImGui::SameLine();
+            ImGui::TextColored(COL_DIM, "(%d total, %d unique)", (int)unique_port_uris.size(), (int)unique_port_uris.size());
             const float avail_h = ImGui::GetContentRegionAvail().y - 4;
             if (ImGui::BeginTable("##porttbl", 7,
                 ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
@@ -1725,6 +2400,111 @@ void ImGuiApp::DrawAdvancedPage() {
 
         ImGui::EndTabBar();
     }
+}
+
+void ImGuiApp::DrawAboutPage() {
+    ImGui::TextColored(COL_ACCENT, "About huntercensor");
+    ImGui::Spacing();
+    ImGui::TextWrapped("huntercensor is a native Windows application for discovering, validating, copying, and provisioning censorship-resistant proxy configs with a simple dashboard for normal users and an advanced workspace for power users.");
+    ImGui::Spacing();
+
+    if (ImGui::BeginTable("##about_links", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders, ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("Item", ImGuiTableColumnFlags_WidthFixed, 160*dpi_scale_);
+        ImGui::TableSetupColumn("Value");
+        ImGui::TableSetupColumn("Action", ImGuiTableColumnFlags_WidthFixed, 120*dpi_scale_);
+        ImGui::TableHeadersRow();
+        auto row = [this](const char* label, const char* value) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(label);
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(value);
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton((std::string("Copy##") + label).c_str())) {
+                const bool copied = CopyTextToClipboard(value);
+                SetToast(copied ? "Copied" : "Copy failed", copied ? ToastKind::Success : ToastKind::Error);
+            }
+        };
+        row("Maintainer", "bahmany");
+        row("Repository", "https://github.com/bahmany/censorship_hunter");
+        row("Issues", "https://github.com/bahmany/censorship_hunter/issues");
+        row("Releases", "https://github.com/bahmany/censorship_hunter/releases");
+        row("English guide", "hunter_cpp/docs/USER_GUIDE_EN.md");
+        row("Persian guide", "hunter_cpp/docs/USER_GUIDE_FA.md");
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::TextColored(COL_ACCENT, "How to use the app");
+    if (ImGui::BeginTable("##about_flow", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders, ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("Page", ImGuiTableColumnFlags_WidthFixed, 140*dpi_scale_);
+        ImGui::TableSetupColumn("Purpose");
+        ImGui::TableHeadersRow();
+        auto row = [](const char* label, const char* value) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(label);
+            ImGui::TableNextColumn(); ImGui::TextWrapped("%s", value);
+        };
+        row("Home", "Use the simple dashboard to start scanning, probe the network, discover an exit path, and copy or scan working configs.");
+        row("Configs", "Browse the current config database, copy one config, save one config, or show a QR code for mobile import.");
+        row("Censorship", "Inspect detailed probe results, discovery output, trace hops, and the edge bypass flow.");
+        row("Advanced", "Change runtime paths, source lists, Telegram settings, maintenance actions, and port-level details.");
+        row("Logs", "Read the full live log stream and copy it for debugging or support.");
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::TextColored(COL_ACCENT, "Administrator rights");
+    ImGui::TextWrapped("huntercensor is designed to run without administrator rights for scanning, discovery, copy, QR, validation, and ordinary day-to-day use. On Windows, only route injection for edge bypass asks for administrator approval, and only when that specific action is requested.");
+}
+
+// ── Progress tracking implementation ──
+void ImGuiApp::StartProgress(const std::string& id, const std::string& description, bool indeterminate) {
+    std::lock_guard<std::mutex> lk(progress_mutex_);
+    ProgressTask task;
+    task.id = id;
+    task.description = description;
+    task.progress = 0.0f;
+    task.start_time = std::chrono::steady_clock::now();
+    task.indeterminate = indeterminate;
+    progress_tasks_[id] = std::move(task);
+    AppendLog("[UI] Progress started: " + description + (indeterminate ? " (indeterminate)" : ""));
+}
+
+void ImGuiApp::UpdateProgress(const std::string& id, float progress) {
+    std::lock_guard<std::mutex> lk(progress_mutex_);
+    auto it = progress_tasks_.find(id);
+    if (it != progress_tasks_.end()) {
+        it->second.progress = std::clamp(progress, 0.0f, 1.0f);
+    }
+}
+
+void ImGuiApp::CompleteProgress(const std::string& id) {
+    std::lock_guard<std::mutex> lk(progress_mutex_);
+    auto it = progress_tasks_.find(id);
+    if (it != progress_tasks_.end()) {
+        it->second.progress = 1.0f;
+        auto elapsed = std::chrono::steady_clock::now() - it->second.start_time;
+        auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count();
+        AppendLog("[UI] Progress completed: " + it->second.description + " (" + std::to_string(elapsed_ms) + "ms)");
+        progress_tasks_.erase(it);
+    }
+}
+
+void ImGuiApp::ClearProgress(const std::string& id) {
+    std::lock_guard<std::mutex> lk(progress_mutex_);
+    auto it = progress_tasks_.find(id);
+    if (it != progress_tasks_.end()) {
+        AppendLog("[UI] Progress cleared: " + it->second.description);
+        progress_tasks_.erase(it);
+    }
+}
+
+ImGuiApp::ProgressTask ImGuiApp::GetProgress(const std::string& id) const {
+    std::lock_guard<std::mutex> lk(progress_mutex_);
+    auto it = progress_tasks_.find(id);
+    if (it != progress_tasks_.end()) {
+        return it->second;
+    }
+    return {};
 }
 
 // ── WndProc ──

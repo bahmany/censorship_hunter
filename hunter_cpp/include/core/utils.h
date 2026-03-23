@@ -252,11 +252,6 @@ float getMemoryPercent();
 int getCpuCount();
 
 /**
- * @brief HTML escape for dashboard
- */
-std::string htmlEscape(const std::string& s);
-
-/**
  * @brief Simple JSON builder helpers
  */
 class JsonBuilder {

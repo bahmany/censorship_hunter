@@ -1,5 +1,5 @@
 @echo off
-echo Starting Hunter VPN...
+echo Starting huntercensor...
 echo.
 echo Features:
 echo - Native C++ Dear ImGui interface

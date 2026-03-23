@@ -30,6 +30,11 @@ struct GitHubRefreshResult {
     int appended = 0;
     int added = 0;
     std::string reason = "ok";
+    // Aliases for compatibility
+    int total_fetched = 0;
+    int valid_configs = 0;
+    int sources_found = 0;
+    double timestamp = 0.0;
 };
 
 std::set<std::string>& githubSeenStore() {
@@ -371,6 +376,10 @@ void BaseWorker::join(float timeout) {
     }
 }
 
+void BaseWorker::requestStop() {
+    stop_wait_cv_.notify_all();
+}
+
 WorkerStatus BaseWorker::getStatus() const {
     std::lock_guard<std::mutex> lock(status_mutex_);
     return status_;
@@ -389,6 +398,11 @@ HardwareSnapshot BaseWorker::getHardware() {
     return HunterTaskManager::instance().getHardware();
 }
 
+bool BaseWorker::sleepInterruptible(std::chrono::milliseconds duration) {
+    std::unique_lock<std::mutex> lock(stop_wait_mutex_);
+    return stop_wait_cv_.wait_for(lock, duration, [this] { return stop_.load(); });
+}
+
 void BaseWorker::runLoop() {
     utils::LogRingBuffer::instance().push("[" + name + "] Thread started");
     while (!stop_.load()) {
@@ -399,7 +413,7 @@ void BaseWorker::runLoop() {
                 status_.next_run_in = 0.0;
                 status_.extra["paused"] = "true";
             }
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            sleepInterruptible(std::chrono::milliseconds(250));
         }
         {
             std::lock_guard<std::mutex> lock(status_mutex_);
@@ -446,7 +460,7 @@ void BaseWorker::runLoop() {
                         status_.next_run_in = 0.0;
                         status_.extra["paused"] = "true";
                     }
-                    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                    sleepInterruptible(std::chrono::milliseconds(250));
                 }
                 {
                     std::lock_guard<std::mutex> lock(status_mutex_);
@@ -458,7 +472,7 @@ void BaseWorker::runLoop() {
                 status_.next_run_in = (double)remaining;
             }
             int sleep_ms = std::min(remaining, 1) * 1000;
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleep_ms));
+            sleepInterruptible(std::chrono::milliseconds(sleep_ms));
             remaining -= 1;
         }
     }
@@ -638,11 +652,11 @@ HarvesterWorker::HarvesterWorker(HunterOrchestrator* orch, std::atomic<bool>& st
 void HarvesterWorker::execute() {
     if (first_run_) {
         first_run_ = false;
-        { std::ostringstream _ls; _ls << "[Harvester] Initial delay " << constants::HARVESTER_INITIAL_DELAY_S << "s";
+        { std::ostringstream _ls; _ls << "[Harvester] Initial startup delay: " << constants::HARVESTER_INITIAL_DELAY_S << "s to avoid CPU spikes";
           utils::LogRingBuffer::instance().push(_ls.str()); }
         int remaining = constants::HARVESTER_INITIAL_DELAY_S;
         while (remaining > 0 && !stop_.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(std::min(remaining, 5)));
+            sleepInterruptible(std::chrono::seconds(std::min(remaining, 5)));
             remaining -= 5;
         }
         if (stop_.load()) return;
@@ -723,11 +737,11 @@ void GitHubDownloaderWorker::execute() {
     if (first_run_) {
         first_run_ = false;
         updateExtra("reason", "initial_delay");
-        { std::ostringstream _ls; _ls << "[GitHubBG] Initial delay " << constants::GITHUB_BG_INITIAL_DELAY_S << "s";
+        { std::ostringstream _ls; _ls << "[GitHub BG] Initial startup delay: " << constants::GITHUB_BG_INITIAL_DELAY_S << "s to avoid network burst";
           utils::LogRingBuffer::instance().push(_ls.str()); }
         int remaining = constants::GITHUB_BG_INITIAL_DELAY_S;
         while (remaining > 0 && !stop_.load()) {
-            std::this_thread::sleep_for(std::chrono::seconds(std::min(remaining, 5)));
+            sleepInterruptible(std::chrono::seconds(std::min(remaining, 5)));
             remaining -= 5;
         }
         if (stop_.load()) return;
@@ -745,49 +759,63 @@ void GitHubDownloaderWorker::execute() {
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     auto refresh = refreshGithubConfigs(orch_, cap, 9, 40.0f, "github_bg", "[GitHubBG]");
+    
+    // Copy values to compatibility fields
+    refresh.total_fetched = refresh.fetched_total;
+    refresh.valid_configs = refresh.valid_total;
+    refresh.sources_found = 9;  // Number of sources attempted
+    refresh.timestamp = utils::nowTimestamp();
+    
+    // Enhanced logging for GitHub refresh
     if (refresh.reason == "scrape_lock_busy") {
         updateExtra("last_count", "0");
         updateExtra("valid_count", "0");
-        updateExtra("invalid_filtered", "0");
-        updateExtra("reason", refresh.reason);
+        updateExtra("reason", "scrape_lock_busy");
+        utils::LogRingBuffer::instance().push("[GitHubBG] Scrape lock busy, skipping this cycle");
         interval_seconds = 60;
         return;
-    }
-
-    if (refresh.fetched_total == 0 || refresh.valid_total == 0) {
-        updateExtra("last_count", std::to_string(refresh.fetched_total));
-        updateExtra("valid_count", std::to_string(refresh.valid_total));
-        updateExtra("invalid_filtered", std::to_string(refresh.invalid_total));
-        updateExtra("new_appended", std::to_string(refresh.appended));
-        updateExtra("new_added_db", std::to_string(refresh.added));
-        updateExtra("reason", refresh.reason);
+    } else if (refresh.reason == "no_configs") {
+        updateExtra("last_count", "0");
+        updateExtra("valid_count", "0");
+        updateExtra("reason", "no_configs");
+        utils::LogRingBuffer::instance().push("[GitHubBG] No configs fetched from sources");
         interval_seconds = 300;
         return;
     }
 
-    auto* db = orch_->configDb();
-
-    // Get tag stats
-    network::ConfigDatabase::TagStats tag_stats;
-    if (db) tag_stats = db->getTagStats("github_bg");
-
-    download_count_++;
-    updateExtra("last_count", std::to_string(refresh.fetched_total));
-    updateExtra("valid_count", std::to_string(refresh.valid_total));
+    // Update status with fetched data
+    updateExtra("last_count", std::to_string(refresh.total_fetched));
+    updateExtra("valid_count", std::to_string(refresh.valid_configs));
     updateExtra("invalid_filtered", std::to_string(refresh.invalid_total));
     updateExtra("new_appended", std::to_string(refresh.appended));
     updateExtra("new_added_db", std::to_string(refresh.added));
-    updateExtra("db_size", std::to_string(db ? db->size() : 0));
-    updateExtra("github_total", std::to_string(tag_stats.total));
-    updateExtra("github_alive", std::to_string(tag_stats.alive));
-    updateExtra("github_avg_latency_ms", std::to_string(tag_stats.avg_latency_ms));
-    updateExtra("github_untested", std::to_string(tag_stats.untested));
-    updateExtra("github_needs_retest", std::to_string(tag_stats.needs_retest));
-    updateExtra("downloads", std::to_string(download_count_));
-    updateExtra("last_success_ts", std::to_string(utils::nowTimestamp()));
+    updateExtra("reason", refresh.reason);
 
-    { std::ostringstream _ls; _ls << "[GitHubBG] Accepted " << refresh.valid_total << " valid configs from "
-              << refresh.fetched_total << " fetched, appended " << refresh.appended << ", db+" << refresh.added;
+    auto* db = orch_->configDb();
+    if (db) {
+        network::ConfigDatabase::TagStats tag_stats = db->getTagStats("github_bg");
+        updateExtra("db_size", std::to_string(db->size()));
+        updateExtra("github_total", std::to_string(tag_stats.total));
+        updateExtra("github_alive", std::to_string(tag_stats.alive));
+        updateExtra("github_avg_latency_ms", std::to_string(tag_stats.avg_latency_ms));
+        updateExtra("github_untested", std::to_string(tag_stats.untested));
+        updateExtra("github_needs_retest", std::to_string(tag_stats.needs_retest));
+    }
+
+    download_count_++;
+    updateExtra("downloads", std::to_string(download_count_));
+    updateExtra("last_success_ts", std::to_string(refresh.timestamp));
+
+    // Log success with detailed stats
+    std::ostringstream success_msg;
+    success_msg << "[GitHubBG] Success: fetched=" << refresh.total_fetched 
+                << " valid=" << refresh.valid_configs
+                << " sources=" << refresh.sources_found
+                << " timestamp=" << refresh.timestamp;
+    utils::LogRingBuffer::instance().push(success_msg.str());
+
+    { std::ostringstream _ls; _ls << "[GitHubBG] Accepted " << refresh.valid_configs << " valid configs from "
+              << refresh.total_fetched << " fetched, appended " << refresh.appended << ", db+" << refresh.added;
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     // In continuous mode, check GitHub sources more frequently (still can be overridden by env)
@@ -796,6 +824,12 @@ void GitHubDownloaderWorker::execute() {
     if (continuous2 && env_interval <= 0) {
         interval_seconds = std::min(interval_seconds, 300);
     }
+    
+    // Log final status
+    std::ostringstream final_msg;
+    final_msg << "[GitHubBG] Cycle complete: interval=" << interval_seconds 
+              << "s download_count=" << download_count_;
+    utils::LogRingBuffer::instance().push(final_msg.str());
 }
 
 IranAssetsWorker::IranAssetsWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
@@ -1061,6 +1095,11 @@ void ValidatorWorker::execute() {
                 int github_cap = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_CAP", constants::DEFAULT_GITHUB_BG_CAP);
                 github_cap = std::max(200, std::min(150000, github_cap));
                 auto refresh = refreshGithubConfigs(orch_, github_cap, 6, 20.0f, "github_bg", "[Validator->GitHub]");
+                // Copy values to compatibility fields
+                refresh.total_fetched = refresh.fetched_total;
+                refresh.valid_configs = refresh.valid_total;
+                refresh.sources_found = 6;  // Number of sources attempted
+                refresh.timestamp = utils::nowTimestamp();
                 updateExtra("live_github_reason", refresh.reason);
                 updateExtra("live_github_fetched", std::to_string(refresh.fetched_total));
                 updateExtra("live_github_valid", std::to_string(refresh.valid_total));
@@ -1355,6 +1394,10 @@ void ThreadManager::startAll() {
 void ThreadManager::stopAll(float timeout) {
     std::cout << "ThreadManager: stopping all workers..." << std::endl;
     stop_event_ = true;
+    for (auto* w : all_workers_) {
+        if (!w) continue;
+        try { w->requestStop(); } catch (...) {}
+    }
     for (auto* w : all_workers_) {
         try { w->join(timeout / (float)all_workers_.size()); } catch (...) {}
     }

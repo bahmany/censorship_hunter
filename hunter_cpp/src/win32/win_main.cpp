@@ -69,9 +69,11 @@ static void EnableDpiAwareness() {
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
     (void)hPrevInstance;
-    (void)lpCmdLine;
 
     AppendUiLog(L"wWinMain enter");
+
+    const std::wstring cmd_line = lpCmdLine ? lpCmdLine : L"";
+    const bool resume_edge_bypass = cmd_line.find(L"--resume-edge-bypass") != std::wstring::npos;
 
     SetCwdToExeDir();
 
@@ -79,6 +81,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
 
     // Create and show main window
     hunter::win32::ImGuiApp mainWindow;
+    if (resume_edge_bypass) {
+        AppendUiLog(L"wWinMain resume-edge-bypass detected");
+        mainWindow.ArmPendingElevatedEdgeBypass();
+    }
 
     if (!mainWindow.Create(hInstance, nCmdShow)) {
         AppendUiLog(L"MainWindow::Create failed");

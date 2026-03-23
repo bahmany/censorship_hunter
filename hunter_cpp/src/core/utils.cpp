@@ -545,20 +545,6 @@ int getCpuCount() {
     return n>0?n:4;
 }
 
-std::string htmlEscape(const std::string& s) {
-    std::string out; out.reserve(s.size());
-    for(char c:s){
-        switch(c){
-            case '&': out+="&amp;"; break;
-            case '<': out+="&lt;"; break;
-            case '>': out+="&gt;"; break;
-            case '"': out+="&quot;"; break;
-            default: out+=c;
-        }
-    }
-    return out;
-}
-
 // ─── JsonBuilder ───
 JsonBuilder& JsonBuilder::add(const std::string& key, const std::string& value) {
     std::string escaped;

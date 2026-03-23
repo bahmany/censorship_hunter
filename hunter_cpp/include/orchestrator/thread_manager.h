@@ -8,6 +8,7 @@
 #include <thread>
 #include <functional>
 #include <memory>
+#include <condition_variable>
 
 #include "core/models.h"
 #include "core/task_manager.h"
@@ -36,6 +37,7 @@ public:
 
     void start();
     void join(float timeout = 10.0f);
+    void requestStop();
     WorkerStatus getStatus() const;
     void setPauseCallback(std::function<bool()> callback);
 
@@ -51,9 +53,12 @@ protected:
     void runLoop();
     void updateExtra(const std::string& key, const std::string& value);
     HardwareSnapshot getHardware();
+    bool sleepInterruptible(std::chrono::milliseconds duration);
 
 private:
     void asyncLoop();
+    std::mutex stop_wait_mutex_;
+    std::condition_variable stop_wait_cv_;
 };
 
 /**

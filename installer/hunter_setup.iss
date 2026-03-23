@@ -1,10 +1,10 @@
-; Hunter VPN Installer - Inno Setup Script
+; huntercensor Installer - Inno Setup Script
 ; Installs to user profile (no admin required)
 ; Supports update: kills running processes, replaces files
 ; Bundles cached configs for immediate start in censored networks
 
-#define MyAppName "Hunter VPN"
-#define MyAppVersion "1.2.2"
+#define MyAppName "huntercensor"
+#define MyAppVersion "1.3.0"
 #define MyAppPublisher "Hunter Project"
 #define MyAppExeName "huntercensor.exe"
 #define MyStagingDir "D:\projects\v2ray\pythonProject1\hunter\installer\staging"
@@ -14,11 +14,11 @@ AppId={{B7E2A8F1-4D3C-4E5F-9A1B-2C3D4E5F6A7B}
 AppName={#MyAppName}
 AppVersion={#MyAppVersion}
 AppPublisher={#MyAppPublisher}
-DefaultDirName={localappdata}\HunterVPN
+DefaultDirName={localappdata}\huntercensor
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 OutputDir=D:\projects\v2ray\pythonProject1\hunter\installer\output
-OutputBaseFilename=HunterVPN-Setup-v{#MyAppVersion}
+OutputBaseFilename=huntercensor-Setup-v{#MyAppVersion}
 SetupIconFile={#MyStagingDir}\app_icon.ico
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -38,7 +38,7 @@ RestartApplications=no
 MinVersion=10.0
 VersionInfoVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
-VersionInfoDescription=Hunter VPN - Anti-Censorship Tool
+VersionInfoDescription=huntercensor - Anti-Censorship Discovery Tool
 VersionInfoProductName={#MyAppName}
 VersionInfoProductVersion={#MyAppVersion}
 
@@ -46,16 +46,17 @@ VersionInfoProductVersion={#MyAppVersion}
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
-WelcomeLabel1=Hunter VPN Setup
-WelcomeLabel2=This will install Hunter VPN v{#MyAppVersion} on your computer.%n%nHunter VPN helps you bypass internet censorship with:%n%n- Dual-protocol proxy (SOCKS + HTTP)%n- TLS fragmentation anti-DPI%n- Smart routing%n- Pre-loaded configs for immediate connectivity%n%nNo administrator access required.
+WelcomeLabel1=huntercensor Setup
+WelcomeLabel2=This will install huntercensor v{#MyAppVersion} on your computer.%n%nhuntercensor helps you discover and validate censorship-resistant proxy configs with:%n%n- Mixed local proxy listener (SOCKS + HTTP)%n- Bundled XRay, sing-box, mihomo, and Tor runtimes%n- Pre-loaded database and balancer caches%n- Offline-first censorship tooling%n%nNo administrator access required.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create Desktop shortcut"; GroupDescription: "Shortcuts:"
-Name: "startupicon"; Description: "Start Hunter VPN at Windows startup"; GroupDescription: "Startup:"
+Name: "startupicon"; Description: "Start huntercensor at Windows startup"; GroupDescription: "Startup:"
 
 [Files]
 ; Native GUI application
-Source: "{#MyStagingDir}\huntercensor.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyStagingDir}\huntercensor.exe"; DestDir: "{app}"; DestName: "huntercensor.exe"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "{#MyStagingDir}\hountersansor.exe"; DestDir: "{app}"; DestName: "huntercensor.exe"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; CLI + proxy cores in bin\ (CLI is statically linked, no DLL deps)
 Source: "{#MyStagingDir}\bin\xray.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
@@ -79,20 +80,24 @@ Source: "{#MyStagingDir}\runtime\HUNTER_gemini_balancer_cache.json"; DestDir: "{
 Source: "{#MyStagingDir}\runtime\HUNTER_config_db.tsv"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 Source: "{#MyStagingDir}\runtime\hunter_config.json"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 
+[InstallDelete]
+Type: files; Name: "{app}\hountersansor.exe"
+
 [Icons]
-Name: "{group}\Hunter VPN"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"
-Name: "{group}\Uninstall Hunter VPN"; Filename: "{uninstallexe}"
-Name: "{autodesktop}\Hunter VPN"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{group}\huntercensor"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"
+Name: "{group}\Uninstall huntercensor"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\huntercensor"; Filename: "{app}\{#MyAppExeName}"; IconFilename: "{app}\app_icon.ico"; WorkingDir: "{app}"; Tasks: desktopicon
 
 [Registry]
 ; Auto-start at login (user-level, no admin needed)
-Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "HunterVPN"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startupicon
+Root: HKCU; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "huntercensor"; ValueData: """{app}\{#MyAppExeName}"""; Flags: uninsdeletevalue; Tasks: startupicon
 
 [Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Launch Hunter VPN"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
+Filename: "{app}\{#MyAppExeName}"; Description: "Launch huntercensor"; Flags: nowait postinstall skipifsilent; WorkingDir: "{app}"
 
 [UninstallRun]
 Filename: "taskkill"; Parameters: "/F /IM huntercensor.exe"; Flags: runhidden; RunOnceId: "KillDashboard"
+Filename: "taskkill"; Parameters: "/F /IM hountersansor.exe"; Flags: runhidden; RunOnceId: "KillLegacyDashboard"
 Filename: "taskkill"; Parameters: "/F /IM xray.exe"; Flags: runhidden; RunOnceId: "KillXray"
 Filename: "taskkill"; Parameters: "/F /IM sing-box.exe"; Flags: runhidden; RunOnceId: "KillSingBox"
 Filename: "taskkill"; Parameters: "/F /IM mihomo-windows-amd64-compatible.exe"; Flags: runhidden; RunOnceId: "KillMihomo"
@@ -110,8 +115,9 @@ procedure KillRunningProcesses();
 var
   ResultCode: Integer;
 begin
-  Log('Killing running Hunter processes for update...');
+  Log('Killing running huntercensor processes for update...');
   Exec('taskkill', '/F /IM huntercensor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Exec('taskkill', '/F /IM hountersansor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM xray.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM sing-box.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM mihomo-windows-amd64-compatible.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);

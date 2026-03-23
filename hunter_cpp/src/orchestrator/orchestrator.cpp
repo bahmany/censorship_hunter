@@ -63,6 +63,63 @@ std::string jsonStringArray(const std::vector<std::string>& values) {
     return out.str();
 }
 
+bool looksLikeLiteralIp(const std::string& address) {
+    if (address.empty()) return false;
+    if (address.find(':') != std::string::npos) {
+        for (unsigned char c : address) {
+            if (!(std::isxdigit(c) || c == ':' || c == '.' || c == '[' || c == ']')) return false;
+        }
+        return true;
+    }
+    bool has_dot = false;
+    for (unsigned char c : address) {
+        if (c == '.') {
+            has_dot = true;
+            continue;
+        }
+        if (!std::isdigit(c)) return false;
+    }
+    return has_dot;
+}
+
+std::string endpointKeyForUri(const std::string& uri) {
+    auto parsed = network::UriParser::parse(uri);
+    if (parsed.has_value() && parsed->isValid()) {
+        std::string address = utils::trim(parsed->address);
+        std::transform(address.begin(), address.end(), address.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        if (looksLikeLiteralIp(address)) return address;
+    }
+    std::string fallback = utils::trim(uri);
+    std::transform(fallback.begin(), fallback.end(), fallback.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return fallback;
+}
+
+std::vector<std::string> dedupeUrisByEndpoint(const std::vector<std::string>& uris) {
+    std::set<std::string> seen_endpoints;
+    std::vector<std::string> deduped;
+    deduped.reserve(uris.size());
+    for (const auto& uri : uris) {
+        const std::string key = endpointKeyForUri(uri);
+        if (key.empty()) continue;
+        if (seen_endpoints.insert(key).second) deduped.push_back(uri);
+    }
+    return deduped;
+}
+
+void dedupeBenchResultsByEndpoint(std::vector<BenchResult>& results) {
+    std::set<std::string> seen_endpoints;
+    std::vector<BenchResult> deduped;
+    deduped.reserve(results.size());
+    for (const auto& result : results) {
+        const std::string key = endpointKeyForUri(result.uri);
+        if (key.empty()) continue;
+        if (seen_endpoints.insert(key).second) deduped.push_back(result);
+    }
+    results.swap(deduped);
+}
+
 int reserveTemporaryListenPort() {
     static std::mutex port_mutex;
     static int next_port = 21000;
@@ -1547,6 +1604,8 @@ bool HunterOrchestrator::runCycle() {
         validated.insert(validated.end(), http_validated.begin(), http_validated.end());
     }
 
+    dedupeBenchResultsByEndpoint(validated);
+
     // Sort by latency
     std::sort(validated.begin(), validated.end(),
               [](const BenchResult& a, const BenchResult& b) { return a.latency_ms < b.latency_ms; });
@@ -1568,6 +1627,43 @@ bool HunterOrchestrator::runCycle() {
         std::lock_guard<std::mutex> lock(state_mutex_);
         last_good_configs_ = std::vector<std::pair<std::string, float>>(
             all_configs.begin(), all_configs.begin() + std::min((int)all_configs.size(), 200));
+    }
+
+    if (!all_configs.empty()) {
+        double last_github_success_ts = 0.0;
+        if (thread_manager_) {
+            auto tm_status = thread_manager_->getStatus();
+            auto github_worker_it = tm_status.workers.find("github_bg");
+            if (github_worker_it != tm_status.workers.end()) {
+                auto extra_it = github_worker_it->second.extra.find("last_success_ts");
+                if (extra_it != github_worker_it->second.extra.end()) {
+                    try { last_github_success_ts = std::stod(extra_it->second); } catch (...) {}
+                }
+            }
+        }
+        const double now_ts = utils::nowTimestamp();
+        if (last_github_success_ts <= 0.0 || (now_ts - last_github_success_ts) >= 3600.0) {
+            std::vector<int> proxy_ports;
+            for (const auto& slot : getProvisionedPorts()) {
+                if (slot.alive && slot.socks_ready) proxy_ports.push_back(slot.port);
+            }
+            const int github_cap = std::max(200, std::min(config_.maxTotal(), 5000));
+            auto fetched = config_fetcher_.fetchGithubConfigs(config_.githubUrls(), proxy_ports, github_cap, 9, 40.0f);
+            std::set<std::string> valid;
+            for (const auto& uri : fetched) {
+                if (isImportableProxyUri(uri)) valid.insert(uri);
+            }
+            int added = 0;
+            if (config_db_ && !valid.empty()) {
+                added = config_db_->addConfigs(valid, "github_refresh");
+            }
+            if (cache_ && !valid.empty()) {
+                cache_->saveConfigs(std::vector<std::string>(valid.begin(), valid.end()), false);
+            }
+            { std::ostringstream _ls; _ls << "[GitHubRefresh] stale_sources=1 fetched=" << fetched.size()
+                      << " valid=" << valid.size() << " db+" << added;
+              utils::LogRingBuffer::instance().push(_ls.str()); }
+        }
     }
 
     if (balancer_ && !all_configs.empty()) {
@@ -1765,11 +1861,7 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
     if (configs.empty()) return {};
 
     // Deduplicate
-    std::set<std::string> seen;
-    std::vector<std::string> deduped;
-    for (auto& uri : configs) {
-        if (seen.insert(uri).second) deduped.push_back(uri);
-    }
+    std::vector<std::string> deduped = dedupeUrisByEndpoint(configs);
 
     int max_total = config_.maxTotal();
     if ((int)deduped.size() > max_total) deduped.resize(max_total);
@@ -1870,6 +1962,8 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
               utils::LogRingBuffer::instance().push(_ls.str()); }
         }
     }
+
+    dedupeBenchResultsByEndpoint(results);
 
     // Sort by latency (successful first)
     std::sort(results.begin(), results.end(), [](const BenchResult& a, const BenchResult& b) {

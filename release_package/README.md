@@ -1,4 +1,4 @@
-# Hunter VPN Release Package v1.2.2
+# huntercensor Release Package v1.3.0
 
 ## Status
 
@@ -12,19 +12,22 @@
 - Simple main pages for overview, configs, censorship tools, and logs
 - Technical runtime, source, Telegram, and provisioning controls grouped into `Advanced`
 - Integrated offline censorship probe and exit-IP discovery inside the native app
+- Bundled proxy runtimes and runtime database for self-contained operation
 
 ## Package Contents
 
 ```text
-hountersansor.exe
-hountersansor_cli.exe
+huntercensor.exe
 app_icon.ico
+bin/
+config/
 runtime/
 ```
 
 ## Notes
 
 - The native executable is the current Windows release build.
-- The CLI binary is the current C++ console build.
-- Proxy core binaries are bundled in the installer staging under `bin/`.
-- This package is intended for publication as the `v1.2.2` release line.
+- Proxy core binaries are bundled under `bin/`.
+- The bundled runtime folder may include `HUNTER_config_db.tsv`, balancer caches, and live config snapshots.
+- The installer output is expected at `installer/output/huntercensor-Setup-v1.3.0.exe`.
+- This package is intended for publication as the `v1.3.0` release line.
