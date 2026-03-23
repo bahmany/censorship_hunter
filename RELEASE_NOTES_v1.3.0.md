@@ -1,5 +1,7 @@
 # Hunter v1.3.0 Release Notes
 
+![huntercensor Main Interface](Screenshot%202026-03-23%20135206.png)
+
 ## Overview
 
 Hunter v1.3.0 introduces a comprehensive packet-level DPI bypass system that effectively circumvents Iranian ISP censorship through proven techniques like TLS fragmentation, TTL manipulation, and targeted edge router bypass.

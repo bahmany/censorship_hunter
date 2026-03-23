@@ -1,5 +1,7 @@
 # huntercensor User Guide (English)
 
+![huntercensor Main Interface](../Screenshot%202026-03-23%20135206.png)
+
 ## 1. What huntercensor is
 
 `huntercensor` is a native Windows application for discovering, validating, copying, and provisioning censorship-resistant proxy configurations.

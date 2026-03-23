@@ -11,6 +11,8 @@
 
 *A native C++ application with Dear ImGui that autonomously discovers, benchmarks, and load-balances proxy configurations from 20+ public sources — designed for environments with heavy internet restrictions.*
 
+![huntercensor Main Interface](Screenshot%202026-03-23%20135206.png)
+
 </div>
 
 ---
