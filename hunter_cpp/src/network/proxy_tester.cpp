@@ -234,10 +234,11 @@ std::string ProxyTester::generateXrayConfig(const std::string& config_uri, int s
 }
 
 // Multi-tier test URLs for Iranian censorship resilience
+// Using IP-based URLs where possible to avoid DNS poisoning
 static const char* TEST_URLS[] = {
-    "https://www.gstatic.com/generate_204",
-    "https://speed.cloudflare.com/__down?bytes=5120",
-    "https://cachefly.cachefly.net/1mb.test",
+    "https://1.1.1.1/generate_204",        // Cloudflare IP - no DNS needed
+    "http://1.1.1.1:80/generate_204",      // HTTP fallback - no TLS
+    "https://www.gstatic.com/generate_204", // Google (may be blocked)
 };
 static const int NUM_TEST_URLS = 3;
 
@@ -276,10 +277,9 @@ struct TelegramReachabilitySummary {
     }
 
     bool strongEnough() const {
-        return dc_successes >= 2 &&
-               (domain_successes >= 2 || web_successes >= 1) &&
-               (cdn_successes >= 1 || web_successes >= 1) &&
-               score() >= 5;
+        // Relaxed criteria for heavy censorship environments (e.g., Iran)
+        // If DC and domain TCP connect works, accept as Telegram-only even without HTTPS
+        return dc_successes >= 2 && (domain_successes >= 2 || dc_successes >= 3);
     }
 
     std::string describe() const {
