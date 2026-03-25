@@ -1621,34 +1621,46 @@ void ImGuiApp::DrawHomePage() {
     ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
     ImGui::BeginChild("##hero_bar", ImVec2(0, 56*dpi_scale_), true, ImGuiWindowFlags_NoScrollbar);
     
-    // Left: Status indicator
-    const ImVec4 status_col = running ? (blink_on ? COL_GREEN : COL_DIM) : COL_RED;
-    ImGui::TextColored(status_col, running ? "RUNNING" : "STOPPED");
-    ImGui::SameLine(0, 12*dpi_scale_);
-    ImGui::TextColored(COL_DIM, "|");
-    ImGui::SameLine(0, 12*dpi_scale_);
-    stat_card("ports", std::to_string(ready_ports).c_str(), ready_ports > 0 ? COL_CYAN : COL_DIM);
-    ImGui::SameLine(0, 16*dpi_scale_);
-    stat_card("traffic", fmt_rate(total_live_kbps).c_str(), total_live_kbps > 0.05 ? COL_GREEN : COL_DIM);
-    ImGui::SameLine(0, 16*dpi_scale_);
-    stat_card("configs", std::to_string(s.db_alive).c_str(), s.db_alive > 0 ? COL_TEXT : COL_DIM);
-    
-    // Right: Action buttons
-    float btn_y = ImGui::GetCursorPosY();
-    ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - (running ? 280 : 180)*dpi_scale_);
-    if (running) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
-        if (ImGui::Button("Stop", ImVec2(80*dpi_scale_, 32*dpi_scale_))) RequestStopHunter();
-        ImGui::PopStyleColor();
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
-        if (ImGui::Button("Start", ImVec2(80*dpi_scale_, 32*dpi_scale_))) StartHunter();
-        ImGui::PopStyleColor();
+    // Use a table for responsive layout - left side stats, right side buttons
+    if (ImGui::BeginTable("##hero_layout", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(-1, 0))) {
+        ImGui::TableSetupColumn("##stats", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("##buttons", ImGuiTableColumnFlags_WidthFixed, 280*dpi_scale_);
+        ImGui::TableNextRow();
+        
+        // Left: Status indicators
+        ImGui::TableNextColumn();
+        const ImVec4 status_col = running ? (blink_on ? COL_GREEN : COL_DIM) : COL_RED;
+        ImGui::TextColored(status_col, running ? "RUNNING" : "STOPPED");
+        ImGui::SameLine(0, 12*dpi_scale_);
+        ImGui::TextColored(COL_DIM, "|");
+        ImGui::SameLine(0, 12*dpi_scale_);
+        stat_card("ports", std::to_string(ready_ports).c_str(), ready_ports > 0 ? COL_CYAN : COL_DIM);
+        ImGui::SameLine(0, 16*dpi_scale_);
+        stat_card("traffic", fmt_rate(total_live_kbps).c_str(), total_live_kbps > 0.05 ? COL_GREEN : COL_DIM);
+        ImGui::SameLine(0, 16*dpi_scale_);
+        stat_card("configs", std::to_string(s.db_alive).c_str(), s.db_alive > 0 ? COL_TEXT : COL_DIM);
+        
+        // Right: Action buttons (fixed width, always aligned right)
+        ImGui::TableNextColumn();
+        float btn_width = 80*dpi_scale_;
+        float btn_height = 32*dpi_scale_;
+        
+        if (running) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
+            if (ImGui::Button("Stop", ImVec2(btn_width, btn_height))) RequestStopHunter();
+            ImGui::PopStyleColor();
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
+            if (ImGui::Button("Start", ImVec2(btn_width, btn_height))) StartHunter();
+            ImGui::PopStyleColor();
+        }
+        ImGui::SameLine(0, 8*dpi_scale_);
+        if (ImGui::Button("Configs", ImVec2(btn_width, btn_height))) page_ = Page::Configs;
+        ImGui::SameLine(0, 8*dpi_scale_);
+        if (ImGui::Button("Censorship", ImVec2(90*dpi_scale_, btn_height))) page_ = Page::Censorship;
+        
+        ImGui::EndTable();
     }
-    ImGui::SameLine(0, 8*dpi_scale_);
-    if (ImGui::Button("Configs", ImVec2(80*dpi_scale_, 32*dpi_scale_))) page_ = Page::Configs;
-    ImGui::SameLine(0, 8*dpi_scale_);
-    if (ImGui::Button("Censorship", ImVec2(90*dpi_scale_, 32*dpi_scale_))) page_ = Page::Censorship;
     
     ImGui::EndChild();
     ImGui::PopStyleColor();
