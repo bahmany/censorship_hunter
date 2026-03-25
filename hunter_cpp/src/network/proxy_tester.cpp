@@ -315,21 +315,36 @@ static bool recvSocketBytes(SOCKET fd, unsigned char* data, size_t size) {
 }
 
 static bool testSocks5Endpoint(int socks_port, const std::string& host, int remote_port, int timeout_ms = 8000) {
+    // Log the connection attempt
+    TLOG("    [SOCKS5:" << socks_port << "] Connecting to " << host << ":" << remote_port 
+         << " via SOCKS5 127.0.0.1:" << socks_port << " timeout=" << timeout_ms << "ms");
+    
     SOCKET fd = utils::createTcpSocket("127.0.0.1", socks_port, std::max(timeout_ms, 1) / 1000.0);
-    if (fd == INVALID_SOCKET) return false;
+    if (fd == INVALID_SOCKET) {
+        TLOG("    [SOCKS5:" << socks_port << "] Failed to connect to SOCKS5 proxy");
+        return false;
+    }
+    
+    TLOG("    [SOCKS5:" << socks_port << "] TCP connected to proxy, starting handshake");
 
     DWORD tv_ms = static_cast<DWORD>(timeout_ms > 0 ? timeout_ms : 1);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv_ms), sizeof(tv_ms));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv_ms), sizeof(tv_ms));
 
+    // SOCKS5 handshake: greeting
     const unsigned char hello[] = {0x05, 0x01, 0x00};
+    TLOG("    [SOCKS5:" << socks_port << "] Sending greeting: 05 01 00");
     unsigned char resp[2] = {};
     if (!sendSocketBytes(fd, hello, sizeof(hello)) || !recvSocketBytes(fd, resp, sizeof(resp)) ||
         resp[0] != 0x05 || resp[1] != 0x00) {
+        TLOG("    [SOCKS5:" << socks_port << "] Handshake failed, response: " 
+             << std::hex << (int)resp[0] << " " << (int)resp[1]);
         utils::closeSocket(fd);
         return false;
     }
+    TLOG("    [SOCKS5:" << socks_port << "] Handshake OK, server accepted no-auth");
 
+    // SOCKS5 connect request
     std::vector<unsigned char> connect_req;
     connect_req.reserve(4 + host.size() + 6);
     connect_req.push_back(0x05);
@@ -341,28 +356,38 @@ static bool testSocks5Endpoint(int socks_port, const std::string& host, int remo
         connect_req.push_back(0x01);
         const unsigned char* addr_bytes = reinterpret_cast<const unsigned char*>(&ipv4);
         connect_req.insert(connect_req.end(), addr_bytes, addr_bytes + 4);
+        TLOG("    [SOCKS5:" << socks_port << "] Using IPv4 address type");
     } else {
         if (host.size() > 255) {
+            TLOG("    [SOCKS5:" << socks_port << "] Hostname too long");
             utils::closeSocket(fd);
             return false;
         }
         connect_req.push_back(0x03);
         connect_req.push_back(static_cast<unsigned char>(host.size()));
         connect_req.insert(connect_req.end(), host.begin(), host.end());
+        TLOG("    [SOCKS5:" << socks_port << "] Using domain name: " << host);
     }
     connect_req.push_back(static_cast<unsigned char>((remote_port >> 8) & 0xFF));
     connect_req.push_back(static_cast<unsigned char>(remote_port & 0xFF));
 
+    TLOG("    [SOCKS5:" << socks_port << "] Sending connect request to " << host << ":" << remote_port);
     if (!sendSocketBytes(fd, connect_req.data(), connect_req.size())) {
+        TLOG("    [SOCKS5:" << socks_port << "] Failed to send connect request");
         utils::closeSocket(fd);
         return false;
     }
 
     unsigned char header[4] = {};
     if (!recvSocketBytes(fd, header, sizeof(header)) || header[0] != 0x05 || header[1] != 0x00) {
+        TLOG("    [SOCKS5:" << socks_port << "] Connect failed, response: " 
+             << std::hex << (int)header[0] << " " << (int)header[1] << " " << (int)header[2] << " " << (int)header[3]);
         utils::closeSocket(fd);
         return false;
     }
+    
+    TLOG("    [SOCKS5:" << socks_port << "] Connected OK to " << host << ":" << remote_port 
+         << " (address type=" << (int)header[3] << ")");
 
     size_t trailing = 0;
     if (header[3] == 0x01) {
@@ -370,6 +395,7 @@ static bool testSocks5Endpoint(int socks_port, const std::string& host, int remo
     } else if (header[3] == 0x03) {
         unsigned char name_len = 0;
         if (!recvSocketBytes(fd, &name_len, 1)) {
+            TLOG("    [SOCKS5:" << socks_port << "] Failed to read bind address length");
             utils::closeSocket(fd);
             return false;
         }
@@ -377,12 +403,16 @@ static bool testSocks5Endpoint(int socks_port, const std::string& host, int remo
     } else if (header[3] == 0x04) {
         trailing = 16 + 2;
     } else {
+        TLOG("    [SOCKS5:" << socks_port << "] Unknown address type: " << (int)header[3]);
         utils::closeSocket(fd);
         return false;
     }
 
     std::vector<unsigned char> tail(trailing, 0);
     const bool ok = trailing == 0 || recvSocketBytes(fd, tail.data(), trailing);
+    if (!ok) {
+        TLOG("    [SOCKS5:" << socks_port << "] Failed to read bind address");
+    }
     utils::closeSocket(fd);
     return ok;
 }
@@ -455,12 +485,14 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     // TCP pre-screening: quick connect to proxy server to skip dead IPs
     auto parsed_opt = UriParser::parse(config_uri);
     if (useTcpPreScreen() && parsed_opt.has_value() && parsed_opt->isValid()) {
+        TLOG("  [Pre] TCP connect to " << parsed_opt->address << ":" << parsed_opt->port << " timeout=2000ms");
         if (!utils::tcpConnect(parsed_opt->address, parsed_opt->port, 2000)) {
             result.error_message = "Server unreachable";
-            TLOG("  [Pre] DEAD " << short_uri);
+            TLOG("  [Pre] DEAD " << short_uri << " - TCP connection failed to " << parsed_opt->address << ":" << parsed_opt->port);
             s_active_tests--;
             return result;
         }
+        TLOG("  [Pre] TCP OK " << parsed_opt->address << ":" << parsed_opt->port);
     }
     
     int test_port = getFreePort();
@@ -500,6 +532,7 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     si.hStdInput = NULL;
     
     std::string cmd = "\"" + xray_path_ + "\" run -c \"" + temp_config + "\"";
+    TLOG("  [Test:" << test_port << "] CMD: " << cmd);
     TLOG("  [Test:" << test_port << "] Starting xray process");
     char cmd_buf[4096];
     strncpy(cmd_buf, cmd.c_str(), sizeof(cmd_buf) - 1);
@@ -835,6 +868,7 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
 #ifdef _WIN32
     std::string log_file = makeRuntimeArtifactPath("temp_singbox_out", test_port, ".txt");
     std::string cmd = "\"" + singbox_path_ + "\" run -c \"" + temp_config + "\"";
+    TLOG("  [sing-box:" << test_port << "] CMD: " << cmd);
     result = runEngineTest(cmd, temp_config, log_file, test_port, short_uri, "sing-box", timeout_seconds);
 #else
     result.error_message = "sing-box testing not implemented on this platform";
@@ -895,6 +929,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
 #ifdef _WIN32
     std::string log_file = makeRuntimeArtifactPath("temp_mihomo_out", test_port, ".txt");
     std::string cmd = "\"" + mihomo_path_ + "\" -f \"" + temp_config + "\"";
+    TLOG("  [mihomo:" << test_port << "] CMD: " << cmd);
     result = runEngineTest(cmd, temp_config, log_file, test_port, short_uri, "mihomo", timeout_seconds);
 #else
     result.error_message = "mihomo testing not implemented on this platform";
