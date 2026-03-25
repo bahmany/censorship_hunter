@@ -106,6 +106,7 @@ struct BenchResult {
     std::string protocol;
     std::string engine_used;
     std::string error;
+    bool telegram_only = false;
 
     bool isGold() const { return tier == "gold"; }
     bool isSilver() const { return tier == "silver"; }
@@ -124,6 +125,7 @@ struct ConfigHealthRecord {
     double last_tested = 0.0;
     double last_alive_time = 0.0; // When config was last confirmed alive
     bool alive = false;
+    bool telegram_only = false;
     float latency_ms = 0.0f;
     int consecutive_fails = 0;
     int total_tests = 0;

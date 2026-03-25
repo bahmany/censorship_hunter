@@ -76,6 +76,7 @@ private:
         bool edge_bypass_active = false;
         std::string edge_bypass_status;
         std::vector<ConfigHealthRecord> healthy_records;
+        std::vector<ConfigHealthRecord> telegram_only_records;
         std::vector<ConfigHealthRecord> all_records;
         std::vector<HunterOrchestrator::PortSlot> provisioned_ports;
     };

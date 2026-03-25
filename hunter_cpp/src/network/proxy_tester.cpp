@@ -185,9 +185,9 @@ static ProxyTestResult chooseBestResult(const std::vector<ProxyTestResult>& resu
 }
 
 ProxyTester::ProxyTester() {
-    xray_path_ = "bin/xray.exe";
     singbox_path_ = "bin/sing-box.exe";
-    mihomo_path_ = "bin/mihomo-windows-amd64-compatible.exe";
+    xray_path_.clear();
+    mihomo_path_.clear();
 }
 
 ProxyTester::~ProxyTester() {}
@@ -247,56 +247,173 @@ static const char* TELEGRAM_DCS[] = {
     "149.154.167.91", "91.108.56.130"
 };
 static const int NUM_TELEGRAM_DCS = 5;
+static const char* TELEGRAM_DOMAIN_HOSTS[] = {
+    "api.telegram.org", "telegram.org", "web.telegram.org", "t.me"
+};
+static const int NUM_TELEGRAM_DOMAIN_HOSTS = 4;
+static const char* TELEGRAM_CDN_HOSTS[] = {
+    "cdn1.telegram-cdn.org", "cdn4.telegram-cdn.org", "cdn5.telegram-cdn.org"
+};
+static const int NUM_TELEGRAM_CDN_HOSTS = 3;
+static const char* TELEGRAM_WEB_URLS[] = {
+    "https://telegram.org/js/telegram-widget.js?22",
+    "https://web.telegram.org/"
+};
+static const int NUM_TELEGRAM_WEB_URLS = 2;
+
+struct TelegramReachabilitySummary {
+    int dc_successes = 0;
+    int domain_successes = 0;
+    int cdn_successes = 0;
+    int web_successes = 0;
+
+    int score() const {
+        return dc_successes + domain_successes + cdn_successes * 2 + web_successes * 2;
+    }
+
+    bool strongEnough() const {
+        return dc_successes >= 2 &&
+               (domain_successes >= 2 || web_successes >= 1) &&
+               (cdn_successes >= 1 || web_successes >= 1) &&
+               score() >= 5;
+    }
+
+    std::string describe() const {
+        std::ostringstream oss;
+        oss << "dc=" << dc_successes
+            << " domain=" << domain_successes
+            << " cdn=" << cdn_successes
+            << " web=" << web_successes
+            << " score=" << score();
+        return oss.str();
+    }
+};
 
 #ifdef _WIN32
-// Test SOCKS5 connectivity by connecting to a Telegram DC through the proxy
-static bool testSocks5TelegramDC(int socks_port, int timeout_ms = 8000) {
-    for (int i = 0; i < NUM_TELEGRAM_DCS; i++) {
-        SOCKET fd = socket(AF_INET, SOCK_STREAM, 0);
-        if (fd == INVALID_SOCKET) continue;
-        
-        // Connect to local SOCKS5 proxy
-        sockaddr_in proxy_addr{};
-        proxy_addr.sin_family = AF_INET;
-        proxy_addr.sin_port = htons((uint16_t)socks_port);
-        inet_pton(AF_INET, "127.0.0.1", &proxy_addr.sin_addr);
-        
-        // Set timeout
-        DWORD tv_ms = (DWORD)timeout_ms;
-        setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv_ms, sizeof(tv_ms));
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv_ms, sizeof(tv_ms));
-        
-        if (::connect(fd, (sockaddr*)&proxy_addr, sizeof(proxy_addr)) != 0) {
-            closesocket(fd);
-            continue;
+static bool sendSocketBytes(SOCKET fd, const unsigned char* data, size_t size) {
+    size_t sent_total = 0;
+    while (sent_total < size) {
+        int sent = send(fd, reinterpret_cast<const char*>(data + sent_total), static_cast<int>(size - sent_total), 0);
+        if (sent <= 0) return false;
+        sent_total += static_cast<size_t>(sent);
+    }
+    return true;
+}
+
+static bool recvSocketBytes(SOCKET fd, unsigned char* data, size_t size) {
+    size_t received_total = 0;
+    while (received_total < size) {
+        int received = recv(fd, reinterpret_cast<char*>(data + received_total), static_cast<int>(size - received_total), 0);
+        if (received <= 0) return false;
+        received_total += static_cast<size_t>(received);
+    }
+    return true;
+}
+
+static bool testSocks5Endpoint(int socks_port, const std::string& host, int remote_port, int timeout_ms = 8000) {
+    SOCKET fd = utils::createTcpSocket("127.0.0.1", socks_port, std::max(timeout_ms, 1) / 1000.0);
+    if (fd == INVALID_SOCKET) return false;
+
+    DWORD tv_ms = static_cast<DWORD>(timeout_ms > 0 ? timeout_ms : 1);
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv_ms), sizeof(tv_ms));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv_ms), sizeof(tv_ms));
+
+    const unsigned char hello[] = {0x05, 0x01, 0x00};
+    unsigned char resp[2] = {};
+    if (!sendSocketBytes(fd, hello, sizeof(hello)) || !recvSocketBytes(fd, resp, sizeof(resp)) ||
+        resp[0] != 0x05 || resp[1] != 0x00) {
+        utils::closeSocket(fd);
+        return false;
+    }
+
+    std::vector<unsigned char> connect_req;
+    connect_req.reserve(4 + host.size() + 6);
+    connect_req.push_back(0x05);
+    connect_req.push_back(0x01);
+    connect_req.push_back(0x00);
+
+    in_addr ipv4{};
+    if (inet_pton(AF_INET, host.c_str(), &ipv4) == 1) {
+        connect_req.push_back(0x01);
+        const unsigned char* addr_bytes = reinterpret_cast<const unsigned char*>(&ipv4);
+        connect_req.insert(connect_req.end(), addr_bytes, addr_bytes + 4);
+    } else {
+        if (host.size() > 255) {
+            utils::closeSocket(fd);
+            return false;
         }
-        
-        // SOCKS5 handshake: no auth
-        unsigned char hello[] = {0x05, 0x01, 0x00};
-        send(fd, (const char*)hello, 3, 0);
-        unsigned char resp[2] = {};
-        int n = recv(fd, (char*)resp, 2, 0);
-        if (n != 2 || resp[0] != 0x05 || resp[1] != 0x00) {
-            closesocket(fd);
-            continue;
+        connect_req.push_back(0x03);
+        connect_req.push_back(static_cast<unsigned char>(host.size()));
+        connect_req.insert(connect_req.end(), host.begin(), host.end());
+    }
+    connect_req.push_back(static_cast<unsigned char>((remote_port >> 8) & 0xFF));
+    connect_req.push_back(static_cast<unsigned char>(remote_port & 0xFF));
+
+    if (!sendSocketBytes(fd, connect_req.data(), connect_req.size())) {
+        utils::closeSocket(fd);
+        return false;
+    }
+
+    unsigned char header[4] = {};
+    if (!recvSocketBytes(fd, header, sizeof(header)) || header[0] != 0x05 || header[1] != 0x00) {
+        utils::closeSocket(fd);
+        return false;
+    }
+
+    size_t trailing = 0;
+    if (header[3] == 0x01) {
+        trailing = 4 + 2;
+    } else if (header[3] == 0x03) {
+        unsigned char name_len = 0;
+        if (!recvSocketBytes(fd, &name_len, 1)) {
+            utils::closeSocket(fd);
+            return false;
         }
-        
-        // SOCKS5 CONNECT to Telegram DC:443 using ATYP=0x01 (IPv4)
-        unsigned char connect_req[10] = {0x05, 0x01, 0x00, 0x01};
-        inet_pton(AF_INET, TELEGRAM_DCS[i], &connect_req[4]);
-        connect_req[8] = 0x01; // port 443 high byte
-        connect_req[9] = 0xBB; // port 443 low byte
-        send(fd, (const char*)connect_req, 10, 0);
-        
-        unsigned char connect_resp[10] = {};
-        n = recv(fd, (char*)connect_resp, 10, 0);
-        closesocket(fd);
-        
-        if (n >= 2 && connect_resp[0] == 0x05 && connect_resp[1] == 0x00) {
-            return true; // Successfully connected through proxy to Telegram DC
+        trailing = static_cast<size_t>(name_len) + 2;
+    } else if (header[3] == 0x04) {
+        trailing = 16 + 2;
+    } else {
+        utils::closeSocket(fd);
+        return false;
+    }
+
+    std::vector<unsigned char> tail(trailing, 0);
+    const bool ok = trailing == 0 || recvSocketBytes(fd, tail.data(), trailing);
+    utils::closeSocket(fd);
+    return ok;
+}
+
+static TelegramReachabilitySummary probeTelegramReachability(int socks_port, int timeout_ms, int http_timeout_seconds) {
+    TelegramReachabilitySummary summary;
+
+    for (int i = 0; i < NUM_TELEGRAM_DCS && summary.dc_successes < 2; ++i) {
+        if (testSocks5Endpoint(socks_port, TELEGRAM_DCS[i], 443, timeout_ms)) {
+            summary.dc_successes++;
         }
     }
-    return false;
+
+    for (int i = 0; i < NUM_TELEGRAM_DOMAIN_HOSTS && summary.domain_successes < 2; ++i) {
+        if (testSocks5Endpoint(socks_port, TELEGRAM_DOMAIN_HOSTS[i], 443, timeout_ms)) {
+            summary.domain_successes++;
+        }
+    }
+
+    for (int i = 0; i < NUM_TELEGRAM_CDN_HOSTS && summary.cdn_successes < 1; ++i) {
+        if (testSocks5Endpoint(socks_port, TELEGRAM_CDN_HOSTS[i], 443, timeout_ms)) {
+            summary.cdn_successes++;
+        }
+    }
+
+    if (!summary.strongEnough()) {
+        const int web_timeout = std::max(4, std::min(http_timeout_seconds, 10));
+        for (int i = 0; i < NUM_TELEGRAM_WEB_URLS && summary.web_successes < 1; ++i) {
+            if (utils::testProxyDownload(TELEGRAM_WEB_URLS[i], "127.0.0.1", socks_port, web_timeout)) {
+                summary.web_successes++;
+            }
+        }
+    }
+
+    return summary;
 }
 #endif
 
@@ -448,10 +565,13 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     
     // Tier 3: Telegram DC connectivity test (proves proxy works even if HTTP is DPI-blocked)
     bool telegram_ok = false;
+    TelegramReachabilitySummary telegram_summary;
     if (speed <= 0.0f) {
-        telegram_ok = testSocks5TelegramDC(test_port, 8000);
+        telegram_summary = probeTelegramReachability(test_port, 3500, timeout_seconds);
+        telegram_ok = telegram_summary.strongEnough();
+        TLOG("  [Test:" << test_port << "] TG-CHECK " << short_uri << " (" << telegram_summary.describe() << ")");
         if (telegram_ok) {
-            TLOG("  [Test:" << test_port << "] TG-ONLY " << short_uri << " (HTTP download failed, Telegram TCP works)");
+            TLOG("  [Test:" << test_port << "] TG-ONLY " << short_uri << " (HTTP download failed, Telegram stack works: " << telegram_summary.describe() << ")");
         }
     }
     const int hold_ms = getProcessHoldMs();
@@ -475,9 +595,9 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
         result.success = true;
         result.telegram_only = true;
         result.download_speed_kbps = 0.1f;
-        TLOG("  [Test:" << test_port << "] TG-OK " << short_uri << " (Telegram-only, HTTP blocked by DPI)");
+        TLOG("  [Test:" << test_port << "] TG-OK " << short_uri << " (Telegram-only, HTTP blocked by DPI; " << telegram_summary.describe() << ")");
     } else {
-        result.error_message = "All connectivity tests failed";
+        result.error_message = telegram_summary.score() > 0 ? "Telegram reachability not strong enough" : "All connectivity tests failed";
         TLOG("  [Test:" << test_port << "] FAIL " << short_uri << " - all tests failed");
     }
     
@@ -615,10 +735,13 @@ static ProxyTestResult runEngineTest(
     }
     
     bool telegram_ok = false;
+    TelegramReachabilitySummary telegram_summary;
     if (speed <= 0.0f) {
-        telegram_ok = testSocks5TelegramDC(test_port, 8000);
+        telegram_summary = probeTelegramReachability(test_port, 3500, timeout_seconds);
+        telegram_ok = telegram_summary.strongEnough();
+        TLOG("  [" << engine_name << ":" << test_port << "] TG-CHECK " << short_uri << " (" << telegram_summary.describe() << ")");
         if (telegram_ok) {
-            TLOG("  [" << engine_name << ":" << test_port << "] TG-ONLY " << short_uri << " (HTTP download failed, Telegram TCP works)");
+            TLOG("  [" << engine_name << ":" << test_port << "] TG-ONLY " << short_uri << " (HTTP download failed, Telegram stack works: " << telegram_summary.describe() << ")");
         }
     }
     const int hold_ms = getProcessHoldMs();
@@ -642,9 +765,9 @@ static ProxyTestResult runEngineTest(
         result.success = true;
         result.telegram_only = true;
         result.download_speed_kbps = 0.1f;
-        TLOG("  [" << engine_name << ":" << test_port << "] TG-OK " << short_uri << " (Telegram-only, HTTP blocked by DPI)");
+        TLOG("  [" << engine_name << ":" << test_port << "] TG-OK " << short_uri << " (Telegram-only, HTTP blocked by DPI; " << telegram_summary.describe() << ")");
     } else {
-        result.error_message = "All connectivity tests failed";
+        result.error_message = telegram_summary.score() > 0 ? "Telegram reachability not strong enough" : "All connectivity tests failed";
         TLOG("  [" << engine_name << ":" << test_port << "] FAIL " << short_uri << " - all tests failed");
     }
     
@@ -770,82 +893,23 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
 ProxyTestResult ProxyTester::testConfig(const std::string& config_uri, 
                                        const std::string& test_url, 
                                        int timeout_seconds) {
-    // Determine which protocol this config uses
-    auto parsed_opt = UriParser::parse(config_uri);
-    std::string proto;
-    if (parsed_opt.has_value() && parsed_opt->isValid()) {
-        proto = parsed_opt->protocol;
-    }
-    
-    // Protocols that XRay doesn't support but sing-box/mihomo do
-    bool xray_unsupported = (proto == "hysteria2" || proto == "tuic");
-
-    // Sequential engine testing: try each engine in order, return on first success.
-    // This avoids spawning 3 concurrent processes per config which exhausts resources.
-    // Order: xray (most common) -> sing-box -> mihomo
-
-    struct EngineEntry {
-        std::string name;
-        bool available;
-        std::function<ProxyTestResult()> test_fn;
-    };
-
-    std::vector<EngineEntry> engines;
-    if (!xray_unsupported && utils::fileExists(xray_path_)) {
-        engines.push_back({"xray", true, [this, &config_uri, &test_url, timeout_seconds]() {
-            return testWithXray(config_uri, test_url, timeout_seconds);
-        }});
-    }
-    if (utils::fileExists(singbox_path_)) {
-        engines.push_back({"sing-box", true, [this, &config_uri, &test_url, timeout_seconds]() {
-            return testWithSingBox(config_uri, test_url, timeout_seconds);
-        }});
-    }
-    if (utils::fileExists(mihomo_path_)) {
-        engines.push_back({"mihomo", true, [this, &config_uri, &test_url, timeout_seconds]() {
-            return testWithMihomo(config_uri, test_url, timeout_seconds);
-        }});
-    }
-
-    if (engines.empty()) {
-        ProxyTestResult result;
-        result.error_message = "All engines failed or no engines available";
+    ProxyTestResult result;
+    result.uri = config_uri;
+    if (!utils::fileExists(singbox_path_)) {
+        result.error_message = "sing-box executable not found";
         return result;
     }
-
-    ProxyTestResult best_result;
-    best_result.error_message = "All engines failed";
-
-    for (auto& engine : engines) {
-        try {
-            ProxyTestResult result = engine.test_fn();
-            // Full success (HTTP download worked) — return immediately
-            if (result.success && !result.telegram_only) {
-                return result;
-            }
-            // Telegram-only success — keep as best candidate but try next engine
-            if (result.success && result.telegram_only) {
-                if (!best_result.success) {
-                    best_result = result;
-                }
-                continue;
-            }
-            // Failure — record error but try next engine
-            if (!best_result.success) {
-                best_result = result;
-            }
-        } catch (const std::exception& ex) {
-            if (!best_result.success) {
-                best_result.error_message = std::string("Engine ") + engine.name + " exception: " + ex.what();
-            }
-        } catch (...) {
-            if (!best_result.success) {
-                best_result.error_message = std::string("Engine ") + engine.name + " unknown exception";
-            }
-        }
+    try {
+        result = testWithSingBox(config_uri, test_url, timeout_seconds);
+        result.uri = config_uri;
+        return result;
+    } catch (const std::exception& ex) {
+        result.error_message = std::string("sing-box exception: ") + ex.what();
+        return result;
+    } catch (...) {
+        result.error_message = "sing-box unknown exception";
+        return result;
     }
-
-    return best_result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1032,8 +1096,11 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
 
             // Tier 3: Telegram DC connectivity
             bool telegram_ok = false;
+            TelegramReachabilitySummary telegram_summary;
             if (speed <= 0.0f) {
-                telegram_ok = testSocks5TelegramDC(p, 8000);
+                telegram_summary = probeTelegramReachability(p, 3500, dl_timeout);
+                telegram_ok = telegram_summary.strongEnough();
+                TLOG("  [Batch:" << p << "] TG-CHECK " << short_uri << " (" << telegram_summary.describe() << ")");
             }
 
             if (speed > 0.0f) {
@@ -1044,9 +1111,9 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
                 results[idx].success = true;
                 results[idx].telegram_only = true;
                 results[idx].download_speed_kbps = 0.1f;
-                TLOG("  [Batch:" << p << "] TG-OK " << short_uri << " (Telegram-only)");
+                TLOG("  [Batch:" << p << "] TG-OK " << short_uri << " (Telegram-only; " << telegram_summary.describe() << ")");
             } else {
-                results[idx].error_message = "All connectivity tests failed";
+                results[idx].error_message = telegram_summary.score() > 0 ? "Telegram reachability not strong enough" : "All connectivity tests failed";
                 TLOG("  [Batch:" << p << "] FAIL " << short_uri);
             }
         }));

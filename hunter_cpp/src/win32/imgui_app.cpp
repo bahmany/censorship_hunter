@@ -9,6 +9,7 @@
 #include "third_party/imgui/backends/imgui_impl_win32.h"
 
 #include <commdlg.h>
+#include <iphlpapi.h>
 #include <shellapi.h>
 #include <cmath>
 #include <cctype>
@@ -19,6 +20,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <chrono>
+#include <unordered_map>
 
 IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -298,6 +300,103 @@ std::string DisplayNetworkValue(const std::string& value, const char* kind, bool
     return value;
 }
 
+struct LiveProxyActivitySample {
+    int port = 0;
+    int pid = -1;
+    bool process_alive = false;
+    int established_connections = 0;
+    uint64_t read_bytes = 0;
+    uint64_t write_bytes = 0;
+    double rx_kbps = 0.0;
+    double tx_kbps = 0.0;
+    double total_kbps = 0.0;
+};
+
+struct ProcessIoSample {
+    uint64_t read_bytes = 0;
+    uint64_t write_bytes = 0;
+    uint64_t tick_ms = 0;
+};
+
+bool QueryProcessIoCountersForPid(int pid, uint64_t& read_bytes, uint64_t& write_bytes) {
+    if (pid <= 0) return false;
+    HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (!process) return false;
+    IO_COUNTERS counters{};
+    const BOOL ok = GetProcessIoCounters(process, &counters);
+    CloseHandle(process);
+    if (!ok) return false;
+    read_bytes = static_cast<uint64_t>(counters.ReadTransferCount);
+    write_bytes = static_cast<uint64_t>(counters.WriteTransferCount);
+    return true;
+}
+
+int CountEstablishedConnectionsForLocalPort(int port) {
+    if (port <= 0) return 0;
+    ULONG table_size = 0;
+    GetExtendedTcpTable(nullptr, &table_size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
+    if (table_size == 0) return 0;
+    std::vector<unsigned char> buffer(table_size);
+    PMIB_TCPTABLE_OWNER_PID table = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(buffer.data());
+    if (GetExtendedTcpTable(table, &table_size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) != NO_ERROR) {
+        return 0;
+    }
+    int count = 0;
+    for (DWORD i = 0; i < table->dwNumEntries; ++i) {
+        const auto& row = table->table[i];
+        const int local_port = ntohs(static_cast<u_short>(row.dwLocalPort));
+        if (local_port != port) continue;
+        if (row.dwState == MIB_TCP_STATE_ESTAB) count++;
+    }
+    return count;
+}
+
+std::vector<LiveProxyActivitySample> CollectLiveProxyActivitySamples(const std::vector<HunterOrchestrator::PortSlot>& slots) {
+    static std::unordered_map<int, ProcessIoSample> history;
+    std::set<int> active_pids;
+    std::vector<LiveProxyActivitySample> samples;
+    samples.reserve(slots.size());
+    const uint64_t now_ms = utils::nowMs();
+
+    for (const auto& slot : slots) {
+        if (slot.port <= 0 || slot.pid <= 0) continue;
+        active_pids.insert(slot.pid);
+        LiveProxyActivitySample sample;
+        sample.port = slot.port;
+        sample.pid = slot.pid;
+        sample.process_alive = slot.alive && slot.pid > 0;
+        sample.established_connections = CountEstablishedConnectionsForLocalPort(slot.port);
+
+        uint64_t read_bytes = 0;
+        uint64_t write_bytes = 0;
+        if (QueryProcessIoCountersForPid(slot.pid, read_bytes, write_bytes)) {
+            sample.read_bytes = read_bytes;
+            sample.write_bytes = write_bytes;
+            auto it = history.find(slot.pid);
+            if (it != history.end() && now_ms > it->second.tick_ms) {
+                const double dt = static_cast<double>(now_ms - it->second.tick_ms) / 1000.0;
+                if (dt > 0.05) {
+                    const uint64_t rx_delta = read_bytes >= it->second.read_bytes ? (read_bytes - it->second.read_bytes) : 0;
+                    const uint64_t tx_delta = write_bytes >= it->second.write_bytes ? (write_bytes - it->second.write_bytes) : 0;
+                    sample.rx_kbps = (static_cast<double>(rx_delta) / 1024.0) / dt;
+                    sample.tx_kbps = (static_cast<double>(tx_delta) / 1024.0) / dt;
+                    sample.total_kbps = sample.rx_kbps + sample.tx_kbps;
+                }
+            }
+            history[slot.pid] = {read_bytes, write_bytes, now_ms};
+        }
+
+        samples.push_back(sample);
+    }
+
+    for (auto it = history.begin(); it != history.end();) {
+        if (active_pids.find(it->first) == active_pids.end()) it = history.erase(it);
+        else ++it;
+    }
+
+    return samples;
+}
+
 void HelpMarker(const char* desc) {
     ImGui::TextDisabled("(?)");
     if (ImGui::IsItemHovered()) {
@@ -520,6 +619,7 @@ ImGuiApp::Snapshot ImGuiApp::BuildSnapshot() {
         s.db_tested = st.tested_unique; s.db_untested = st.untested_unique;
         s.db_avg_latency = st.avg_latency_ms;
         s.healthy_records = db->getHealthyRecords(snapshot_limit);
+        s.telegram_only_records = db->getTelegramOnlyRecords(snapshot_limit);
         s.all_records = db->getAllRecords(snapshot_limit);
     }
     if (auto* dpi = orchestrator->dpiEvasion()) {
@@ -1479,141 +1579,124 @@ void ImGuiApp::DrawHomePage() {
     static const Snapshot empty_snap;
     const Snapshot& s = sp ? *sp : empty_snap;
 
-    ImGui::TextColored(COL_ACCENT, "Simple Dashboard");
-    ImGui::Spacing();
-    ImGui::TextWrapped("Start huntercensor, let it run, then copy or scan a working config. Most users only need this page.");
-    ImGui::TextColored(COL_YELLOW, "Important: finding fresh working configs may take hours or even days depending on network conditions. Leave the app running and check back later.");
-
-    if (ImGui::BeginTable("##stats", 4, ImGuiTableFlags_SizingStretchSame, ImVec2(0, 0))) {
-        ImGui::TableNextRow();
-        char buf[64];
-
-        ImGui::TableNextColumn();
-        DrawCard("Status", orchestrator_running_.load() ? "Running" : "Stopped");
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%d", s.db_alive);
-        DrawCard("Working", buf);
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%d", s.db_total);
-        DrawCard("Total", buf);
-
-        ImGui::TableNextColumn();
-        snprintf(buf, sizeof(buf), "%.0f ms", s.db_avg_latency);
-        DrawCard("Avg Latency", buf);
-
-        ImGui::EndTable();
-    }
-
-    ImGui::Spacing();
-    ImGui::TextColored(COL_ACCENT, "Main Actions");
     const bool running = orchestrator_running_.load();
-    if (running) {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f,0.22f,0.22f,1.0f));
-        if (ImGui::Button(orchestrator_stopping_.load() ? "Stopping..." : "Stop Scan", {150*dpi_scale_, 34*dpi_scale_})) RequestStopHunter();
-        ImGui::PopStyleColor(2);
-    } else {
-        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f,0.72f,0.36f,1.0f));
-        if (ImGui::Button("Start Scan", {150*dpi_scale_, 34*dpi_scale_})) StartHunter();
-        ImGui::PopStyleColor(2);
+    const bool blink_on = ((utils::nowMs() / 500ULL) % 2ULL) == 0ULL;
+    const ImVec4 scan_col = running ? (blink_on ? COL_GREEN : COL_AMBER) : COL_DIM;
+
+    std::set<std::string> telegram_only_uris;
+    for (const auto& rec : s.telegram_only_records) telegram_only_uris.insert(rec.uri);
+
+    const auto activity_samples = CollectLiveProxyActivitySamples(s.provisioned_ports);
+    std::unordered_map<int, LiveProxyActivitySample> activity_by_port;
+    double total_live_kbps = 0.0;
+    int busy_ports = 0;
+    for (const auto& sample : activity_samples) {
+        activity_by_port[sample.port] = sample;
+        total_live_kbps += sample.total_kbps;
+        if (sample.total_kbps > 0.05 || sample.established_connections > 0) busy_ports++;
     }
-    ImGui::SameLine(0, 8*dpi_scale_);
-    {
-        const bool probing = probe_in_flight_.load();
-        if (probing) ImGui::BeginDisabled();
-        if (ImGui::Button("Probe Network", {150*dpi_scale_, 34*dpi_scale_})) RunProbeAsync();
-        if (probing) {
-            ImGui::EndDisabled();
-            auto probe_progress = GetProgress("probe");
-            if (!probe_progress.description.empty()) {
-                ImGui::SameLine(0, 8*dpi_scale_);
-                ImGui::TextColored(COL_AMBER, "%s...", probe_progress.description.c_str());
-            }
+
+    int active_ports = 0;
+    int ready_ports = 0;
+    int active_tg_ports = 0;
+    for (const auto& slot : s.provisioned_ports) {
+        if (slot.pid > 0) active_ports++;
+        if (slot.alive && slot.socks_ready && slot.http_ready) ready_ports++;
+        if (slot.pid > 0 && telegram_only_uris.find(slot.uri) != telegram_only_uris.end()) active_tg_ports++;
+    }
+
+    const float tested_ratio = s.db_total > 0 ? (float)s.db_tested / (float)s.db_total : 0.0f;
+    const float alive_ratio = s.db_total > 0 ? (float)s.db_alive / (float)s.db_total : 0.0f;
+    const float live_ratio = active_ports > 0 ? (float)ready_ports / (float)active_ports : 0.0f;
+
+    auto fmt_rate = [](double kbps) {
+        char buf[64];
+        if (kbps >= 1024.0) std::snprintf(buf, sizeof(buf), "%.2f MB/s", kbps / 1024.0);
+        else std::snprintf(buf, sizeof(buf), "%.1f KB/s", kbps);
+        return std::string(buf);
+    };
+
+    auto fmt_compact_int = [](int value) {
+        char buf[32];
+        if (value >= 1000000) std::snprintf(buf, sizeof(buf), "%.1fM", value / 1000000.0);
+        else if (value >= 1000) std::snprintf(buf, sizeof(buf), "%.1fK", value / 1000.0);
+        else std::snprintf(buf, sizeof(buf), "%d", value);
+        return std::string(buf);
+    };
+
+    auto stat_panel = [&](const char* id, const char* title, const std::string& value, const std::string& detail, const ImVec4& accent) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+        ImGui::BeginChild(id, ImVec2(0, 78*dpi_scale_), true);
+        const ImVec2 p0 = ImGui::GetItemRectMin();
+        const ImVec2 p1 = ImGui::GetItemRectMax();
+        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(p0.x, p0.y), ImVec2(p0.x + 4*dpi_scale_, p1.y), ImGui::ColorConvertFloat4ToU32(accent), 6.0f * dpi_scale_);
+        ImGui::TextColored(COL_DIM, "%s", title);
+        ImGui::TextColored(accent, "%s", value.c_str());
+        ImGui::TextColored(COL_DIM, "%s", detail.c_str());
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    };
+
+    auto info_row = [&](const char* label, const std::string& value, const ImVec4& color) {
+        ImGui::TextColored(COL_DIM, "%s", label);
+        ImGui::SameLine(150*dpi_scale_);
+        ImGui::TextColored(color, "%s", value.c_str());
+    };
+
+    auto copy_records = [this](const std::vector<ConfigHealthRecord>& rows, const char* empty_msg, const char* success_prefix) {
+        if (rows.empty()) {
+            SetToast(empty_msg, ToastKind::Warning);
+            return;
         }
-    }
-    ImGui::SameLine(0, 8*dpi_scale_);
-    {
-        const bool disc = discovery_in_flight_.load();
-        if (disc) ImGui::BeginDisabled();
-        if (ImGui::Button("Discover Exit", {150*dpi_scale_, 34*dpi_scale_})) RunDiscoveryAsync();
-        if (disc) {
-            ImGui::EndDisabled();
-            auto discovery_progress = GetProgress("discovery");
-            if (!discovery_progress.description.empty()) {
-                ImGui::SameLine(0, 8*dpi_scale_);
-                ImGui::TextColored(COL_AMBER, "%s...", discovery_progress.description.c_str());
-            }
+        std::vector<std::string> uris;
+        uris.reserve(rows.size());
+        for (const auto& r : rows) uris.push_back(r.uri);
+        const auto deduped = DedupeStringsPreserveOrder(uris);
+        const bool copied = CopyTextToClipboard(JoinUniqueLinesText(deduped));
+        SetToast(copied ? (std::string(success_prefix) + std::to_string(deduped.size())) : "Failed to copy configs",
+                 copied ? ToastKind::Success : ToastKind::Error);
+    };
+
+    auto render_rows = [this](const char* table_id, const std::vector<ConfigHealthRecord>& rows, bool history_mode, bool telegram_mode, float height_scale) {
+        const float height = height_scale * dpi_scale_;
+        if (!ImGui::BeginTable(table_id, 6,
+            ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
+            ImVec2(0, height))) {
+            return;
         }
-    }
-    ImGui::SameLine(0, 8*dpi_scale_);
-    if (ImGui::Button("Copy All Working", {170*dpi_scale_, 34*dpi_scale_})) {
-        if (s.healthy_records.empty()) {
-            SetToast("No working configs to copy yet", ToastKind::Warning);
-            AppendLog("[UI] Copy All Working: no working configs available");
-        } else {
-            std::vector<std::string> uris;
-            uris.reserve(s.healthy_records.size());
-            for (const auto& r : s.healthy_records) uris.push_back(r.uri);
-            const auto deduped = DedupeStringsPreserveOrder(uris);
-            const bool copied = CopyTextToClipboard(JoinUniqueLinesText(deduped));
-            AppendLog("[UI] Copy All Working: requested=" + std::to_string(uris.size()) + " unique=" + std::to_string(deduped.size()) + " success=" + (copied ? "true" : "false"));
-            SetToast(copied ? ("Copied " + std::to_string(deduped.size()) + " working configs") : "Failed to copy working configs", copied ? ToastKind::Success : ToastKind::Error);
-        }
-    }
-
-    ImGui::Spacing();
-    ImGui::TextColored(COL_DIM, "Need raw logs, import/export, source tuning, or maintenance? Use Configs, Censorship, Logs, or Advanced.");
-
-    ImGui::Spacing();
-    ImGui::TextColored(COL_ACCENT, "Ready Configs");
-    const auto unique_count = DedupeStringsPreserveOrder([&]{
-        std::vector<std::string> tmp; tmp.reserve(s.healthy_records.size());
-        for (const auto& r : s.healthy_records) tmp.push_back(r.uri);
-        return tmp;
-    }()).size();
-    ImGui::SameLine(0, 8*dpi_scale_);
-    ImGui::TextColored(COL_DIM, "%d working (%d unique)", (int)s.healthy_records.size(), (int)unique_count);
-
-    if (s.healthy_records.empty()) {
-        ImGui::Spacing();
-        ImGui::TextColored(COL_DIM, "No working configs yet. Click Start Scan and keep the app open. When results arrive, you can copy one, copy all, save one, or show a QR code for mobile scan.");
-        return;
-    }
-
-    if (ImGui::Button("Open Full Config List", {190*dpi_scale_, 30*dpi_scale_})) page_ = Page::Configs;
-    ImGui::Spacing();
-
-    const int quick_items = (int)std::min<size_t>(s.healthy_records.size(), 8);
-    if (ImGui::BeginTable("##home_ready", 5,
-        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
-        ImVec2(0, 320*dpi_scale_)))
-    {
-        ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
+        ImGui::TableSetupColumn(history_mode ? "State" : (telegram_mode ? "Mode" : "Latency"), ImGuiTableColumnFlags_WidthFixed, history_mode ? 68*dpi_scale_ : 78*dpi_scale_);
         ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
-        ImGui::TableSetupColumn("Last OK", ImGuiTableColumnFlags_WidthFixed, 130*dpi_scale_);
+        ImGui::TableSetupColumn("Found", ImGuiTableColumnFlags_WidthFixed, 125*dpi_scale_);
+        ImGui::TableSetupColumn(history_mode ? "Last Test" : "Last OK", ImGuiTableColumnFlags_WidthFixed, 125*dpi_scale_);
         ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 190*dpi_scale_);
         ImGui::TableSetupColumn("URI");
         ImGui::TableHeadersRow();
-        for (int i = 0; i < quick_items; ++i) {
-            const auto& r = s.healthy_records[(size_t)i];
-            ImGui::PushID(r.uri.c_str());
+        for (const auto& r : rows) {
+            ImGui::PushID((std::string(table_id) + r.uri).c_str());
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextColored(r.latency_ms < 500 ? COL_GREEN : r.latency_ms < 1500 ? COL_YELLOW : COL_RED, "%.0f", r.latency_ms);
+            if (history_mode) {
+                if (!r.alive) ImGui::TextColored(COL_RED, "OFF");
+                else if (r.telegram_only) ImGui::TextColored(COL_AMBER, "TG");
+                else ImGui::TextColored(COL_GREEN, "FULL");
+            } else if (telegram_mode) {
+                ImGui::TextColored(COL_AMBER, "TG-ONLY");
+            } else {
+                ImGui::TextColored(r.latency_ms < 500 ? COL_GREEN : r.latency_ms < 1500 ? COL_YELLOW : COL_RED, "%.0f", r.latency_ms);
+            }
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(r.engine_used.empty() ? "-" : r.engine_used.c_str());
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(FmtTs(r.last_alive_time).c_str());
+            ImGui::TextUnformatted(FmtTs(r.first_seen).c_str());
             ImGui::TableNextColumn();
-            if (ImGui::SmallButton("Copy##home_one")) {
+            ImGui::TextUnformatted(FmtTs(history_mode ? r.last_tested : r.last_alive_time).c_str());
+            ImGui::TableNextColumn();
+            if (ImGui::SmallButton("Copy")) {
                 const bool copied = CopyTextToClipboard(r.uri);
                 SetToast(copied ? "Config copied" : "Failed to copy config", copied ? ToastKind::Success : ToastKind::Error);
             }
             ImGui::SameLine(0, 4*dpi_scale_);
-            if (ImGui::SmallButton("Save##home_one")) {
+            if (ImGui::SmallButton("Save")) {
                 std::string path = SaveFileDialog("Text Files\0*.txt\0All Files\0*.*\0", "txt");
                 if (!path.empty()) {
                     const bool saved = SaveTextToFile(path, r.uri + "\r\n");
@@ -1621,13 +1704,193 @@ void ImGuiApp::DrawHomePage() {
                 }
             }
             ImGui::SameLine(0, 4*dpi_scale_);
-            if (ImGui::SmallButton("QR##home_one")) OpenQrModal(r.uri);
+            if (ImGui::SmallButton("QR")) OpenQrModal(r.uri);
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(Trim(r.uri, 220).c_str());
             ImGui::PopID();
         }
         ImGui::EndTable();
+    };
+
+    auto render_section = [&](const char* title, const std::vector<ConfigHealthRecord>& rows, const char* table_id,
+                              bool history_mode, bool telegram_mode, const char* empty_msg, float table_height) {
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+        ImGui::BeginChild((std::string(table_id) + "_panel").c_str(), ImVec2(0, 0), true);
+        ImGui::TextColored(telegram_mode ? COL_AMBER : COL_ACCENT, "%s", title);
+        ImGui::SameLine(0, 8*dpi_scale_);
+        ImGui::TextColored(COL_DIM, "%d", (int)rows.size());
+        ImGui::SameLine(0, 12*dpi_scale_);
+        if (ImGui::SmallButton((std::string("Copy All##") + table_id).c_str())) {
+            copy_records(rows, empty_msg, "Copied ");
+        }
+        ImGui::Spacing();
+        if (rows.empty()) {
+            ImGui::TextColored(COL_DIM, "%s", empty_msg);
+        } else {
+            render_rows(table_id, rows, history_mode, telegram_mode, table_height);
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+    };
+
+    if (ImGui::BeginTable("##home_top_panels", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("##left", ImGuiTableColumnFlags_WidthStretch, 1.35f);
+        ImGui::TableSetupColumn("##right", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableNextRow();
+
+        ImGui::TableNextColumn();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+        ImGui::BeginChild("##home_hero_left", ImVec2(0, 188*dpi_scale_), true);
+        ImGui::TextColored(COL_ACCENT, "huntercensor");
+        ImGui::TextColored(COL_TEXT, "Continuous sing-box scanning for real Telegram reachability");
+        ImGui::Spacing();
+        ImGui::TextWrapped("This dashboard keeps the native workflow focused: discover configs, keep local mixed ports alive, and separate fully working configs from Telegram-only configs that passed the stricter Telegram/DC/CDN checks.");
+        ImGui::Spacing();
+        if (running) {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f,0.22f,0.22f,1.0f));
+            if (ImGui::Button(orchestrator_stopping_.load() ? "Stopping..." : "Stop Scan", {160*dpi_scale_, 36*dpi_scale_})) RequestStopHunter();
+            ImGui::PopStyleColor(2);
+        } else {
+            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
+            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f,0.72f,0.36f,1.0f));
+            if (ImGui::Button("Start Scan", {160*dpi_scale_, 36*dpi_scale_})) StartHunter();
+            ImGui::PopStyleColor(2);
+        }
+        ImGui::SameLine(0, 8*dpi_scale_);
+        if (ImGui::Button("Open Configs", {140*dpi_scale_, 36*dpi_scale_})) page_ = Page::Configs;
+        ImGui::SameLine(0, 8*dpi_scale_);
+        if (ImGui::Button("Censorship", {126*dpi_scale_, 36*dpi_scale_})) page_ = Page::Censorship;
+        ImGui::Spacing();
+        ImGui::TextColored(scan_col, running ? "● Scan activity: ACTIVE" : "● Scan activity: IDLE");
+        ImGui::SameLine(0, 10*dpi_scale_);
+        ImGui::TextColored(COL_DIM, "Cycles %d  Pending %d  Avg %.0f ms", s.cycle_count, s.db_untested, s.db_avg_latency);
+        ImGui::Spacing();
+        ImGui::TextColored(COL_DIM, "Database coverage");
+        ImGui::ProgressBar(tested_ratio, ImVec2(-1, 8*dpi_scale_));
+        ImGui::TextColored(COL_DIM, "Healthy visibility");
+        ImGui::ProgressBar(alive_ratio, ImVec2(-1, 8*dpi_scale_));
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+
+        ImGui::TableNextColumn();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.10f, 0.14f, 1.0f));
+        ImGui::BeginChild("##home_hero_right", ImVec2(0, 188*dpi_scale_), true);
+        ImGui::TextColored(COL_CYAN, "Runtime Overview");
+        ImGui::Spacing();
+        info_row("Mixed ports", std::to_string(active_ports), active_ports > 0 ? COL_TEXT : COL_DIM);
+        info_row("Ready ports", std::to_string(ready_ports), ready_ports > 0 ? COL_GREEN : COL_DIM);
+        info_row("TG live ports", std::to_string(active_tg_ports), active_tg_ports > 0 ? COL_AMBER : COL_DIM);
+        info_row("Busy ports", std::to_string(busy_ports), busy_ports > 0 ? COL_CYAN : COL_DIM);
+        info_row("Traffic", fmt_rate(total_live_kbps), total_live_kbps > 0.05 ? COL_CYAN : COL_DIM);
+        info_row("Configs in DB", fmt_compact_int(s.db_total), COL_TEXT);
+        ImGui::Spacing();
+        ImGui::TextColored(COL_DIM, "Provision readiness");
+        ImGui::ProgressBar(live_ratio, ImVec2(-1, 10*dpi_scale_));
+        ImGui::Spacing();
+        if (!s.provisioned_ports.empty()) {
+            int shown = 0;
+            for (const auto& slot : s.provisioned_ports) {
+                if (slot.pid <= 0 || shown >= 3) continue;
+                auto it = activity_by_port.find(slot.port);
+                const double rate = it != activity_by_port.end() ? it->second.total_kbps : 0.0;
+                const bool is_tg = telegram_only_uris.find(slot.uri) != telegram_only_uris.end();
+                ImGui::TextColored(is_tg ? COL_AMBER : COL_GREEN, "%s  127.0.0.1:%d", is_tg ? "TG" : "FULL", slot.port);
+                ImGui::SameLine(0, 10*dpi_scale_);
+                ImGui::TextColored(rate > 0.05 ? COL_CYAN : COL_DIM, "%s", rate > 0.05 ? fmt_rate(rate).c_str() : "idle");
+                shown++;
+            }
+        } else {
+            ImGui::TextColored(COL_DIM, "No live local ports yet.");
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        ImGui::EndTable();
     }
+
+    ImGui::Spacing();
+    if (ImGui::BeginTable("##home_stat_panels", 5, ImGuiTableFlags_SizingStretchSame, ImVec2(0, 0))) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); stat_panel("##stat_status", "Scanner", running ? "Running" : "Stopped", running ? "Background cycle is active" : "Waiting for start", running ? COL_GREEN : COL_RED);
+        ImGui::TableNextColumn(); stat_panel("##stat_full", "Fully Working", std::to_string((int)s.healthy_records.size()), "Ready for general use", COL_GREEN);
+        ImGui::TableNextColumn(); stat_panel("##stat_tg", "Telegram-Only", std::to_string((int)s.telegram_only_records.size()), "Passed stricter Telegram checks", COL_AMBER);
+        ImGui::TableNextColumn(); stat_panel("##stat_ports", "Local Mixed Ports", std::to_string(ready_ports), std::to_string(active_tg_ports) + " Telegram-focused", COL_CYAN);
+        ImGui::TableNextColumn(); stat_panel("##stat_traffic", "Realtime Traffic", fmt_rate(total_live_kbps), std::to_string(busy_ports) + " busy ports", total_live_kbps > 0.05 ? COL_CYAN : COL_DIM);
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+    ImGui::BeginChild("##home_ports_panel", ImVec2(0, 250*dpi_scale_), true);
+    ImGui::TextColored(COL_ACCENT, "Live Proxy Activity Board");
+    ImGui::SameLine(0, 10*dpi_scale_);
+    ImGui::TextColored(COL_DIM, "%d ready / %d total", ready_ports, active_ports);
+    ImGui::Spacing();
+    if (s.provisioned_ports.empty()) {
+        ImGui::TextColored(COL_DIM, "No local sing-box mixed ports are provisioned yet.");
+    } else if (ImGui::BeginTable("##home_ports", 8,
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
+        ImVec2(0, 200*dpi_scale_))) {
+        ImGui::TableSetupColumn("Port", ImGuiTableColumnFlags_WidthFixed, 78*dpi_scale_);
+        ImGui::TableSetupColumn("Lane", ImGuiTableColumnFlags_WidthFixed, 62*dpi_scale_);
+        ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 88*dpi_scale_);
+        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 96*dpi_scale_);
+        ImGui::TableSetupColumn("Total", ImGuiTableColumnFlags_WidthFixed, 102*dpi_scale_);
+        ImGui::TableSetupColumn("RX/TX", ImGuiTableColumnFlags_WidthFixed, 132*dpi_scale_);
+        ImGui::TableSetupColumn("Conn", ImGuiTableColumnFlags_WidthFixed, 52*dpi_scale_);
+        ImGui::TableSetupColumn("URI");
+        ImGui::TableHeadersRow();
+        for (const auto& slot : s.provisioned_ports) {
+            ImGui::PushID((std::string("homeport") + std::to_string(slot.port)).c_str());
+            ImGui::TableNextRow();
+            auto sample_it = activity_by_port.find(slot.port);
+            const bool has_activity = sample_it != activity_by_port.end();
+            const bool is_tg = telegram_only_uris.find(slot.uri) != telegram_only_uris.end();
+            ImGui::TableNextColumn();
+            ImGui::Text("127.0.0.1:%d", slot.port);
+            ImGui::TableNextColumn();
+            ImGui::TextColored(is_tg ? COL_AMBER : COL_GREEN, "%s", is_tg ? "TG" : "FULL");
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(slot.engine_used.empty() ? "-" : slot.engine_used.c_str());
+            ImGui::TableNextColumn();
+            if (slot.alive && slot.socks_ready && slot.http_ready) ImGui::TextColored(COL_GREEN, "MIXED READY");
+            else if (slot.tcp_alive) ImGui::TextColored(COL_YELLOW, "BOOTING");
+            else ImGui::TextColored(COL_RED, "DOWN");
+            ImGui::TableNextColumn();
+            if (has_activity && sample_it->second.total_kbps > 0.05) ImGui::TextColored(COL_CYAN, "%s", fmt_rate(sample_it->second.total_kbps).c_str());
+            else ImGui::TextColored(COL_DIM, "idle");
+            ImGui::TableNextColumn();
+            if (has_activity) ImGui::TextColored(COL_DIM, "%s / %s", fmt_rate(sample_it->second.rx_kbps).c_str(), fmt_rate(sample_it->second.tx_kbps).c_str());
+            else ImGui::TextColored(COL_DIM, "- / -");
+            ImGui::TableNextColumn();
+            if (has_activity) ImGui::Text("%d", sample_it->second.established_connections);
+            else ImGui::TextUnformatted("0");
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(Trim(slot.uri, 180).c_str());
+            ImGui::PopID();
+        }
+        ImGui::EndTable();
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    std::vector<ConfigHealthRecord> history_rows = s.all_records;
+    if (history_rows.size() > 12) history_rows.resize(12);
+
+    ImGui::Spacing();
+    if (ImGui::BeginTable("##home_sections", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("##full", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("##tg", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn();
+        render_section("Fully Working", s.healthy_records, "##home_full", false, false, "No fully working configs yet.", 220.0f);
+        ImGui::TableNextColumn();
+        render_section("Telegram-Only", s.telegram_only_records, "##home_tg", false, true, "No Telegram-only configs passed the stricter checks yet.", 220.0f);
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+    render_section("History", history_rows, "##home_history", true, false, "No history yet.", 220.0f);
 }
 
 void ImGuiApp::DrawQrModal() {
@@ -1799,8 +2062,18 @@ void ImGuiApp::DrawConfigsPage() {
 
     ImGui::Spacing();
 
-    // Table
-    const auto& rows = show_alive_only_ ? s.healthy_records : s.all_records;
+    std::vector<ConfigHealthRecord> rows;
+    if (show_alive_only_) {
+        rows = s.healthy_records;
+        rows.insert(rows.end(), s.telegram_only_records.begin(), s.telegram_only_records.end());
+        std::sort(rows.begin(), rows.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
+            if (a.telegram_only != b.telegram_only) return a.telegram_only < b.telegram_only;
+            if (!a.telegram_only && !b.telegram_only) return a.latency_ms < b.latency_ms;
+            return a.last_alive_time > b.last_alive_time;
+        });
+    } else {
+        rows = s.all_records;
+    }
     const auto unique_count = DedupeStringsPreserveOrder([&]{
         std::vector<std::string> tmp; tmp.reserve(rows.size());
         for (const auto& r : rows) tmp.push_back(r.uri);
@@ -1834,16 +2107,17 @@ void ImGuiApp::DrawConfigsPage() {
     ImGui::SameLine(0, 8*dpi_scale_);
     ImGui::TextColored(COL_DIM, "Showing: %d (%d unique)", (int)rows.size(), (int)unique_count);
     const float avail_h = ImGui::GetContentRegionAvail().y - 4;
-    if (ImGui::BeginTable("##cfgtbl", 8,
+    if (ImGui::BeginTable("##cfgtbl", 9,
         ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
         ImVec2(0, avail_h > 100 ? avail_h : 200)))
     {
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 62*dpi_scale_);
         ImGui::TableSetupColumn("OK",   ImGuiTableColumnFlags_WidthFixed, 40*dpi_scale_);
         ImGui::TableSetupColumn("Latency",   ImGuiTableColumnFlags_WidthFixed, 60*dpi_scale_);
         ImGui::TableSetupColumn("Engine",  ImGuiTableColumnFlags_WidthFixed, 80*dpi_scale_);
-        ImGui::TableSetupColumn("Tests",ImGuiTableColumnFlags_WidthFixed, 50*dpi_scale_);
-        ImGui::TableSetupColumn("Passes", ImGuiTableColumnFlags_WidthFixed, 50*dpi_scale_);
-        ImGui::TableSetupColumn("Tag",  ImGuiTableColumnFlags_WidthFixed, 80*dpi_scale_);
+        ImGui::TableSetupColumn("Last OK", ImGuiTableColumnFlags_WidthFixed, 120*dpi_scale_);
+        ImGui::TableSetupColumn("Last Test", ImGuiTableColumnFlags_WidthFixed, 120*dpi_scale_);
+        ImGui::TableSetupColumn("Tag",  ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
         ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 190*dpi_scale_);
         ImGui::TableSetupColumn("URI");
         ImGui::TableHeadersRow();
@@ -1851,11 +2125,15 @@ void ImGuiApp::DrawConfigsPage() {
             ImGui::PushID(r.uri.c_str());
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
-            ImGui::TextColored(r.alive ? COL_GREEN : COL_RED, r.alive ? "Y" : "N");
+            if (r.telegram_only) ImGui::TextColored(COL_AMBER, "TG");
+            else if (r.alive) ImGui::TextColored(COL_GREEN, "FULL");
+            else ImGui::TextColored(COL_RED, "OFF");
+            ImGui::TableNextColumn();
+            ImGui::TextColored(r.alive ? (r.telegram_only ? COL_AMBER : COL_GREEN) : COL_RED, r.alive ? "Y" : "N");
             ImGui::TableNextColumn(); ImGui::Text("%.0f", r.latency_ms);
             ImGui::TableNextColumn(); ImGui::TextUnformatted(r.engine_used.empty() ? "-" : r.engine_used.c_str());
-            ImGui::TableNextColumn(); ImGui::Text("%d", r.total_tests);
-            ImGui::TableNextColumn(); ImGui::Text("%d", r.total_passes);
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(FmtTs(r.last_alive_time).c_str());
+            ImGui::TableNextColumn(); ImGui::TextUnformatted(FmtTs(r.last_tested).c_str());
             ImGui::TableNextColumn(); ImGui::TextUnformatted(r.tag.empty() ? "-" : r.tag.c_str());
             ImGui::TableNextColumn();
             if (ImGui::SmallButton("Copy")) {

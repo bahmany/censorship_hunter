@@ -65,38 +65,22 @@ bool RuntimeEngineManager::isEngineAvailable(const std::string& engine) const {
 
 std::string RuntimeEngineManager::generateConfig(const ParsedConfig& parsed, int listen_port, const std::string& engine) const {
     const std::string normalized = normalizedEngine(engine);
-    if (normalized == "xray") {
-        return XRayManager::generateConfig(parsed, listen_port, listen_port);
-    }
     if (normalized == "sing-box") {
         return parsed.toSingBoxConfigJson(listen_port);
-    }
-    if (normalized == "mihomo") {
-        return parsed.toMihomoConfigYaml(listen_port);
     }
     return "";
 }
 
 std::string RuntimeEngineManager::resolveEngine(const ParsedConfig& parsed, const std::string& preferred) const {
     const std::string normalized_preferred = normalizedEngine(preferred);
-    if (!normalized_preferred.empty() && isEngineAvailable(normalized_preferred)) {
+    if (normalized_preferred == "sing-box" && isEngineAvailable(normalized_preferred)) {
         if (!generateConfig(parsed, 10808, normalized_preferred).empty()) {
             return normalized_preferred;
         }
     }
 
-    std::vector<std::string> candidates;
-    if (parsed.protocol == "hysteria2" || parsed.protocol == "tuic") {
-        candidates = {"sing-box", "mihomo", "xray"};
-    } else {
-        candidates = {"xray", "sing-box", "mihomo"};
-    }
-
-    for (const std::string& candidate : candidates) {
-        if (!isEngineAvailable(candidate)) continue;
-        if (!generateConfig(parsed, 10808, candidate).empty()) {
-            return candidate;
-        }
+    if (isEngineAvailable("sing-box") && !generateConfig(parsed, 10808, "sing-box").empty()) {
+        return "sing-box";
     }
     return "";
 }
@@ -129,12 +113,8 @@ int RuntimeEngineManager::startProcess(const std::string& engine, const std::str
     PROCESS_INFORMATION pi = {};
 
     std::string cmd;
-    if (normalized == "xray") {
+    if (normalized == "sing-box") {
         cmd = "\"" + binary + "\" run -c \"" + config_path + "\"";
-    } else if (normalized == "sing-box") {
-        cmd = "\"" + binary + "\" run -c \"" + config_path + "\"";
-    } else if (normalized == "mihomo") {
-        cmd = "\"" + binary + "\" -f \"" + config_path + "\"";
     } else {
         return -1;
     }
@@ -159,12 +139,8 @@ int RuntimeEngineManager::startProcess(const std::string& engine, const std::str
 #else
     pid_t pid = fork();
     if (pid == 0) {
-        if (normalized == "xray") {
-            execl(binary.c_str(), "xray", "run", "-c", config_path.c_str(), nullptr);
-        } else if (normalized == "sing-box") {
+        if (normalized == "sing-box") {
             execl(binary.c_str(), "sing-box", "run", "-c", config_path.c_str(), nullptr);
-        } else if (normalized == "mihomo") {
-            execl(binary.c_str(), "mihomo", "-f", config_path.c_str(), nullptr);
         }
         _exit(1);
     }

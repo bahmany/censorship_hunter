@@ -38,7 +38,8 @@ public:
      * @brief Update health status after a test
      */
     void updateHealth(const std::string& uri, bool alive, float latency_ms = 0.0f,
-                      const std::string& engine_used = "", bool force_dead = false);
+                      const std::string& engine_used = "", bool force_dead = false,
+                      bool telegram_only = false);
 
     /**
      * @brief Get a batch of untested or stale configs
@@ -54,6 +55,8 @@ public:
      * @brief Get healthy config records with full details (timestamps, etc.)
      */
     std::vector<ConfigHealthRecord> getHealthyRecords(int max_count = 200);
+
+    std::vector<ConfigHealthRecord> getTelegramOnlyRecords(int max_count = 200);
 
     /**
      * @brief Get all stored URIs

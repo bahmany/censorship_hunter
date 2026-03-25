@@ -63,6 +63,10 @@ namespace network {
      return result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
  }
 
+ bool isTelegramOnlyResult(const ProxyTestResult& result) {
+     return result.success && result.telegram_only;
+ }
+
  float healthMetricFromResult(const ProxyTestResult& result) {
      if (!isUsableResult(result)) return 0.0f;
      const float speed = std::max(result.download_speed_kbps, 0.1f);
@@ -140,7 +144,8 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
 }
 
 void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float latency_ms,
-                                  const std::string& engine_used, bool force_dead) {
+                                  const std::string& engine_used, bool force_dead,
+                                  bool telegram_only) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::string hash = hashUri(uri);
     auto it = db_.find(hash);
@@ -157,6 +162,7 @@ void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float late
 
     if (alive) {
         rec.alive = true;
+        rec.telegram_only = telegram_only;
         rec.latency_ms = latency_ms;
         rec.consecutive_fails = 0;
         rec.total_passes++;
@@ -166,6 +172,7 @@ void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float late
         else rec.consecutive_fails++;
         if (rec.consecutive_fails >= 3) {
             rec.alive = false;
+            rec.telegram_only = false;
             rec.latency_ms = 0.0f;
         }
     }
@@ -238,7 +245,7 @@ std::vector<std::pair<std::string, float>> ConfigDatabase::getHealthyConfigs(int
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<std::pair<std::string, float>> healthy;
     for (auto& [hash, rec] : db_) {
-        if (rec.alive && rec.latency_ms > 0) {
+        if (rec.alive && !rec.telegram_only && rec.latency_ms > 0) {
             healthy.emplace_back(rec.uri, rec.latency_ms);
         }
     }
@@ -252,12 +259,28 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getHealthyRecords(int max_count)
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ConfigHealthRecord> healthy;
     for (auto& [hash, rec] : db_) {
-        if (rec.alive && rec.latency_ms > 0) {
+        if (rec.alive && !rec.telegram_only && rec.latency_ms > 0) {
             healthy.push_back(rec);
         }
     }
     std::sort(healthy.begin(), healthy.end(),
               [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) { return a.latency_ms < b.latency_ms; });
+    if ((int)healthy.size() > max_count) healthy.resize(max_count);
+    return healthy;
+}
+
+std::vector<ConfigHealthRecord> ConfigDatabase::getTelegramOnlyRecords(int max_count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ConfigHealthRecord> healthy;
+    for (auto& [hash, rec] : db_) {
+        if (rec.alive && rec.telegram_only) {
+            healthy.push_back(rec);
+        }
+    }
+    std::sort(healthy.begin(), healthy.end(),
+              [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
+                  return a.last_alive_time > b.last_alive_time;
+              });
     if ((int)healthy.size() > max_count) healthy.resize(max_count);
     return healthy;
 }
@@ -276,11 +299,14 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getAllRecords(int max_count) {
     for (auto& [hash, rec] : db_) {
         all.push_back(rec);
     }
-    // Sort: alive first (by latency asc), then dead (by last_tested desc)
     std::sort(all.begin(), all.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
-        if (a.alive != b.alive) return a.alive > b.alive; // alive first
-        if (a.alive) return a.latency_ms < b.latency_ms;  // alive: lower latency first
-        return a.last_tested > b.last_tested;              // dead: most recently tested first
+        if (a.alive != b.alive) return a.alive > b.alive;
+        if (a.alive && b.alive) {
+            if (a.telegram_only != b.telegram_only) return a.telegram_only < b.telegram_only;
+            if (!a.telegram_only && !b.telegram_only) return a.latency_ms < b.latency_ms;
+            return a.last_alive_time > b.last_alive_time;
+        }
+        return a.last_tested > b.last_tested;
     });
     if ((int)all.size() > max_count) all.resize(max_count);
     return all;
@@ -448,13 +474,10 @@ int ConfigDatabase::saveToDisk(const std::string& filepath) const {
     try { utils::mkdirRecursive(utils::dirName(filepath)); } catch (...) {}
     std::ofstream ofs(filepath, std::ios::binary);
     if (!ofs) return 0;
-    // Header line
-    ofs << "#HUNTER_CONFIG_DB_V1\n";
+    ofs << "#HUNTER_CONFIG_DB_V2\n";
     int saved = 0;
     for (const auto& [hash, rec] : db_) {
         if (rec.uri.empty()) continue;
-        // Tab-separated: uri \t tag \t engine_used \t first_seen \t last_tested \t last_alive_time
-        //                \t alive \t latency_ms \t consecutive_fails \t total_tests \t total_passes
         ofs << rec.uri << '\t'
             << rec.tag << '\t'
             << rec.engine_used << '\t'
@@ -462,6 +485,7 @@ int ConfigDatabase::saveToDisk(const std::string& filepath) const {
             << rec.last_tested << '\t'
             << rec.last_alive_time << '\t'
             << (rec.alive ? 1 : 0) << '\t'
+            << (rec.telegram_only ? 1 : 0) << '\t'
             << rec.latency_ms << '\t'
             << rec.consecutive_fails << '\t'
             << rec.total_tests << '\t'
@@ -476,10 +500,10 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     if (!ifs) return 0;
 
     std::string line;
-    // Check header
     if (!std::getline(ifs, line)) return 0;
-    if (line.find("#HUNTER_CONFIG_DB_V1") == std::string::npos) {
-        // Legacy format or corrupted — skip
+    const bool is_v2 = line.find("#HUNTER_CONFIG_DB_V2") != std::string::npos;
+    const bool is_v1 = line.find("#HUNTER_CONFIG_DB_V1") != std::string::npos;
+    if (!is_v2 && !is_v1) {
         return 0;
     }
 
@@ -487,20 +511,19 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     int loaded = 0;
     while (std::getline(ifs, line)) {
         if (line.empty() || line[0] == '#') continue;
-        // Parse tab-separated fields
         std::vector<std::string> fields;
         std::istringstream ss(line);
         std::string field;
         while (std::getline(ss, field, '\t')) {
             fields.push_back(field);
         }
-        if (fields.size() < 11) continue;
+        if ((is_v2 && fields.size() < 12) || (is_v1 && fields.size() < 11)) continue;
 
         std::string uri = fields[0];
         if (uri.empty() || uri.find("://") == std::string::npos) continue;
 
         std::string hash = hashUri(uri);
-        if (db_.find(hash) != db_.end()) continue; // already exists
+        if (db_.find(hash) != db_.end()) continue;
         if ((int)db_.size() >= max_size_) break;
 
         ConfigHealthRecord rec;
@@ -513,14 +536,19 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
             rec.last_tested = std::stod(fields[4]);
             rec.last_alive_time = std::stod(fields[5]);
             rec.alive = (std::stoi(fields[6]) != 0);
-            rec.latency_ms = std::stof(fields[7]);
-            rec.consecutive_fails = std::stoi(fields[8]);
-            rec.total_tests = std::stoi(fields[9]);
-            rec.total_passes = std::stoi(fields[10]);
+            int shift = 0;
+            if (is_v2) {
+                rec.telegram_only = (std::stoi(fields[7]) != 0);
+                shift = 1;
+            }
+            rec.latency_ms = std::stof(fields[7 + shift]);
+            rec.consecutive_fails = std::stoi(fields[8 + shift]);
+            rec.total_tests = std::stoi(fields[9 + shift]);
+            rec.total_passes = std::stoi(fields[10 + shift]);
         } catch (...) {
-            continue; // malformed line, skip
+            continue;
         }
-        rec.needs_retest = true; // always retest after loading from disk
+        rec.needs_retest = true;
         db_[hash] = rec;
         loaded++;
     }
@@ -536,12 +564,9 @@ ContinuousValidator::ContinuousValidator(ConfigDatabase& db, int batch_size,
     : db_(db), batch_size_(batch_size), timeout_s_(timeout_s), max_concurrent_(max_concurrent) {}
 
 bool ContinuousValidator::quickCheck(const std::string& uri) {
-    // Require real download-capable success only
     ProxyTester tester;
-    tester.setXrayPath("bin/xray.exe");
     tester.setSingBoxPath("bin/sing-box.exe");
-    tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
-    
+
     ProxyTestResult result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s_);
     return isUsableResult(result);
 }
@@ -551,70 +576,34 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
     auto batch = db_.getUntestedBatch(effective_batch);
     if (batch.empty()) return {0, 0};
 
-    { std::ostringstream _ls; _ls << "[Validator] Testing batch of " << batch.size() << " configs...";
-      utils::LogRingBuffer::instance().push(_ls.str()); }
-
     int tested = 0, passed = 0;
     auto& mgr = HunterTaskManager::instance();
     int test_timeout = std::max(1, std::min(30, timeout_s_));
-
-    // ═══ Split: xray-compatible → batch test, others → individual ═══
-    std::vector<std::string> xray_uris;
-    std::vector<std::string> other_uris;
-    for (auto& rec : batch) {
-        bool needs_individual = (rec.uri.find("hysteria2://") == 0 || rec.uri.find("tuic://") == 0);
-        if (needs_individual) other_uris.push_back(rec.uri);
-        else xray_uris.push_back(rec.uri);
-    }
-
-    // ═══ Primary: batch test with single xray process (v2rayN pattern) ═══
-    if (!xray_uris.empty()) {
-        static std::atomic<int> s_batch_offset{0};
-        int base = 29100 + (s_batch_offset.fetch_add((int)xray_uris.size() + 10) % 400);
-
-        ProxyTester batch_tester;
-        batch_tester.setXrayPath("bin/xray.exe");
-        auto results = batch_tester.batchTestWithXray(xray_uris, base, test_timeout);
-        for (auto& r : results) {
-            bool usable_success = isUsableResult(r);
-            float health_metric = healthMetricFromResult(r);
-            tested++;
-            if (usable_success) passed++;
-            db_.updateHealth(r.uri, usable_success, health_metric, r.engine_used);
-        }
-    }
-
-    // ═══ Fallback: individual test for non-xray protocols ═══
     size_t vchunk = (size_t)std::max(1, std::min(50, max_concurrent_));
 
-    { std::ostringstream _ls; _ls << "[Validator] Batch: " << xray_uris.size() << " xray, " << other_uris.size() << " individual";
-      utils::LogRingBuffer::instance().push(_ls.str()); }
-
-    for (size_t off = 0; off < other_uris.size(); off += vchunk) {
-        size_t chunk_end = std::min(off + vchunk, other_uris.size());
-        std::vector<std::future<std::tuple<std::string, bool, float, std::string>>> futures;
+    for (size_t off = 0; off < batch.size(); off += vchunk) {
+        size_t chunk_end = std::min(off + vchunk, batch.size());
+        std::vector<std::future<ProxyTestResult>> futures;
         for (size_t i = off; i < chunk_end; i++) {
-            std::string uri = other_uris[i];
+            std::string uri = batch[i].uri;
             int timeout_cap = test_timeout;
-            futures.push_back(mgr.submitIO([uri, timeout_cap]() -> std::tuple<std::string, bool, float, std::string> {
+            futures.push_back(mgr.submitIO([uri, timeout_cap]() -> ProxyTestResult {
                 ProxyTester local_tester;
-                local_tester.setXrayPath("bin/xray.exe");
                 local_tester.setSingBoxPath("bin/sing-box.exe");
-                local_tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
-                
-                ProxyTestResult result = local_tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_cap);
-                bool is_alive = isUsableResult(result);
-                float health_metric = healthMetricFromResult(result);
-                return {uri, is_alive, health_metric, result.engine_used};
+                return local_tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_cap);
             }));
         }
 
         for (auto& fut : futures) {
             try {
-                auto [uri, ok, speed, engine_used] = fut.get();
+                auto result = fut.get();
+                bool ok = isUsableResult(result);
+                bool telegram_only = isTelegramOnlyResult(result);
+                float health_metric = healthMetricFromResult(result);
                 tested++;
                 if (ok) passed++;
-                db_.updateHealth(uri, ok, ok ? speed : 0.0f, engine_used);
+                db_.updateHealth(result.uri, ok || telegram_only, ok ? health_metric : 0.0f,
+                                 result.engine_used, false, telegram_only);
             } catch (const std::exception& e) {
                 std::cout << "  [Validator] Future exception: " << e.what() << std::endl;
             } catch (...) {
@@ -625,12 +614,6 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
 
     total_tested_ += tested;
     total_passed_ += passed;
-    
-    auto stats = db_.getStats();
-    std::cout << "[Validator] Round done: tested=" << tested << " passed=" << passed 
-              << " (DB: total=" << stats.total << " alive=" << stats.alive 
-              << " untested=" << stats.untested_unique << ")" << std::endl;
-    
     return {tested, passed};
 }
 
@@ -660,7 +643,7 @@ std::pair<int, int> ContinuousValidator::validateBatchWithXray() {
             auto [uri, ok] = fut.get();
             tested++;
             if (ok) passed++;
-            db_.updateHealth(uri, ok, ok ? 1000.0f : 0.0f, "xray");
+            db_.updateHealth(uri, ok, ok ? 1000.0f : 0.0f, "sing-box");
         } catch (...) {}
     }
 

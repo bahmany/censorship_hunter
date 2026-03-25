@@ -259,58 +259,30 @@ void MultiProxyServer::refreshBackends_unlocked() {
     }
     xray_processes_.clear();
 
-    std::vector<int> backend_ports;
-    backend_ports.reserve(backends_.size());
-    for (auto& backend : backends_) {
-        auto parsed = network::UriParser::parse(backend.uri);
-        if (!parsed.has_value() || !parsed->isValid()) continue;
-        const std::string resolved_engine = runtime_engine_manager_.resolveEngine(
-            *parsed, backend.engine_used);
+    int selected_index = -1;
+    ParsedConfig selected_parsed;
+    std::string selected_engine;
+    for (int i = 0; i < (int)backends_.size(); ++i) {
+        auto parsed = network::UriParser::parse(backends_[i].uri);
+        if (!parsed.has_value() || !parsed->isValid()) {
+            backends_[i].state = BackendState::DEAD;
+            continue;
+        }
+        const std::string resolved_engine = runtime_engine_manager_.resolveEngine(*parsed, backends_[i].engine_used);
         if (resolved_engine.empty()) {
-            backend.state = BackendState::DEAD;
+            backends_[i].state = BackendState::DEAD;
             continue;
         }
-
-        const int local_port = reserveBackendPort();
-        if (local_port <= 0) {
-            backend.state = BackendState::DEAD;
-            continue;
+        backends_[i].engine_used = resolved_engine;
+        backends_[i].state = BackendState::UNKNOWN;
+        if (selected_index < 0) {
+            selected_index = i;
+            selected_parsed = *parsed;
+            selected_engine = resolved_engine;
         }
-
-        const std::string config_text = runtime_engine_manager_.generateConfig(*parsed, local_port, resolved_engine);
-        const std::string config_path = runtime_engine_manager_.writeConfigFile(resolved_engine, config_text);
-        const int pid = runtime_engine_manager_.startProcess(resolved_engine, config_path);
-
-        utils::LocalProxyProbeResult probe;
-        bool ready = false;
-        if (pid > 0 && utils::waitForPortAlive(local_port, 5000, 100)) {
-            probe = utils::probeLocalMixedPort(local_port, 2000);
-            ready = probe.mixed_ready();
-        }
-        if (pid > 0 && !ready) {
-            runtime_engine_manager_.stopProcess(pid);
-        }
-        if (!ready) {
-            backend.state = BackendState::DEAD;
-            continue;
-        }
-
-        backend.state = BackendState::HEALTHY;
-        backend.engine_used = resolved_engine;
-        backend.local_port = local_port;
-        backend.last_check = utils::nowTimestamp();
-        backend_ports.push_back(local_port);
-
-        XRayProcess xp;
-        xp.uri = backend.uri;
-        xp.engine_used = resolved_engine;
-        xp.socks_port = local_port;
-        xp.pid = pid;
-        xp.alive = true;
-        xray_processes_.push_back(xp);
     }
 
-    if (backend_ports.empty()) {
+    if (selected_index < 0) {
         utils::LogRingBuffer::instance().push(
             "[Balancer] No valid backends available for port " + std::to_string(port_));
         for (auto& b : backends_) b.state = BackendState::DEAD;
@@ -320,23 +292,9 @@ void MultiProxyServer::refreshBackends_unlocked() {
         return;
     }
 
-    const std::string config_json = XRayManager::generateLocalSocksBalancedConfig(backend_ports, port_, port_);
-    if (config_json.empty()) {
-        utils::LogRingBuffer::instance().push(
-            "[Balancer] Failed to generate XRay config for port " + std::to_string(port_));
-        for (const auto& xp : xray_processes_) {
-            if (xp.pid > 0) stopXRayProcess(xp.pid);
-        }
-        xray_processes_.clear();
-        for (auto& b : backends_) b.state = BackendState::DEAD;
-        tcp_alive_ = false;
-        socks_ready_ = false;
-        http_ready_ = false;
-        return;
-    }
-
-    const std::string config_path = runtime_engine_manager_.writeConfigFile("xray", config_json);
-    const int pid = runtime_engine_manager_.startProcess("xray", config_path);
+    const std::string config_text = runtime_engine_manager_.generateConfig(selected_parsed, port_, selected_engine);
+    const std::string config_path = runtime_engine_manager_.writeConfigFile(selected_engine, config_text);
+    const int pid = runtime_engine_manager_.startProcess(selected_engine, config_path);
     utils::LocalProxyProbeResult probe;
     bool ready = false;
     if (pid > 0 && utils::waitForPortAlive(port_, 5000, 100)) {
@@ -351,13 +309,9 @@ void MultiProxyServer::refreshBackends_unlocked() {
         runtime_engine_manager_.stopProcess(pid);
     }
     if (!ready) {
-        for (const auto& xp : xray_processes_) {
-            if (xp.pid > 0) stopXRayProcess(xp.pid);
-        }
-        xray_processes_.clear();
         utils::LogRingBuffer::instance().push(
             "[Balancer] Failed to spawn mixed listener on port " + std::to_string(port_) +
-            " using " + xray_path_ +
+            " using sing-box" +
             " tcp=" + std::string(tcp_alive_ ? "1" : "0") +
             " socks=" + std::string(socks_ready_ ? "1" : "0") +
             " http=" + std::string(http_ready_ ? "1" : "0"));
@@ -365,9 +319,17 @@ void MultiProxyServer::refreshBackends_unlocked() {
         return;
     }
 
+    for (int i = 0; i < (int)backends_.size(); ++i) {
+        backends_[i].last_check = utils::nowTimestamp();
+        if (i == selected_index) {
+            backends_[i].state = BackendState::HEALTHY;
+            backends_[i].local_port = port_;
+        }
+    }
+
     XRayProcess xp;
-    xp.uri = forced_uri_.empty() ? "balanced" : forced_uri_;
-    xp.engine_used = "xray";
+    xp.uri = backends_[selected_index].uri;
+    xp.engine_used = selected_engine;
     xp.socks_port = port_;
     xp.pid = pid;
     xp.alive = true;

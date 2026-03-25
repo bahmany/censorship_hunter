@@ -4,7 +4,7 @@
 ; Bundles cached configs for immediate start in censored networks
 
 #define MyAppName "huntercensor"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "Hunter Project"
 #define MyAppExeName "huntercensor.exe"
 #define MyStagingDir "D:\projects\v2ray\pythonProject1\hunter\installer\staging"
@@ -47,7 +47,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Messages]
 WelcomeLabel1=huntercensor Setup
-WelcomeLabel2=This will install huntercensor v{#MyAppVersion} on your computer.%n%nhuntercensor helps you discover and validate censorship-resistant proxy configs with:%n%n- Mixed local proxy listener (SOCKS + HTTP)%n- Bundled XRay, sing-box, mihomo, and Tor runtimes%n- Pre-loaded database and balancer caches%n- Offline-first censorship tooling%n%nNo administrator access required.
+WelcomeLabel2=This will install huntercensor v{#MyAppVersion} on your computer.%n%nhuntercensor helps you discover and validate censorship-resistant proxy configs with:%n%n- Sing-box-only proxy runtime and mixed local listener (SOCKS + HTTP)%n- Redesigned home screen with scan activity, full, Telegram-only, and history sections%n- Pre-loaded database and balancer caches%n- Offline-first censorship tooling%n%nNo administrator access required.
 
 [Tasks]
 Name: "desktopicon"; Description: "Create Desktop shortcut"; GroupDescription: "Shortcuts:"
@@ -59,9 +59,7 @@ Source: "{#MyStagingDir}\huntercensor.exe"; DestDir: "{app}"; DestName: "hunterc
 Source: "{#MyStagingDir}\hountersansor.exe"; DestDir: "{app}"; DestName: "huntercensor.exe"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; CLI + proxy cores in bin\ (CLI is statically linked, no DLL deps)
-Source: "{#MyStagingDir}\bin\xray.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\sing-box.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\bin\mihomo-windows-amd64-compatible.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#MyStagingDir}\bin\tor.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 
 ; Icon
@@ -98,9 +96,7 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch huntercensor"; Flags: no
 [UninstallRun]
 Filename: "taskkill"; Parameters: "/F /IM huntercensor.exe"; Flags: runhidden; RunOnceId: "KillDashboard"
 Filename: "taskkill"; Parameters: "/F /IM hountersansor.exe"; Flags: runhidden; RunOnceId: "KillLegacyDashboard"
-Filename: "taskkill"; Parameters: "/F /IM xray.exe"; Flags: runhidden; RunOnceId: "KillXray"
 Filename: "taskkill"; Parameters: "/F /IM sing-box.exe"; Flags: runhidden; RunOnceId: "KillSingBox"
-Filename: "taskkill"; Parameters: "/F /IM mihomo-windows-amd64-compatible.exe"; Flags: runhidden; RunOnceId: "KillMihomo"
 Filename: "taskkill"; Parameters: "/F /IM tor.exe"; Flags: runhidden; RunOnceId: "KillTor"
 
 [UninstallDelete]
@@ -118,9 +114,7 @@ begin
   Log('Killing running huntercensor processes for update...');
   Exec('taskkill', '/F /IM huntercensor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM hountersansor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('taskkill', '/F /IM xray.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM sing-box.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('taskkill', '/F /IM mihomo-windows-amd64-compatible.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM tor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Wait a moment for processes to fully terminate
   Sleep(2000);

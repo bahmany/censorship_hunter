@@ -2,7 +2,7 @@
 setlocal enabledelayedexpansion
 
 echo ========================================
-echo huntercensor Setup v1.3.0
+echo huntercensor Setup v1.4.0
 echo ========================================
 echo.
 echo [INFO] Running in user mode. Administrator rights are optional.
@@ -12,7 +12,6 @@ echo.
 echo [INFO] Creating directories...
 if not exist "bin" mkdir bin
 if not exist "runtime" mkdir runtime
-if not exist "runtime\xray_tmp" mkdir runtime\xray_tmp
 if not exist "runtime\engine_tmp" mkdir runtime\engine_tmp
 if not exist "config" mkdir config
 if not exist "config\import" mkdir config\import
@@ -21,31 +20,13 @@ if not exist "cache" mkdir cache
 
 :: Copy runtime engines from release_package if available
 echo [INFO] Setting up proxy engines...
-if exist "release_package\bin\xray.exe" (
-    copy /y "release_package\bin\xray.exe" "bin\xray.exe" >nul
-    echo [OK] xray.exe copied from release_package
-) else if exist "bin\xray.exe" (
-    echo [OK] xray.exe already exists
-) else (
-    echo [WARN] xray.exe not found. Please place it in bin\ manually.
-)
-
 if exist "release_package\bin\sing-box.exe" (
     copy /y "release_package\bin\sing-box.exe" "bin\sing-box.exe" >nul
     echo [OK] sing-box.exe copied from release_package
 ) else if exist "bin\sing-box.exe" (
     echo [OK] sing-box.exe already exists
 ) else (
-    echo [WARN] sing-box.exe not found.
-)
-
-if exist "release_package\bin\mihomo-windows-amd64-compatible.exe" (
-    copy /y "release_package\bin\mihomo-windows-amd64-compatible.exe" "bin\mihomo-windows-amd64-compatible.exe" >nul
-    echo [OK] mihomo-windows-amd64-compatible.exe copied from release_package
-) else if exist "bin\mihomo-windows-amd64-compatible.exe" (
-    echo [OK] mihomo-windows-amd64-compatible.exe already exists
-) else (
-    echo [WARN] mihomo-windows-amd64-compatible.exe not found.
+    echo [ERROR] sing-box.exe not found. Please place it in bin\ or release_package\bin\ manually.
 )
 
 if exist "release_package\bin\tor.exe" (
@@ -213,19 +194,18 @@ echo ========================================
 echo Setup Complete!
 echo ========================================
 echo.
-echo huntercensor v1.3.0 has been configured.
+echo huntercensor v1.4.0 has been configured.
 echo.
 echo Features:
 echo - Integrated native Windows application
-echo - Bundled XRay, sing-box, mihomo, and Tor runtimes
+echo - Bundled sing-box-only proxy runtime and Tor helper
 echo - Imported config database and balancer caches when bundled
 echo - Local mixed proxy listener on 127.0.0.1:10808
 echo - Offline censorship tooling and discovery workflow
 echo.
 echo Files created:
 echo - bin\huntercensor.exe (main application)
-echo - bin\xray.exe (proxy engine)
-echo - bin\sing-box.exe / mihomo-windows-amd64-compatible.exe / tor.exe
+echo - bin\sing-box.exe / tor.exe
 echo - runtime\HUNTER_config_db.tsv (bundled config database if present)
 echo - .env (configuration file)
 echo - start_hunter.bat (startup script)

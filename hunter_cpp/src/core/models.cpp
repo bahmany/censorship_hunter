@@ -311,7 +311,7 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
     ss << "{"
        << "\"log\":{\"level\":\"warn\"},"
        << "\"dns\":{\"servers\":[{\"tag\":\"dns-direct\",\"address\":\"1.1.1.1\"},{\"tag\":\"dns-google\",\"address\":\"8.8.8.8\"}]},"
-       << "\"inbounds\":[{\"type\":\"socks\",\"tag\":\"socks-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << "}],"
+       << "\"inbounds\":[{\"type\":\"mixed\",\"tag\":\"mixed-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << ",\"sniff\":true,\"sniff_override_destination\":true}],"
        << "\"outbounds\":[" << ob.str() << ",{\"type\":\"direct\",\"tag\":\"direct\"}],"
        << "\"route\":{\"rules\":[{\"protocol\":\"dns\",\"outbound\":\"direct\"},{\"ip_is_private\":true,\"outbound\":\"direct\"}],\"final\":\"proxy\"}"
        << "}";

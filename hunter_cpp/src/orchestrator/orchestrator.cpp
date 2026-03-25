@@ -1915,15 +1915,17 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
                 br.uri = uri;
                 try {
                     network::ProxyTester tester;
-                    tester.setXrayPath("bin/xray.exe");
                     tester.setSingBoxPath("bin/sing-box.exe");
-                    tester.setMihomoPath("bin/mihomo-windows-amd64-compatible.exe");
                     auto result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s);
 
                     br.success = result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
+                    br.telegram_only = result.success && result.telegram_only;
                     if (br.success) {
                         br.latency_ms = result.download_speed_kbps > 0 ? 1000.0f / result.download_speed_kbps : 5000.0f;
                         br.tier = br.latency_ms <= 3000 ? "gold" : "silver";
+                    } else if (br.telegram_only) {
+                        br.latency_ms = 0;
+                        br.tier = "telegram";
                     } else {
                         br.latency_ms = 0;
                         br.tier = "dead";
@@ -1968,13 +1970,16 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
     // Sort by latency (successful first)
     std::sort(results.begin(), results.end(), [](const BenchResult& a, const BenchResult& b) {
         if (a.success != b.success) return a.success > b.success;
+        if (a.telegram_only != b.telegram_only) return a.telegram_only > b.telegram_only;
         return a.latency_ms < b.latency_ms;
     });
 
     // Update ConfigDB with results
     if (config_db_) {
         for (auto& r : results) {
-            config_db_->updateHealth(r.uri, r.success, r.latency_ms, r.engine_used);
+            config_db_->updateHealth(r.uri, r.success || r.telegram_only,
+                                     r.success ? r.latency_ms : 0.0f,
+                                     r.engine_used, false, r.telegram_only);
         }
     }
 
@@ -2150,6 +2155,21 @@ void HunterOrchestrator::provisionPorts() {
     // Sort by latency (best first) — quality-based priority
     std::sort(best.begin(), best.end(),
               [](const auto& a, const auto& b) { return a.second < b.second; });
+
+    if (config_db_) {
+        const int telegram_slot_target = std::min(10, std::max(2, PROVISION_PORT_COUNT / 8));
+        std::set<std::string> existing_uris;
+        for (const auto& item : best) existing_uris.insert(item.first);
+        const auto telegram_only_records = config_db_->getTelegramOnlyRecords(std::max(telegram_slot_target * 4, 20));
+        int appended = 0;
+        for (const auto& rec : telegram_only_records) {
+            if (existing_uris.insert(rec.uri).second) {
+                best.emplace_back(rec.uri, 9000.0f + static_cast<float>(appended));
+                appended++;
+                if (appended >= telegram_slot_target) break;
+            }
+        }
+    }
 
     // Limit to available port range
     int max_slots = PROVISION_PORT_MAX - PROVISION_PORT_BASE + 1;
@@ -2463,6 +2483,15 @@ void HunterOrchestrator::replaceProvisionedPortsLocked(const std::vector<int>& d
             if (existing_uris.find(uri) == existing_uris.end()) {
                 replacements.emplace_back(uri, lat);
             }
+        }
+        const auto telegram_only_records = config_db_->getTelegramOnlyRecords(40);
+        int telegram_added = 0;
+        for (const auto& rec : telegram_only_records) {
+            if (existing_uris.find(rec.uri) != existing_uris.end()) continue;
+            replacements.emplace_back(rec.uri, 9000.0f + static_cast<float>(telegram_added));
+            existing_uris.insert(rec.uri);
+            telegram_added++;
+            if (telegram_added >= 10) break;
         }
     }
     if (replacements.empty() && balancer_) {
@@ -3233,6 +3262,7 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
         return "unknown";
     };
     std::vector<ConfigHealthRecord> healthy_records;
+    std::vector<ConfigHealthRecord> telegram_only_records;
     if (config_db_) {
         auto s = config_db_->getStats();
         db_total = s.total;
@@ -3244,6 +3274,7 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
         db_total_tests = s.total_tested;
         db_total_passes = s.total_passed;
         healthy_records = config_db_->getHealthyRecords(200);
+        telegram_only_records = config_db_->getTelegramOnlyRecords(200);
     }
 
     BalancerStatus bal_status;
@@ -3355,6 +3386,32 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
         alive_json << item.build();
     }
     alive_json << "]";
+
+    std::ostringstream telegram_json;
+    telegram_json << "[";
+    bool telegram_first = true;
+    for (auto& rec : telegram_only_records) {
+        if (!telegram_first) telegram_json << ",";
+        telegram_first = false;
+        latest_found_ts = std::max(latest_found_ts, rec.first_seen);
+        latest_alive_ts = std::max(latest_alive_ts, rec.last_alive_time);
+        latest_alive_test_ts = std::max(latest_alive_test_ts, rec.last_tested);
+        utils::JsonBuilder item;
+        item.add("uri", rec.uri)
+            .add("latency_ms", rec.latency_ms)
+            .add("engine_used", rec.engine_used)
+            .add("first_seen", rec.first_seen)
+            .add("last_alive", rec.last_alive_time)
+            .add("last_tested", rec.last_tested)
+            .add("total_tests", rec.total_tests)
+            .add("total_passes", rec.total_passes)
+            .add("consecutive_fails", rec.consecutive_fails)
+            .add("alive", rec.alive)
+            .add("telegram_only", rec.telegram_only)
+            .add("tag", rec.tag);
+        telegram_json << item.build();
+    }
+    telegram_json << "]";
 
     utils::JsonBuilder dbj;
     dbj.add("total", db_total)
@@ -3575,6 +3632,7 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
         .addRaw("runtime_config", runtimej.build())
         .addRaw("workers", workers_json.str())
         .addRaw("alive_configs", alive_json.str())
+        .addRaw("telegram_only_configs", telegram_json.str())
         .addRaw("history", history_json)
         .addRaw("provisioned_ports", ports_json.str())
         .addRaw("balancers", bal_json.str());
