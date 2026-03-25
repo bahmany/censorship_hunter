@@ -1797,6 +1797,26 @@ void ImGuiApp::DrawHomePage() {
         ImGui::EndChild();
         ImGui::PopStyleColor();
         
+        // Copy buttons for Recent History (کپی گروهی)
+        ImGui::Spacing();
+        if (!s.all_records.empty() && ImGui::Button("Copy Recent", ImVec2(100*dpi_scale_, 0))) {
+            std::vector<std::string> uris;
+            for (const auto& r : s.all_records) uris.push_back(r.uri);
+            CopyTextToClipboard(JoinUniqueLinesText(uris));
+            SetToast("Copied recent configs", ToastKind::Success);
+        }
+        ImGui::SameLine(0, 8*dpi_scale_);
+        if (!s.all_records.empty() && ImGui::Button("Copy History (Old)", ImVec2(120*dpi_scale_, 0))) {
+            // Copy all records including old ones (کپی گروهی پروکسی‌های قدیمی)
+            std::vector<std::string> uris;
+            for (const auto& r : s.all_records) {
+                uris.push_back(r.uri);
+            }
+            CopyTextToClipboard(JoinUniqueLinesText(uris));
+            AppendLog("[UI] Copy Old/History: copied " + std::to_string(uris.size()) + " configs (including old proxies)");
+            SetToast("Copied all history (old+new)", ToastKind::Success);
+        }
+        
         ImGui::EndTable();
     }
 

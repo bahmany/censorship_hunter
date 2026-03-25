@@ -433,12 +433,14 @@ static TelegramReachabilitySummary probeTelegramReachability(int socks_port, int
         }
     }
     
-    // Log summary of Telegram reachability checks
+    // Log summary of Telegram reachability checks with enhanced detail
     TLOG("  [TG-CHECK:" << socks_port << "] DC=" << summary.dc_successes 
          << "/" << NUM_TELEGRAM_DCS << " Domain=" << summary.domain_successes 
          << "/" << NUM_TELEGRAM_DOMAIN_HOSTS << " JS=" << summary.cdn_successes 
          << "/" << NUM_TELEGRAM_JS_URLS << " Web=" << summary.web_successes 
-         << "/" << NUM_TELEGRAM_WEB_URLS << " Score=" << summary.score());
+         << "/" << NUM_TELEGRAM_WEB_URLS << " Score=" << summary.score()
+         << " [TCP=" << (summary.dc_successes >= 2 ? "OK" : "FAIL")
+         << " HTTPS=" << (summary.cdn_successes >= 1 ? "OK" : "FAIL") << "]");
 
     return summary;
 }
