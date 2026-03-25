@@ -943,21 +943,30 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
                                        int timeout_seconds) {
     ProxyTestResult result;
     result.uri = config_uri;
-    if (!utils::fileExists(singbox_path_)) {
-        result.error_message = "sing-box executable not found";
+    
+    // Use xray.exe from bin folder
+    std::string xray_bin = "D:\\projects\\v2ray\\pythonProject1\\hunter\\bin\\xray.exe";
+    if (!utils::fileExists(xray_bin)) {
+        result.error_message = "xray.exe not found at " + xray_bin;
         return result;
     }
+    
+    // Temporarily override xray_path_ for this test
+    std::string original_xray_path = xray_path_;
+    xray_path_ = xray_bin;
+    
     try {
-        result = testWithSingBox(config_uri, test_url, timeout_seconds);
+        result = testWithXray(config_uri, test_url, timeout_seconds);
         result.uri = config_uri;
-        return result;
     } catch (const std::exception& ex) {
-        result.error_message = std::string("sing-box exception: ") + ex.what();
-        return result;
+        result.error_message = std::string("xray exception: ") + ex.what();
     } catch (...) {
-        result.error_message = "sing-box unknown exception";
-        return result;
+        result.error_message = "xray unknown exception";
     }
+    
+    // Restore original path
+    xray_path_ = original_xray_path;
+    return result;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
