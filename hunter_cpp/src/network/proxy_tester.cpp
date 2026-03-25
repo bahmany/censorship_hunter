@@ -255,12 +255,10 @@ static const char* TELEGRAM_CDN_HOSTS[] = {
     "cdn1.telegram-cdn.org", "cdn4.telegram-cdn.org", "cdn5.telegram-cdn.org"
 };
 static const int NUM_TELEGRAM_CDN_HOSTS = 3;
-static const char* TELEGRAM_CDN_JS_URLS[] = {
-    "https://cdn1.telegram-cdn.org/js/telegram-widget.js",
-    "https://cdn4.telegram-cdn.org/js/telegram-widget.js",
-    "https://cdn5.telegram-cdn.org/js/telegram-widget.js"
+static const char* TELEGRAM_JS_URLS[] = {
+    "https://telegram.org/js/telegram-widget.js?22"
 };
-static const int NUM_TELEGRAM_CDN_JS_URLS = 3;
+static const int NUM_TELEGRAM_JS_URLS = 1;
 static const char* TELEGRAM_WEB_URLS[] = {
     "https://telegram.org/js/telegram-widget.js?22",
     "https://web.telegram.org/"
@@ -406,21 +404,21 @@ static TelegramReachabilitySummary probeTelegramReachability(int socks_port, int
         }
     }
 
-    // ═══ CRITICAL: Test CDN with ACTUAL HTTP DOWNLOAD of JavaScript files ═══
-    // This ensures the proxy can actually fetch and serve real Telegram CDN content
-    const int cdn_timeout = std::max(5, std::min(http_timeout_seconds, 12));
-    for (int i = 0; i < NUM_TELEGRAM_CDN_JS_URLS && summary.cdn_successes < 2; ++i) {
-        // Download actual JS file and verify it has valid JavaScript content
-        float speed = utils::downloadSpeedViaSocks5(TELEGRAM_CDN_JS_URLS[i], "127.0.0.1", socks_port, cdn_timeout);
+    // ═══ CRITICAL: Test with ACTUAL HTTP DOWNLOAD of JavaScript file from telegram.org ═══
+    // This ensures the proxy can actually fetch and serve real Telegram JS content
+    const int js_timeout = std::max(5, std::min(http_timeout_seconds, 12));
+    for (int i = 0; i < NUM_TELEGRAM_JS_URLS && summary.cdn_successes < 1; ++i) {
+        // Download actual JS file and verify it downloads successfully
+        float speed = utils::downloadSpeedViaSocks5(TELEGRAM_JS_URLS[i], "127.0.0.1", socks_port, js_timeout);
         if (speed > 0.0f) {
             summary.cdn_successes++;
-            TLOG("  [CDN-JS:" << socks_port << "] OK " << TELEGRAM_CDN_JS_URLS[i] << " - " << speed << " KB/s");
+            TLOG("  [TG-JS:" << socks_port << "] OK " << TELEGRAM_JS_URLS[i] << " - " << speed << " KB/s");
         } else {
-            TLOG("  [CDN-JS:" << socks_port << "] FAIL " << TELEGRAM_CDN_JS_URLS[i]);
+            TLOG("  [TG-JS:" << socks_port << "] FAIL " << TELEGRAM_JS_URLS[i]);
         }
     }
 
-    // If CDN JS download failed, try web URLs as fallback
+    // If JS download failed, try web URLs as fallback
     if (summary.cdn_successes == 0) {
         const int web_timeout = std::max(4, std::min(http_timeout_seconds, 10));
         for (int i = 0; i < NUM_TELEGRAM_WEB_URLS && summary.web_successes < 1; ++i) {
