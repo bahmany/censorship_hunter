@@ -300,6 +300,47 @@ std::string DisplayNetworkValue(const std::string& value, const char* kind, bool
     return value;
 }
 
+// ── Windows Version Detection ──
+struct WindowsVersionInfo {
+    int major = 0;
+    int minor = 0;
+    int build = 0;
+    bool is_windows_7_or_later = false;
+    bool is_windows_10_or_later = false;
+    std::string version_string;
+};
+
+static WindowsVersionInfo DetectWindowsVersion() {
+    WindowsVersionInfo info;
+    OSVERSIONINFOW osvi = {};
+    osvi.dwOSVersionInfoSize = sizeof(osvi);
+    
+    // RtlGetVersion is more reliable than GetVersionEx for Windows 8.1+
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+    if (ntdll) {
+        using RtlGetVersionFn = LONG (WINAPI*)(PRTL_OSVERSIONINFOW);
+        auto RtlGetVersion = reinterpret_cast<RtlGetVersionFn>(GetProcAddress(ntdll, "RtlGetVersion"));
+        if (RtlGetVersion) {
+            RtlGetVersion(&osvi);
+        }
+    }
+    
+    info.major = static_cast<int>(osvi.dwMajorVersion);
+    info.minor = static_cast<int>(osvi.dwMinorVersion);
+    info.build = static_cast<int>(osvi.dwBuildNumber);
+    info.is_windows_7_or_later = (info.major > 6) || (info.major == 6 && info.minor >= 1);
+    info.is_windows_10_or_later = (info.major >= 10);
+    
+    char buf[64];
+    snprintf(buf, sizeof(buf), "%d.%d.%d", info.major, info.minor, info.build);
+    info.version_string = buf;
+    
+    return info;
+}
+
+static std::string g_windows_version_cached;
+static bool g_windows_7_or_later_cached = false;
+
 struct LiveProxyActivitySample {
     int port = 0;
     int pid = -1;
@@ -320,8 +361,18 @@ struct ProcessIoSample {
 
 bool QueryProcessIoCountersForPid(int pid, uint64_t& read_bytes, uint64_t& write_bytes) {
     if (pid <= 0) return false;
+    // Windows 7+ compatibility: Try LIMITED first (Vista+), fallback to QUERY_INFORMATION (XP+)
     HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    if (!process) {
+        // Fallback for older Windows or restricted processes
+        process = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, static_cast<DWORD>(pid));
+    }
+    if (!process) {
+        // Final fallback: try with VM_READ permission
+        process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ, FALSE, static_cast<DWORD>(pid));
+    }
     if (!process) return false;
+    
     IO_COUNTERS counters{};
     const BOOL ok = GetProcessIoCounters(process, &counters);
     CloseHandle(process);
@@ -520,6 +571,11 @@ ImGuiApp::ImGuiApp() {
     z(edge_target_mac_); z(edge_exit_ip_); z(edge_iface_);
     z(telegram_api_id_); z(telegram_api_hash_); z(telegram_phone_);
     z(telegram_targets_); z(github_urls_); z(manual_configs_);
+    
+    // Detect Windows version for compatibility diagnostics
+    auto winver = DetectWindowsVersion();
+    g_windows_version_cached = winver.version_string;
+    g_windows_7_or_later_cached = winver.is_windows_7_or_later;
 }
 
 ImGuiApp::~ImGuiApp() {
@@ -742,7 +798,8 @@ bool ImGuiApp::Create(HINSTANCE hInstance, int nCmdShow) {
             AppendLog("[ERR] Pending elevated edge bypass state was not found");
         }
     }
-    AppendLog("[UI] huntercensor ready");
+    AppendLog("[UI] huntercensor ready (Windows " + g_windows_version_cached + 
+              ", Win7+=" + (g_windows_7_or_later_cached ? "Y" : "N") + ")");
     return true;
 }
 
@@ -2653,6 +2710,16 @@ void ImGuiApp::DrawAboutPage() {
         row("Releases", "https://github.com/bahmany/censorship_hunter/releases");
         row("English guide", "hunter_cpp/docs/USER_GUIDE_EN.md");
         row("Persian guide", "hunter_cpp/docs/USER_GUIDE_FA.md");
+        // Windows version info for diagnostics
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(); ImGui::TextUnformatted("Windows");
+        ImGui::TableNextColumn(); 
+        ImGui::TextUnformatted((g_windows_version_cached + " (Win7+=" + 
+            (g_windows_7_or_later_cached ? "Y" : "N") + ")").c_str());
+        ImGui::TableNextColumn();
+        if (ImGui::SmallButton("Copy##Windows")) {
+            CopyTextToClipboard("Windows " + g_windows_version_cached);
+        }
         ImGui::EndTable();
     }
 
