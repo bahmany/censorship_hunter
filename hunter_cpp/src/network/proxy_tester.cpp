@@ -277,9 +277,9 @@ struct TelegramReachabilitySummary {
     }
 
     bool strongEnough() const {
-        // Relaxed criteria for heavy censorship environments (e.g., Iran)
-        // If DC and domain TCP connect works, accept as Telegram-only even without HTTPS
-        return dc_successes >= 2 && (domain_successes >= 2 || dc_successes >= 3);
+        // For heavy censorship (Iran): Must pass DC + Domain TCP AND at least 1 JS download
+        // CDN JS download proves HTTPS to Telegram infra actually works
+        return dc_successes >= 2 && domain_successes >= 2 && cdn_successes >= 1;
     }
 
     std::string describe() const {
