@@ -628,13 +628,6 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     DownloadProgress prog = {0, std::chrono::steady_clock::now(), 512 * 1024};
     std::string proxy_str = "socks5h://" + proxy_host + ":" + std::to_string(proxy_port);
     
-    // Log the equivalent curl command for debugging
-    { std::ostringstream _ls; _ls << "    [curl] curl --socks5-hostname " << proxy_str 
-              << " --max-time " << timeout_seconds 
-              << " --connect-timeout " << std::min(timeout_seconds, 10)
-              << " -L -H \"Range: bytes=0-524287\" \"" << url << "\"";
-      LogRingBuffer::instance().push(_ls.str()); }
-    
     curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
     curl_easy_setopt(curl, CURLOPT_PROXY, proxy_str.c_str());
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, downloadWriteCallback);
@@ -665,14 +658,16 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     
     // CURLE_WRITE_ERROR is expected when we abort after enough data
     if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
-        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] error=" << (int)res 
+        // Only log curl command on error for debugging
+        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] FAIL curl --socks5-hostname " << proxy_str 
+                  << " --max-time " << timeout_seconds << " \"" << url << "\" -> error=" << (int)res 
                   << " (" << curl_easy_strerror(res) << ") bytes=" << prog.total_bytes
                   << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s";
           LogRingBuffer::instance().push(_ls.str()); }
         return -1.0f;
     }
     if (http_code >= 400) {
-        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] HTTP " << http_code
+        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] FAIL HTTP " << http_code
                   << " bytes=" << prog.total_bytes
                   << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s";
           LogRingBuffer::instance().push(_ls.str()); }
@@ -681,14 +676,11 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     // HTTP 204 No Content = connectivity check passed (generate_204 endpoints)
     if (http_code == 204 || (http_code >= 200 && http_code < 300 && prog.total_bytes == 0)) {
         double latency = (elapsed > 0.001) ? (1.0 / elapsed) : 1.0f;
-        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] HTTP " << http_code
-                  << " latency=" << std::fixed << std::setprecision(3) << (elapsed * 1000) << "ms";
-          LogRingBuffer::instance().push(_ls.str()); }
         return (elapsed > 0.001) ? (float)(1.0 / elapsed) : 1.0f; // Return latency-based score
     }
     if (prog.total_bytes < 100) {
-        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] too few bytes: " << prog.total_bytes
-                  << " HTTP " << http_code;
+        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] FAIL too few bytes: " << prog.total_bytes
+                  << " HTTP " << http_code << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s";
           LogRingBuffer::instance().push(_ls.str()); }
         return -1.0f;
     }
@@ -696,10 +688,11 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     if (elapsed < 0.001) elapsed = 0.001;
     
     float speed = (float)(prog.total_bytes / 1024.0 / elapsed);
+    // Only log successful downloads with speed > 0
     { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] OK bytes=" << prog.total_bytes
               << " speed=" << std::fixed << std::setprecision(1) << speed << "KB/s"
               << " elapsed=" << std::setprecision(3) << elapsed << "s"
-              << " HTTP " << http_code;
+              << " HTTP " << http_code << " \"" << url << "\"";
       LogRingBuffer::instance().push(_ls.str()); }
     
     return speed;
