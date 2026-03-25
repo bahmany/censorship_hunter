@@ -186,7 +186,7 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
             size_t brace_pos = outbound.find("{", tls_pos);
             if (brace_pos != std::string::npos) {
                 std::string fragment_json = 
-                    "\"fragment\":{\"packets\":\"tlshello\",\"length\":\"100-200\",\"interval\":\"10-20\"},";
+                "\"fragment\":{\"packets\":\"tlshello\",\"length\":\"50-100\",\"interval\":\"30-50\"},";
                 outbound.insert(brace_pos + 1, fragment_json);
             }
         }
@@ -440,9 +440,9 @@ std::string XRayManager::generateBatchSpeedtestConfig(
 
     // Direct outbound
     ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}";
-    // Fragment outbound for anti-DPI
+    // Fragment outbound for anti-DPI - AGGRESSIVE settings for Iranian DPI
     ss << ",{\"protocol\":\"freedom\",\"tag\":\"fragment-out\",\"settings\":{\"domainStrategy\":\"AsIs\""
-       <<     ",\"fragment\":{\"packets\":\"tlshello\",\"length\":\"100-200\",\"interval\":\"10-20\"}"
+       <<     ",\"fragment\":{\"packets\":\"tlshello\",\"length\":\"50-100\",\"interval\":\"30-50\"}"
        <<   "}}";
     // DNS outbound
     ss << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}";
