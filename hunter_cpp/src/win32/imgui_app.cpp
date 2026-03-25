@@ -1581,7 +1581,6 @@ void ImGuiApp::DrawHomePage() {
 
     const bool running = orchestrator_running_.load();
     const bool blink_on = ((utils::nowMs() / 500ULL) % 2ULL) == 0ULL;
-    const ImVec4 scan_col = running ? (blink_on ? COL_GREEN : COL_AMBER) : COL_DIM;
 
     std::set<std::string> telegram_only_uris;
     for (const auto& rec : s.telegram_only_records) telegram_only_uris.insert(rec.uri);
@@ -1605,292 +1604,207 @@ void ImGuiApp::DrawHomePage() {
         if (slot.pid > 0 && telegram_only_uris.find(slot.uri) != telegram_only_uris.end()) active_tg_ports++;
     }
 
-    const float tested_ratio = s.db_total > 0 ? (float)s.db_tested / (float)s.db_total : 0.0f;
-    const float alive_ratio = s.db_total > 0 ? (float)s.db_alive / (float)s.db_total : 0.0f;
-    const float live_ratio = active_ports > 0 ? (float)ready_ports / (float)active_ports : 0.0f;
-
     auto fmt_rate = [](double kbps) {
         char buf[64];
-        if (kbps >= 1024.0) std::snprintf(buf, sizeof(buf), "%.2f MB/s", kbps / 1024.0);
-        else std::snprintf(buf, sizeof(buf), "%.1f KB/s", kbps);
+        if (kbps >= 1024.0) std::snprintf(buf, sizeof(buf), "%.1fM", kbps / 1024.0);
+        else std::snprintf(buf, sizeof(buf), "%.0fK", kbps);
         return std::string(buf);
     };
 
-    auto fmt_compact_int = [](int value) {
-        char buf[32];
-        if (value >= 1000000) std::snprintf(buf, sizeof(buf), "%.1fM", value / 1000000.0);
-        else if (value >= 1000) std::snprintf(buf, sizeof(buf), "%.1fK", value / 1000.0);
-        else std::snprintf(buf, sizeof(buf), "%d", value);
-        return std::string(buf);
-    };
-
-    auto stat_panel = [&](const char* id, const char* title, const std::string& value, const std::string& detail, const ImVec4& accent) {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
-        ImGui::BeginChild(id, ImVec2(0, 78*dpi_scale_), true);
-        const ImVec2 p0 = ImGui::GetItemRectMin();
-        const ImVec2 p1 = ImGui::GetItemRectMax();
-        ImGui::GetWindowDrawList()->AddRectFilled(ImVec2(p0.x, p0.y), ImVec2(p0.x + 4*dpi_scale_, p1.y), ImGui::ColorConvertFloat4ToU32(accent), 6.0f * dpi_scale_);
-        ImGui::TextColored(COL_DIM, "%s", title);
-        ImGui::TextColored(accent, "%s", value.c_str());
-        ImGui::TextColored(COL_DIM, "%s", detail.c_str());
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-    };
-
-    auto info_row = [&](const char* label, const std::string& value, const ImVec4& color) {
+    auto stat_card = [&](const char* label, const char* value, const ImVec4& color) {
+        ImGui::TextColored(color, "%s", value);
+        ImGui::SameLine(0, 4*dpi_scale_);
         ImGui::TextColored(COL_DIM, "%s", label);
-        ImGui::SameLine(150*dpi_scale_);
-        ImGui::TextColored(color, "%s", value.c_str());
     };
 
-    auto copy_records = [this](const std::vector<ConfigHealthRecord>& rows, const char* empty_msg, const char* success_prefix) {
-        if (rows.empty()) {
-            SetToast(empty_msg, ToastKind::Warning);
-            return;
-        }
-        std::vector<std::string> uris;
-        uris.reserve(rows.size());
-        for (const auto& r : rows) uris.push_back(r.uri);
-        const auto deduped = DedupeStringsPreserveOrder(uris);
-        const bool copied = CopyTextToClipboard(JoinUniqueLinesText(deduped));
-        SetToast(copied ? (std::string(success_prefix) + std::to_string(deduped.size())) : "Failed to copy configs",
-                 copied ? ToastKind::Success : ToastKind::Error);
-    };
-
-    auto render_rows = [this](const char* table_id, const std::vector<ConfigHealthRecord>& rows, bool history_mode, bool telegram_mode, float height_scale) {
-        const float height = height_scale * dpi_scale_;
-        if (!ImGui::BeginTable(table_id, 6,
-            ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
-            ImVec2(0, height))) {
-            return;
-        }
-        ImGui::TableSetupColumn(history_mode ? "State" : (telegram_mode ? "Mode" : "Latency"), ImGuiTableColumnFlags_WidthFixed, history_mode ? 68*dpi_scale_ : 78*dpi_scale_);
-        ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
-        ImGui::TableSetupColumn("Found", ImGuiTableColumnFlags_WidthFixed, 125*dpi_scale_);
-        ImGui::TableSetupColumn(history_mode ? "Last Test" : "Last OK", ImGuiTableColumnFlags_WidthFixed, 125*dpi_scale_);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 190*dpi_scale_);
-        ImGui::TableSetupColumn("URI");
-        ImGui::TableHeadersRow();
-        for (const auto& r : rows) {
-            ImGui::PushID((std::string(table_id) + r.uri).c_str());
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            if (history_mode) {
-                if (!r.alive) ImGui::TextColored(COL_RED, "OFF");
-                else if (r.telegram_only) ImGui::TextColored(COL_AMBER, "TG");
-                else ImGui::TextColored(COL_GREEN, "FULL");
-            } else if (telegram_mode) {
-                ImGui::TextColored(COL_AMBER, "TG-ONLY");
-            } else {
-                ImGui::TextColored(r.latency_ms < 500 ? COL_GREEN : r.latency_ms < 1500 ? COL_YELLOW : COL_RED, "%.0f", r.latency_ms);
-            }
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(r.engine_used.empty() ? "-" : r.engine_used.c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(FmtTs(r.first_seen).c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(FmtTs(history_mode ? r.last_tested : r.last_alive_time).c_str());
-            ImGui::TableNextColumn();
-            if (ImGui::SmallButton("Copy")) {
-                const bool copied = CopyTextToClipboard(r.uri);
-                SetToast(copied ? "Config copied" : "Failed to copy config", copied ? ToastKind::Success : ToastKind::Error);
-            }
-            ImGui::SameLine(0, 4*dpi_scale_);
-            if (ImGui::SmallButton("Save")) {
-                std::string path = SaveFileDialog("Text Files\0*.txt\0All Files\0*.*\0", "txt");
-                if (!path.empty()) {
-                    const bool saved = SaveTextToFile(path, r.uri + "\r\n");
-                    SetToast(saved ? "Config saved" : "Failed to save config", saved ? ToastKind::Success : ToastKind::Error);
-                }
-            }
-            ImGui::SameLine(0, 4*dpi_scale_);
-            if (ImGui::SmallButton("QR")) OpenQrModal(r.uri);
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(Trim(r.uri, 220).c_str());
-            ImGui::PopID();
-        }
-        ImGui::EndTable();
-    };
-
-    auto render_section = [&](const char* title, const std::vector<ConfigHealthRecord>& rows, const char* table_id,
-                              bool history_mode, bool telegram_mode, const char* empty_msg, float table_height) {
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
-        ImGui::BeginChild((std::string(table_id) + "_panel").c_str(), ImVec2(0, 0), true);
-        ImGui::TextColored(telegram_mode ? COL_AMBER : COL_ACCENT, "%s", title);
-        ImGui::SameLine(0, 8*dpi_scale_);
-        ImGui::TextColored(COL_DIM, "%d", (int)rows.size());
-        ImGui::SameLine(0, 12*dpi_scale_);
-        if (ImGui::SmallButton((std::string("Copy All##") + table_id).c_str())) {
-            copy_records(rows, empty_msg, "Copied ");
-        }
-        ImGui::Spacing();
-        if (rows.empty()) {
-            ImGui::TextColored(COL_DIM, "%s", empty_msg);
-        } else {
-            render_rows(table_id, rows, history_mode, telegram_mode, table_height);
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-    };
-
-    if (ImGui::BeginTable("##home_top_panels", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(0, 0))) {
-        ImGui::TableSetupColumn("##left", ImGuiTableColumnFlags_WidthStretch, 1.35f);
-        ImGui::TableSetupColumn("##right", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableNextRow();
-
-        ImGui::TableNextColumn();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
-        ImGui::BeginChild("##home_hero_left", ImVec2(0, 188*dpi_scale_), true);
-        ImGui::TextColored(COL_ACCENT, "huntercensor");
-        ImGui::TextColored(COL_TEXT, "Continuous sing-box scanning for real Telegram reachability");
-        ImGui::Spacing();
-        ImGui::TextWrapped("This dashboard keeps the native workflow focused: discover configs, keep local mixed ports alive, and separate fully working configs from Telegram-only configs that passed the stricter Telegram/DC/CDN checks.");
-        ImGui::Spacing();
-        if (running) {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.85f,0.22f,0.22f,1.0f));
-            if (ImGui::Button(orchestrator_stopping_.load() ? "Stopping..." : "Stop Scan", {160*dpi_scale_, 36*dpi_scale_})) RequestStopHunter();
-            ImGui::PopStyleColor(2);
-        } else {
-            ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
-            ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.18f,0.72f,0.36f,1.0f));
-            if (ImGui::Button("Start Scan", {160*dpi_scale_, 36*dpi_scale_})) StartHunter();
-            ImGui::PopStyleColor(2);
-        }
-        ImGui::SameLine(0, 8*dpi_scale_);
-        if (ImGui::Button("Open Configs", {140*dpi_scale_, 36*dpi_scale_})) page_ = Page::Configs;
-        ImGui::SameLine(0, 8*dpi_scale_);
-        if (ImGui::Button("Censorship", {126*dpi_scale_, 36*dpi_scale_})) page_ = Page::Censorship;
-        ImGui::Spacing();
-        ImGui::TextColored(scan_col, running ? "● Scan activity: ACTIVE" : "● Scan activity: IDLE");
-        ImGui::SameLine(0, 10*dpi_scale_);
-        ImGui::TextColored(COL_DIM, "Cycles %d  Pending %d  Avg %.0f ms", s.cycle_count, s.db_untested, s.db_avg_latency);
-        ImGui::Spacing();
-        ImGui::TextColored(COL_DIM, "Database coverage");
-        ImGui::ProgressBar(tested_ratio, ImVec2(-1, 8*dpi_scale_));
-        ImGui::TextColored(COL_DIM, "Healthy visibility");
-        ImGui::ProgressBar(alive_ratio, ImVec2(-1, 8*dpi_scale_));
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-
-        ImGui::TableNextColumn();
-        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.09f, 0.10f, 0.14f, 1.0f));
-        ImGui::BeginChild("##home_hero_right", ImVec2(0, 188*dpi_scale_), true);
-        ImGui::TextColored(COL_CYAN, "Runtime Overview");
-        ImGui::Spacing();
-        info_row("Mixed ports", std::to_string(active_ports), active_ports > 0 ? COL_TEXT : COL_DIM);
-        info_row("Ready ports", std::to_string(ready_ports), ready_ports > 0 ? COL_GREEN : COL_DIM);
-        info_row("TG live ports", std::to_string(active_tg_ports), active_tg_ports > 0 ? COL_AMBER : COL_DIM);
-        info_row("Busy ports", std::to_string(busy_ports), busy_ports > 0 ? COL_CYAN : COL_DIM);
-        info_row("Traffic", fmt_rate(total_live_kbps), total_live_kbps > 0.05 ? COL_CYAN : COL_DIM);
-        info_row("Configs in DB", fmt_compact_int(s.db_total), COL_TEXT);
-        ImGui::Spacing();
-        ImGui::TextColored(COL_DIM, "Provision readiness");
-        ImGui::ProgressBar(live_ratio, ImVec2(-1, 10*dpi_scale_));
-        ImGui::Spacing();
-        if (!s.provisioned_ports.empty()) {
-            int shown = 0;
-            for (const auto& slot : s.provisioned_ports) {
-                if (slot.pid <= 0 || shown >= 3) continue;
-                auto it = activity_by_port.find(slot.port);
-                const double rate = it != activity_by_port.end() ? it->second.total_kbps : 0.0;
-                const bool is_tg = telegram_only_uris.find(slot.uri) != telegram_only_uris.end();
-                ImGui::TextColored(is_tg ? COL_AMBER : COL_GREEN, "%s  127.0.0.1:%d", is_tg ? "TG" : "FULL", slot.port);
-                ImGui::SameLine(0, 10*dpi_scale_);
-                ImGui::TextColored(rate > 0.05 ? COL_CYAN : COL_DIM, "%s", rate > 0.05 ? fmt_rate(rate).c_str() : "idle");
-                shown++;
-            }
-        } else {
-            ImGui::TextColored(COL_DIM, "No live local ports yet.");
-        }
-        ImGui::EndChild();
-        ImGui::PopStyleColor();
-        ImGui::EndTable();
-    }
-
-    ImGui::Spacing();
-    if (ImGui::BeginTable("##home_stat_panels", 5, ImGuiTableFlags_SizingStretchSame, ImVec2(0, 0))) {
-        ImGui::TableNextRow();
-        ImGui::TableNextColumn(); stat_panel("##stat_status", "Scanner", running ? "Running" : "Stopped", running ? "Background cycle is active" : "Waiting for start", running ? COL_GREEN : COL_RED);
-        ImGui::TableNextColumn(); stat_panel("##stat_full", "Fully Working", std::to_string((int)s.healthy_records.size()), "Ready for general use", COL_GREEN);
-        ImGui::TableNextColumn(); stat_panel("##stat_tg", "Telegram-Only", std::to_string((int)s.telegram_only_records.size()), "Passed stricter Telegram checks", COL_AMBER);
-        ImGui::TableNextColumn(); stat_panel("##stat_ports", "Local Mixed Ports", std::to_string(ready_ports), std::to_string(active_tg_ports) + " Telegram-focused", COL_CYAN);
-        ImGui::TableNextColumn(); stat_panel("##stat_traffic", "Realtime Traffic", fmt_rate(total_live_kbps), std::to_string(busy_ports) + " busy ports", total_live_kbps > 0.05 ? COL_CYAN : COL_DIM);
-        ImGui::EndTable();
-    }
-
-    ImGui::Spacing();
+    // ═══ HERO BAR: Status + Quick Actions ═══
     ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
-    ImGui::BeginChild("##home_ports_panel", ImVec2(0, 250*dpi_scale_), true);
-    ImGui::TextColored(COL_ACCENT, "Live Proxy Activity Board");
-    ImGui::SameLine(0, 10*dpi_scale_);
-    ImGui::TextColored(COL_DIM, "%d ready / %d total", ready_ports, active_ports);
+    ImGui::BeginChild("##hero_bar", ImVec2(0, 56*dpi_scale_), true, ImGuiWindowFlags_NoScrollbar);
+    
+    // Left: Status indicator
+    const ImVec4 status_col = running ? (blink_on ? COL_GREEN : COL_DIM) : COL_RED;
+    ImGui::TextColored(status_col, running ? "RUNNING" : "STOPPED");
+    ImGui::SameLine(0, 12*dpi_scale_);
+    ImGui::TextColored(COL_DIM, "|");
+    ImGui::SameLine(0, 12*dpi_scale_);
+    stat_card("ports", std::to_string(ready_ports).c_str(), ready_ports > 0 ? COL_CYAN : COL_DIM);
+    ImGui::SameLine(0, 16*dpi_scale_);
+    stat_card("traffic", fmt_rate(total_live_kbps).c_str(), total_live_kbps > 0.05 ? COL_GREEN : COL_DIM);
+    ImGui::SameLine(0, 16*dpi_scale_);
+    stat_card("configs", std::to_string(s.db_alive).c_str(), s.db_alive > 0 ? COL_TEXT : COL_DIM);
+    
+    // Right: Action buttons
+    float btn_y = ImGui::GetCursorPosY();
+    ImGui::SetCursorPosX(ImGui::GetContentRegionMax().x - (running ? 280 : 180)*dpi_scale_);
+    if (running) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.70f,0.18f,0.18f,1.0f));
+        if (ImGui::Button("Stop", ImVec2(80*dpi_scale_, 32*dpi_scale_))) RequestStopHunter();
+        ImGui::PopStyleColor();
+    } else {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.14f,0.62f,0.30f,1.0f));
+        if (ImGui::Button("Start", ImVec2(80*dpi_scale_, 32*dpi_scale_))) StartHunter();
+        ImGui::PopStyleColor();
+    }
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Configs", ImVec2(80*dpi_scale_, 32*dpi_scale_))) page_ = Page::Configs;
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Censorship", ImVec2(90*dpi_scale_, 32*dpi_scale_))) page_ = Page::Censorship;
+    
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
     ImGui::Spacing();
+
+    // ═══ LIVE PROXY TABLE ═══
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+    ImGui::BeginChild("##proxy_table", ImVec2(0, 180*dpi_scale_), true);
+    
+    ImGui::TextColored(COL_ACCENT, "Local Proxies");
+    ImGui::SameLine(0, 10*dpi_scale_);
+    ImGui::TextColored(COL_DIM, "%d ready / %d active", ready_ports, active_ports);
+    
     if (s.provisioned_ports.empty()) {
-        ImGui::TextColored(COL_DIM, "No local sing-box mixed ports are provisioned yet.");
-    } else if (ImGui::BeginTable("##home_ports", 8,
-        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY,
-        ImVec2(0, 200*dpi_scale_))) {
-        ImGui::TableSetupColumn("Port", ImGuiTableColumnFlags_WidthFixed, 78*dpi_scale_);
-        ImGui::TableSetupColumn("Lane", ImGuiTableColumnFlags_WidthFixed, 62*dpi_scale_);
-        ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 88*dpi_scale_);
-        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 96*dpi_scale_);
-        ImGui::TableSetupColumn("Total", ImGuiTableColumnFlags_WidthFixed, 102*dpi_scale_);
-        ImGui::TableSetupColumn("RX/TX", ImGuiTableColumnFlags_WidthFixed, 132*dpi_scale_);
-        ImGui::TableSetupColumn("Conn", ImGuiTableColumnFlags_WidthFixed, 52*dpi_scale_);
-        ImGui::TableSetupColumn("URI");
+        ImGui::TextColored(COL_DIM, "No local proxies provisioned. Start scan to provision ports.");
+    } else if (ImGui::BeginTable("##home_ports", 6,
+        ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_SizingStretchProp,
+        ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("Port", ImGuiTableColumnFlags_WidthFixed, 100*dpi_scale_);
+        ImGui::TableSetupColumn("Type", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
+        ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
+        ImGui::TableSetupColumn("Speed", ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
+        ImGui::TableSetupColumn("Conn", ImGuiTableColumnFlags_WidthFixed, 60*dpi_scale_);
+        ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
+        
         for (const auto& slot : s.provisioned_ports) {
-            ImGui::PushID((std::string("homeport") + std::to_string(slot.port)).c_str());
+            if (slot.pid <= 0) continue;
             ImGui::TableNextRow();
-            auto sample_it = activity_by_port.find(slot.port);
-            const bool has_activity = sample_it != activity_by_port.end();
-            const bool is_tg = telegram_only_uris.find(slot.uri) != telegram_only_uris.end();
             ImGui::TableNextColumn();
             ImGui::Text("127.0.0.1:%d", slot.port);
+            
             ImGui::TableNextColumn();
+            bool is_tg = telegram_only_uris.find(slot.uri) != telegram_only_uris.end();
             ImGui::TextColored(is_tg ? COL_AMBER : COL_GREEN, "%s", is_tg ? "TG" : "FULL");
+            
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(slot.engine_used.empty() ? "-" : slot.engine_used.c_str());
+            if (slot.alive && slot.socks_ready && slot.http_ready) 
+                ImGui::TextColored(COL_GREEN, "READY");
+            else if (slot.tcp_alive) 
+                ImGui::TextColored(COL_YELLOW, "BOOT");
+            else 
+                ImGui::TextColored(COL_RED, "DOWN");
+            
             ImGui::TableNextColumn();
-            if (slot.alive && slot.socks_ready && slot.http_ready) ImGui::TextColored(COL_GREEN, "MIXED READY");
-            else if (slot.tcp_alive) ImGui::TextColored(COL_YELLOW, "BOOTING");
-            else ImGui::TextColored(COL_RED, "DOWN");
+            auto it = activity_by_port.find(slot.port);
+            double rate = it != activity_by_port.end() ? it->second.total_kbps : 0.0;
+            ImGui::TextColored(rate > 0.05 ? COL_CYAN : COL_DIM, "%s", rate > 0.05 ? fmt_rate(rate).c_str() : "-");
+            
             ImGui::TableNextColumn();
-            if (has_activity && sample_it->second.total_kbps > 0.05) ImGui::TextColored(COL_CYAN, "%s", fmt_rate(sample_it->second.total_kbps).c_str());
-            else ImGui::TextColored(COL_DIM, "idle");
+            int conn = it != activity_by_port.end() ? it->second.established_connections : 0;
+            ImGui::TextColored(conn > 0 ? COL_TEXT : COL_DIM, "%d", conn);
+            
             ImGui::TableNextColumn();
-            if (has_activity) ImGui::TextColored(COL_DIM, "%s / %s", fmt_rate(sample_it->second.rx_kbps).c_str(), fmt_rate(sample_it->second.tx_kbps).c_str());
-            else ImGui::TextColored(COL_DIM, "- / -");
-            ImGui::TableNextColumn();
-            if (has_activity) ImGui::Text("%d", sample_it->second.established_connections);
-            else ImGui::TextUnformatted("0");
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(Trim(slot.uri, 180).c_str());
-            ImGui::PopID();
+            ImGui::TextColored(COL_DIM, "%s", slot.engine_used.empty() ? "-" : slot.engine_used.c_str());
         }
         ImGui::EndTable();
     }
     ImGui::EndChild();
     ImGui::PopStyleColor();
 
-    std::vector<ConfigHealthRecord> history_rows = s.all_records;
-    if (history_rows.size() > 12) history_rows.resize(12);
-
     ImGui::Spacing();
-    if (ImGui::BeginTable("##home_sections", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(0, 0))) {
+
+    // ═══ CONFIGS SUMMARY ═══
+    if (ImGui::BeginTable("##configs_summary", 3, ImGuiTableFlags_SizingStretchProp, ImVec2(0, 0))) {
         ImGui::TableSetupColumn("##full", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableSetupColumn("##tg", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+        ImGui::TableSetupColumn("##history", ImGuiTableColumnFlags_WidthStretch, 1.0f);
         ImGui::TableNextRow();
+        
+        // Fully Working
         ImGui::TableNextColumn();
-        render_section("Fully Working", s.healthy_records, "##home_full", false, false, "No fully working configs yet.", 220.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+        ImGui::BeginChild("##full_panel", ImVec2(0, 120*dpi_scale_), true);
+        ImGui::TextColored(COL_GREEN, "FULL");
+        ImGui::SameLine();
+        ImGui::TextColored(COL_DIM, "%d", (int)s.healthy_records.size());
+        ImGui::Separator();
+        if (s.healthy_records.empty()) {
+            ImGui::TextColored(COL_DIM, "No fully working configs yet.");
+        } else {
+            for (size_t i = 0; i < std::min(s.healthy_records.size(), size_t(3)); i++) {
+                const auto& r = s.healthy_records[i];
+                ImGui::TextColored(COL_DIM, "%.0fms", r.latency_ms);
+                ImGui::SameLine(60*dpi_scale_);
+                ImGui::TextUnformatted(Trim(r.uri, 45).c_str());
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        
+        // Telegram-Only
         ImGui::TableNextColumn();
-        render_section("Telegram-Only", s.telegram_only_records, "##home_tg", false, true, "No Telegram-only configs passed the stricter checks yet.", 220.0f);
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+        ImGui::BeginChild("##tg_panel", ImVec2(0, 120*dpi_scale_), true);
+        ImGui::TextColored(COL_AMBER, "TELEGRAM");
+        ImGui::SameLine();
+        ImGui::TextColored(COL_DIM, "%d", (int)s.telegram_only_records.size());
+        ImGui::Separator();
+        if (s.telegram_only_records.empty()) {
+            ImGui::TextColored(COL_DIM, "No Telegram-only configs yet.");
+        } else {
+            for (size_t i = 0; i < std::min(s.telegram_only_records.size(), size_t(3)); i++) {
+                const auto& r = s.telegram_only_records[i];
+                ImGui::TextColored(COL_DIM, "%.0fms", r.latency_ms);
+                ImGui::SameLine(60*dpi_scale_);
+                ImGui::TextUnformatted(Trim(r.uri, 45).c_str());
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        
+        // Recent History
+        ImGui::TableNextColumn();
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+        ImGui::BeginChild("##history_panel", ImVec2(0, 120*dpi_scale_), true);
+        ImGui::TextColored(COL_TEXT, "RECENT");
+        ImGui::SameLine();
+        ImGui::TextColored(COL_DIM, "%d", (int)std::min(s.all_records.size(), size_t(10)));
+        ImGui::Separator();
+        if (s.all_records.empty()) {
+            ImGui::TextColored(COL_DIM, "No recent activity.");
+        } else {
+            for (size_t i = 0; i < std::min(s.all_records.size(), size_t(3)); i++) {
+                const auto& r = s.all_records[i];
+                if (!r.alive) ImGui::TextColored(COL_RED, "OFF");
+                else if (r.telegram_only) ImGui::TextColored(COL_AMBER, "TG");
+                else ImGui::TextColored(COL_GREEN, "OK");
+                ImGui::SameLine(40*dpi_scale_);
+                ImGui::TextUnformatted(Trim(r.uri, 45).c_str());
+            }
+        }
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+        
         ImGui::EndTable();
     }
 
+    // ═══ COPY BUTTONS ═══
     ImGui::Spacing();
-    render_section("History", history_rows, "##home_history", true, false, "No history yet.", 220.0f);
+    if (!s.healthy_records.empty() && ImGui::Button("Copy Full", ImVec2(100*dpi_scale_, 0))) {
+        std::vector<std::string> uris;
+        for (const auto& r : s.healthy_records) uris.push_back(r.uri);
+        CopyTextToClipboard(JoinUniqueLinesText(uris));
+        SetToast("Copied full configs", ToastKind::Success);
+    }
+    if (!s.healthy_records.empty()) {
+        ImGui::SameLine(0, 8*dpi_scale_);
+    }
+    if (!s.telegram_only_records.empty() && ImGui::Button("Copy TG", ImVec2(100*dpi_scale_, 0))) {
+        std::vector<std::string> uris;
+        for (const auto& r : s.telegram_only_records) uris.push_back(r.uri);
+        CopyTextToClipboard(JoinUniqueLinesText(uris));
+        SetToast("Copied TG configs", ToastKind::Success);
+    }
 }
 
 void ImGuiApp::DrawQrModal() {
