@@ -186,8 +186,8 @@ static ProxyTestResult chooseBestResult(const std::vector<ProxyTestResult>& resu
 
 ProxyTester::ProxyTester() {
     singbox_path_ = "bin/sing-box.exe";
-    xray_path_.clear();
-    mihomo_path_.clear();
+    xray_path_ = "bin/xray.exe";
+    mihomo_path_ = "bin/mihomo.exe";
 }
 
 ProxyTester::~ProxyTester() {}
@@ -944,16 +944,11 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
     ProxyTestResult result;
     result.uri = config_uri;
     
-    // Use xray.exe from bin folder
-    std::string xray_bin = "D:\\projects\\v2ray\\pythonProject1\\hunter\\bin\\xray.exe";
-    if (!utils::fileExists(xray_bin)) {
-        result.error_message = "xray.exe not found at " + xray_bin;
+    // Check if xray.exe exists at standard path
+    if (!utils::fileExists(xray_path_)) {
+        result.error_message = "xray.exe not found at " + xray_path_;
         return result;
     }
-    
-    // Temporarily override xray_path_ for this test
-    std::string original_xray_path = xray_path_;
-    xray_path_ = xray_bin;
     
     try {
         result = testWithXray(config_uri, test_url, timeout_seconds);
@@ -964,8 +959,6 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
         result.error_message = "xray unknown exception";
     }
     
-    // Restore original path
-    xray_path_ = original_xray_path;
     return result;
 }
 
