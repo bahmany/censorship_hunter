@@ -61,10 +61,18 @@ static void EnableDpiAwareness() {
         using SetDpiAwarenessContextFn = DPI_AWARENESS_CONTEXT(WINAPI*)(DPI_AWARENESS_CONTEXT);
         auto set_context = reinterpret_cast<SetDpiAwarenessContextFn>(GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
         if (set_context && set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2)) {
+            AppendUiLog(L"DPI awareness: PerMonitorAwareV2 enabled");
+            return;
+        }
+        // Fallback to PerMonitorAware (Windows 8.1+)
+        if (set_context && set_context(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE)) {
+            AppendUiLog(L"DPI awareness: PerMonitorAware enabled");
             return;
         }
     }
+    // Final fallback: Windows 7 compatible DPI awareness
     SetProcessDPIAware();
+    AppendUiLog(L"DPI awareness: SetProcessDPIAware (Windows 7 compatible)");
 }
 
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLine, int nCmdShow) {
