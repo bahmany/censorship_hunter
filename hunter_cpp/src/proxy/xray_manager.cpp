@@ -158,12 +158,26 @@ void XRayManager::stopAll() {
 bool XRayManager::isProcessAlive(int pid) const {
     if (pid <= 0) return false;
 #ifdef _WIN32
+    // Windows 7+ compatibility: Try LIMITED first (Vista+), fallback to QUERY_INFORMATION
     HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
-    if (!h) return false;
+    if (!h) {
+        // Fallback for older Windows
+        h = OpenProcess(PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);
+    }
+    if (!h) {
+        // Final fallback - at least try SYNCHRONIZE to check if process exists
+        h = OpenProcess(SYNCHRONIZE, FALSE, (DWORD)pid);
+        if (h) {
+            // Process exists but we can't query info - assume alive
+            CloseHandle(h);
+            return true;
+        }
+        return false;
+    }
     DWORD exitCode = 0;
-    GetExitCodeProcess(h, &exitCode);
+    BOOL ok = GetExitCodeProcess(h, &exitCode);
     CloseHandle(h);
-    return exitCode == STILL_ACTIVE;
+    return ok && exitCode == STILL_ACTIVE;
 #else
     return kill(pid, 0) == 0;
 #endif
