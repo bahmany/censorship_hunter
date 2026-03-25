@@ -872,18 +872,56 @@ int ImGuiApp::Run() {
 // ── D3D9 boilerplate ──
 bool ImGuiApp::CreateDeviceD3D() {
     d3d_ = Direct3DCreate9(D3D_SDK_VERSION);
-    if (!d3d_) return false;
+    if (!d3d_) {
+        AppendLog("[ERR] Direct3DCreate9 failed - DirectX 9 not available");
+        return false;
+    }
+    
+    // Check for hardware vertex processing support
+    D3DCAPS9 caps;
+    ZeroMemory(&caps, sizeof(caps));
+    HRESULT caps_hr = d3d_->GetDeviceCaps(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, &caps);
+    bool hardware_vp = false;
+    if (SUCCEEDED(caps_hr)) {
+        hardware_vp = (caps.DevCaps & D3DDEVCAPS_HWTRANSFORMANDLIGHT) != 0;
+    }
+    
     ZeroMemory(&d3dpp_, sizeof(d3dpp_));
-    d3dpp_.Windowed = TRUE; d3dpp_.SwapEffect = D3DSWAPEFFECT_DISCARD;
+    d3dpp_.Windowed = TRUE; 
+    d3dpp_.SwapEffect = D3DSWAPEFFECT_DISCARD;
     d3dpp_.BackBufferFormat = D3DFMT_UNKNOWN;
-    d3dpp_.EnableAutoDepthStencil = TRUE; d3dpp_.AutoDepthStencilFormat = D3DFMT_D16;
+    d3dpp_.EnableAutoDepthStencil = TRUE; 
+    d3dpp_.AutoDepthStencilFormat = D3DFMT_D16;
     d3dpp_.PresentationInterval = D3DPRESENT_INTERVAL_ONE;
+    
+    // Try hardware vertex processing first if available
+    DWORD vp_flags = hardware_vp ? D3DCREATE_HARDWARE_VERTEXPROCESSING : D3DCREATE_SOFTWARE_VERTEXPROCESSING;
     HRESULT hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd_,
-        D3DCREATE_HARDWARE_VERTEXPROCESSING, &d3dpp_, &d3d_device_);
-    if (FAILED(hr))
+        vp_flags, &d3dpp_, &d3d_device_);
+    
+    // If hardware VP failed, try software VP
+    if (FAILED(hr)) {
+        AppendLog("[UI] D3D9 hardware VP failed, trying software VP...");
         hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_HAL, hwnd_,
             D3DCREATE_SOFTWARE_VERTEXPROCESSING, &d3dpp_, &d3d_device_);
-    return SUCCEEDED(hr);
+    }
+    
+    // If HAL failed, try REF device (very slow but works on any Windows)
+    if (FAILED(hr)) {
+        AppendLog("[UI] D3D9 HAL device failed, trying REF device...");
+        hr = d3d_->CreateDevice(D3DADAPTER_DEFAULT, D3DDEVTYPE_REF, hwnd_,
+            D3DCREATE_SOFTWARE_VERTEXPROCESSING, &d3dpp_, &d3d_device_);
+    }
+    
+    if (FAILED(hr)) {
+        char buf[128];
+        snprintf(buf, sizeof(buf), "[ERR] D3D9 device creation failed: 0x%08X", static_cast<unsigned>(hr));
+        AppendLog(buf);
+        return false;
+    }
+    
+    AppendLog("[UI] D3D9 device created successfully");
+    return true;
 }
 
 void ImGuiApp::CleanupDeviceD3D() {
