@@ -1050,6 +1050,10 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
     sa.bInheritHandle = TRUE;
     HANDLE hOutFile = CreateFileA(log_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ,
                                   &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (hOutFile == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        TLOG("[BatchTest] WARN - CreateFileA failed for log (error=" << err << ")");
+    }
 
     STARTUPINFOA si = {};
     si.cb = sizeof(si);
@@ -1069,7 +1073,8 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
 
     if (!CreateProcessA(NULL, cmd_buf, NULL, NULL, TRUE,
                         CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-        TLOG("[BatchTest] FAIL - CreateProcess failed");
+        DWORD err = GetLastError();
+        TLOG("[BatchTest] FAIL - CreateProcess failed (error=" << err << ")");
         if (hOutFile != INVALID_HANDLE_VALUE) CloseHandle(hOutFile);
         std::remove(config_path.c_str());
         std::remove(log_path.c_str());
