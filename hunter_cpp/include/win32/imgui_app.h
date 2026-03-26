@@ -125,6 +125,7 @@ private:
     void ApplyAdvancedSettings();
     void ImportConfigsFromFile();
     void ExportConfigsToFile();
+    void DownloadConfigsFromSources();
     void ApplyDiscoveryToEdgeInputs(const security::DpiEvasionOrchestrator::NetworkDiscoveryResult& result);
 
     // ── Task tracking for real-time UI feedback ──
@@ -261,6 +262,7 @@ private:
     std::array<char, 8192> telegram_targets_{};
     std::array<char, 16384> github_urls_{};
     std::array<char, 16384> manual_configs_{};
+    std::array<char, 256> config_download_proxy_{};  // Proxy for downloading configs (e.g., 127.0.0.1:11808)
 
     // ── Frame timing (60 fps cap) ──
     std::chrono::steady_clock::time_point last_frame_time_{};

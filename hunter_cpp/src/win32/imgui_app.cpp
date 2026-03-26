@@ -959,6 +959,7 @@ void ImGuiApp::SyncBuffersFromConfig() {
     CopyBuf(JoinUniqueLinesText(config_.telegramTargets()), telegram_targets_.data(), telegram_targets_.size());
     CopyBuf(JoinUniqueLinesText(config_.githubUrls()), github_urls_.data(), github_urls_.size());
     CopyBuf(config_.getString("suggested_iface",""), edge_iface_.data(), edge_iface_.size());
+    CopyBuf(config_.getString("config_download_proxy",""), config_download_proxy_.data(), config_download_proxy_.size());
     snapshot_config_limit_ = config_limit_;
     CopyBuf("runtime/HUNTER_config_db_export.txt", export_path_.data(), export_path_.size());
 }
@@ -1313,6 +1314,7 @@ void ImGuiApp::ApplyAdvancedSettings() {
     config_.set("telegram_timeout_ms", telegram_timeout_ms_);
     config_.set("targets", BuildJsonStringArray(clean_targets));
     config_.setGithubUrls(clean_github_urls);
+    config_.set("config_download_proxy", std::string(config_download_proxy_.data()));
     SaveConfigToDisk();
 
     RunCommandAsync(cmd.str());
@@ -1337,6 +1339,43 @@ void ImGuiApp::ExportConfigsToFile() {
         CopyBuf(path, export_path_.data(), export_path_.size());
     }
     RunCommandAsync("{\"command\":\"export_config_db\",\"path\":\"" + JsonEscape(path) + "\"}");
+}
+
+void ImGuiApp::DownloadConfigsFromSources() {
+    const auto source_lines = SplitLines(github_urls_.data());
+    if (source_lines.empty()) {
+        SetToast("No source URLs configured", ToastKind::Warning);
+        AppendLog("[UI] DownloadConfigsFromSources: no source URLs available");
+        return;
+    }
+    
+    const std::string proxy = std::string(config_download_proxy_.data());
+    if (!proxy.empty()) {
+        AppendLog("[UI] DownloadConfigsFromSources: using proxy " + proxy);
+    } else {
+        AppendLog("[UI] DownloadConfigsFromSources: no proxy configured");
+    }
+    
+    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_lines.size()) + " sources");
+    SetToast("Downloading configs...", ToastKind::Info);
+    
+    // Build JSON command with sources and proxy
+    std::ostringstream cmd;
+    cmd << "{\"command\":\"download_configs\"";
+    cmd << ",\"sources\":[";
+    for (size_t i = 0; i < source_lines.size(); ++i) {
+        if (!source_lines[i].empty()) {
+            if (i > 0) cmd << ",";
+            cmd << "\"" << JsonEscape(source_lines[i]) << "\"";
+        }
+    }
+    cmd << "]";
+    if (!proxy.empty()) {
+        cmd << ",\"proxy\":\"" << JsonEscape(proxy) << "\"";
+    }
+    cmd << "}";
+    
+    RunCommandAsync(cmd.str());
 }
 
 std::string ImGuiApp::RunRealtimeCommand(const std::string& json) {
@@ -2599,6 +2638,25 @@ void ImGuiApp::DrawAdvancedPage() {
             ImGui::TextColored(COL_DIM, "Unique sources: %d", (int)source_lines.size());
             ImGui::InputTextMultiline("GitHub URLs", github_urls_.data(), github_urls_.size(),
                 ImVec2(-1, 200*dpi_scale_));
+            
+            // Proxy server setting for config downloads
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(COL_ACCENT, "Proxy for Downloads");
+            ImGui::TextColored(COL_DIM, "Set proxy to download configs through (e.g., 127.0.0.1:11808)");
+            const float pw = 240*dpi_scale_;
+            ImGui::SetNextItemWidth(pw); 
+            ImGui::InputText("Proxy server", config_download_proxy_.data(), config_download_proxy_.size());
+            
+            // Download configs button
+            ImGui::Spacing();
+            if (ImGui::Button("Download Configs", ImVec2(140*dpi_scale_, 0))) {
+                DownloadConfigsFromSources();
+            }
+            ImGui::SameLine();
+            ImGui::TextColored(COL_DIM, "Fetch configs from all source URLs");
+            
+            ImGui::Spacing();
             if (ImGui::Button("Normalize Sources")) {
                 CopyBuf(JoinUniqueLinesText(source_lines), github_urls_.data(), github_urls_.size());
             }
