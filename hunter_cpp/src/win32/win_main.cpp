@@ -10,7 +10,12 @@ static void AppendUiLog(const wchar_t* line) {
     lstrcatW(path, L"huntercensor_ui.log");
 
     HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return;
+    if (h == INVALID_HANDLE_VALUE) {
+        DWORD err = GetLastError();
+        // Silently fail for logging - can't log a logging failure
+        (void)err;
+        return;
+    }
 
     SYSTEMTIME st;
     GetLocalTime(&st);
@@ -32,15 +37,26 @@ static bool PathExists(const std::wstring& path) {
 static void SetCwdToExeDir() {
     wchar_t path[MAX_PATH];
     DWORD n = GetModuleFileNameW(nullptr, path, MAX_PATH);
-    if (n == 0 || n >= MAX_PATH) return;
+    if (n == 0 || n >= MAX_PATH) {
+        DWORD err = GetLastError();
+        AppendUiLog((L"SetCwdToExeDir: GetModuleFileNameW failed, error=" + std::to_wstring(err)).c_str());
+        return;
+    }
     wchar_t* last = wcsrchr(path, L'\\');
-    if (!last) return;
+    if (!last) {
+        AppendUiLog(L"SetCwdToExeDir: No backslash in module path");
+        return;
+    }
     *last = 0;
 
     std::wstring probe = path;
     for (int i = 0; i < 5; ++i) {
         if (PathExists(probe + L"\\bin\\xray.exe")) {
-            SetCurrentDirectoryW(probe.c_str());
+            if (!SetCurrentDirectoryW(probe.c_str())) {
+                DWORD err = GetLastError();
+                AppendUiLog((L"SetCwdToExeDir: SetCurrentDirectoryW failed, error=" + std::to_wstring(err)).c_str());
+                return;
+            }
             CreateDirectoryW(L"runtime", nullptr);
             return;
         }
@@ -49,7 +65,11 @@ static void SetCwdToExeDir() {
         probe.resize(sep);
     }
 
-    SetCurrentDirectoryW(path);
+    if (!SetCurrentDirectoryW(path)) {
+        DWORD err = GetLastError();
+        AppendUiLog((L"SetCwdToExeDir: SetCurrentDirectoryW (fallback) failed, error=" + std::to_wstring(err)).c_str());
+        return;
+    }
 
     // Ensure local runtime folder exists for relative paths (runtime/...) when launched from bin
     CreateDirectoryW(L"runtime", nullptr);
