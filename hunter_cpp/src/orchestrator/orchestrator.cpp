@@ -956,6 +956,7 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
         else if (json_line.find("\"detect_censorship\"") != std::string::npos) command = "detect_censorship";
         else if (json_line.find("\"update_runtime_settings\"") != std::string::npos) command = "update_runtime_settings";
         else if (json_line.find("\"edge_router_bypass\"") != std::string::npos) command = "edge_router_bypass";
+        else if (json_line.find("\"download_configs\"") != std::string::npos) command = "download_configs";
         else if (json_line.find("\"stop\"") != std::string::npos) command = "stop";
         else if (json_line.find("\"get_status\"") != std::string::npos) command = "get_status";
         else if (json_line.find("\"ping\"") != std::string::npos) command = "ping";
@@ -1422,6 +1423,53 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
             message = "status";
         } else if (command == "ping") {
             message = "pong";
+        } else if (command == "download_configs") {
+            // Extract sources array and proxy setting
+            std::vector<std::string> sources;
+            std::string proxy = extractString("proxy");
+            
+            // Parse sources array from JSON
+            size_t sources_start = json_line.find("\"sources\":[");
+            if (sources_start != std::string::npos) {
+                sources_start = json_line.find('[', sources_start) + 1;
+                size_t sources_end = json_line.find(']', sources_start);
+                if (sources_end != std::string::npos) {
+                    std::string sources_str = json_line.substr(sources_start, sources_end - sources_start);
+                    std::istringstream ss(sources_str);
+                    std::string source;
+                    while (std::getline(ss, source, ',')) {
+                        source = utils::trim(source);
+                        if (source.size() >= 2 && source.front() == '"' && source.back() == '"') {
+                            source = source.substr(1, source.size() - 2); // Remove quotes
+                        }
+                        if (!source.empty()) {
+                            sources.push_back(source);
+                        }
+                    }
+                }
+            }
+            
+            if (sources.empty()) {
+                ok = false;
+                message = "no_sources_provided";
+            } else {
+                // TODO: Implement actual config download logic here
+                // For now, just acknowledge the request
+                std::cout << "[Orchestrator] download_configs: processing " << sources.size() << " sources" << std::endl;
+                if (!proxy.empty()) {
+                    std::cout << "[Orchestrator] download_configs: using proxy " << proxy << std::endl;
+                }
+                
+                // Placeholder implementation - this would need actual HTTP download logic
+                message = "download_started";
+                
+                // Build response with sources count
+                utils::JsonBuilder dj;
+                dj.add("sources_count", (int)sources.size())
+                  .add("proxy", proxy)
+                  .add("status", "started");
+                data_json = dj.build();
+            }
         } else {
             ok = false;
             message = "unknown_command";
