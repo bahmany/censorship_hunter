@@ -35,7 +35,7 @@ DisableWelcomePage=no
 AllowCancelDuringInstall=yes
 CloseApplications=force
 RestartApplications=no
-MinVersion=10.0
+MinVersion=6.1
 VersionInfoVersion={#MyAppVersion}
 VersionInfoCompany={#MyAppPublisher}
 VersionInfoDescription=huntercensor - Anti-Censorship Discovery Tool
@@ -106,6 +106,16 @@ Type: filesandordirs; Name: "{app}\data"
 Type: filesandordirs; Name: "{app}\config"
 
 [Code]
+// Windows version check for compatibility
+function IsWindows7OrLater(): Boolean;
+var
+  Version: TWindowsVersion;
+begin
+  GetWindowsVersionEx(Version);
+  // Windows 7 is version 6.1 (major=6, minor=1)
+  Result := (Version.Major > 6) or ((Version.Major = 6) and (Version.Minor >= 1));
+end;
+
 // Kill all Hunter-related processes before installation (for updates)
 procedure KillRunningProcesses();
 var
@@ -121,8 +131,24 @@ begin
 end;
 
 function InitializeSetup(): Boolean;
+var
+  Version: TWindowsVersion;
 begin
   Result := True;
+  
+  // Check Windows version and log it
+  GetWindowsVersionEx(Version);
+  Log('Windows version detected: ' + IntToStr(Version.Major) + '.' + IntToStr(Version.Minor) + ' (Build ' + IntToStr(Version.Build) + ')');
+  
+  if not IsWindows7OrLater() then
+  begin
+    MsgBox('This application requires Windows 7 or later.' + #13#10 + 
+           'Your current Windows version is not supported.', 
+           mbCriticalError, MB_OK);
+    Result := False;
+    Exit;
+  end;
+  
   // Kill any running instances before starting setup
   KillRunningProcesses();
 end;
