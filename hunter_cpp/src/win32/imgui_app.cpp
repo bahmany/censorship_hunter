@@ -2695,6 +2695,15 @@ void ImGuiApp::DrawAdvancedPage() {
             ImGui::TextColored(COL_ACCENT, "Download Sources Management");
             ImGui::TextColored(COL_DIM, "Total sources: %d", (int)source_lines.size());
             
+            // Debug: Show parsing details
+            if (source_lines.size() < 20) {
+                ImGui::TextColored(COL_YELLOW, "Debug - Raw buffer length: %zu", strlen(github_urls_.data()));
+                ImGui::TextColored(COL_YELLOW, "Debug - Parsed sources:");
+                for (size_t i = 0; i < std::min(source_lines.size(), size_t(5)); ++i) {
+                    ImGui::TextColored(COL_DIM, "  %zu: %s", i+1, source_lines[i].c_str());
+                }
+            }
+            
             // Sources table with download history
             ImGui::Spacing();
             ImGui::Separator();
@@ -2889,8 +2898,15 @@ void ImGuiApp::DrawAdvancedPage() {
                     "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt\n"
                     "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub";
                 
+                // Debug: Check what we're actually setting
+                auto test_parse = SplitLines(default_sources.c_str());
+                AppendLog("[UI] Load Default Sources: setting " + std::to_string(test_parse.size()) + " URLs");
+                for (size_t i = 0; i < std::min(test_parse.size(), size_t(3)); ++i) {
+                    AppendLog("[UI] Source " + std::to_string(i+1) + ": " + test_parse[i]);
+                }
+                
                 CopyBuf(default_sources, github_urls_.data(), github_urls_.size());
-                auto source_count = SplitLines(default_sources.c_str()).size();
+                auto source_count = SplitLines(github_urls_.data()).size();
                 SetToast("Loaded " + std::to_string(source_count) + " default sources", ToastKind::Success);
                 AppendLog("[UI] Load Default Sources: loaded " + std::to_string(source_count) + " URLs");
             }

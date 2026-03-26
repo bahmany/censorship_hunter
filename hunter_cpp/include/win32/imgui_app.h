@@ -262,7 +262,7 @@ private:
     std::array<char, 256> telegram_api_hash_{};
     std::array<char, 256> telegram_phone_{};
     std::array<char, 8192> telegram_targets_{};
-    std::array<char, 16384> github_urls_{};
+    std::array<char, 32768> github_urls_{};  // Increased from 16384 to 32768 for 20 sources
     std::array<char, 16384> manual_configs_{};
     std::array<char, 256> config_download_proxy_{};  // Proxy for downloading configs (e.g., 127.0.0.1:11808)
 
