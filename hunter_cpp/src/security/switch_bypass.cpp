@@ -45,6 +45,7 @@ bool SwitchBypassMethods::bypassHuaweiSRv6(const std::string& ip, const std::str
             std::cout << "[OK] Huawei SRv6 route created with metric 35" << std::endl;
             return true;
         }
+        std::cout << "[!] Huawei SRv6 route creation failed (error=" << status << ")" << std::endl;
     }
     return false;
 }
@@ -197,6 +198,7 @@ bool SwitchBypassMethods::bypassCiscoACL(const std::string& ip, const std::strin
             std::cout << "[OK] Cisco ACL bypass route created" << std::endl;
             return true;
         }
+        std::cout << "[!] Cisco ACL bypass route creation failed (error=" << status << ")" << std::endl;
     }
     return false;
 }
@@ -311,6 +313,7 @@ bool SwitchBypassMethods::bypassDoranWhitelist(const std::string& ip, const std:
             std::cout << "[OK] Doran whitelist bypass route created" << std::endl;
             return true;
         }
+        std::cout << "[!] Doran whitelist bypass route creation failed (error=" << status << ")" << std::endl;
     }
     return false;
 }
@@ -401,6 +404,7 @@ bool SwitchBypassMethods::bypassHPMSSClamping(const std::string& ip, const std::
             std::cout << "[OK] HP MSS Clamping bypass route created" << std::endl;
             return true;
         }
+        std::cout << "[!] HP MSS Clamping bypass route creation failed (error=" << status << ")" << std::endl;
     }
     return false;
 }
