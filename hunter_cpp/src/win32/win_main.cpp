@@ -3,6 +3,9 @@
 #include <windows.h>
 #include <string>
 
+// Global mutex handle for single-instance check - kept alive for application lifetime
+static HANDLE g_hSingleInstanceMutex = nullptr;
+
 static void AppendUiLog(const wchar_t* line) {
     wchar_t path[MAX_PATH];
     DWORD n = GetTempPathW(MAX_PATH, path);
@@ -99,6 +102,37 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
     (void)hPrevInstance;
 
     AppendUiLog(L"wWinMain enter");
+
+    // Single-instance check: create named mutex
+    g_hSingleInstanceMutex = CreateMutexW(nullptr, FALSE, L"HunterCensor_SingleInstance_Mutex_v1");
+    if (!g_hSingleInstanceMutex) {
+        DWORD err = GetLastError();
+        AppendUiLog((L"CreateMutex failed, error=" + std::to_wstring(err)).c_str());
+        // Continue anyway - mutex creation failed but we can still run
+    } else if (GetLastError() == ERROR_ALREADY_EXISTS) {
+        AppendUiLog(L"Another instance already running - bringing to front");
+        // Find existing window and bring to front
+        HWND existingWnd = FindWindowW(L"HunterCensorImGuiClass", L"Hunter Censor");
+        if (!existingWnd) {
+            // Try without specific title
+            existingWnd = FindWindowW(L"HunterCensorImGuiClass", nullptr);
+        }
+        if (existingWnd) {
+            // Restore if minimized
+            if (IsIconic(existingWnd)) {
+                ShowWindow(existingWnd, SW_RESTORE);
+            }
+            // Bring to front
+            SetForegroundWindow(existingWnd);
+            FlashWindow(existingWnd, TRUE);
+            AppendUiLog(L"Existing window brought to front");
+        } else {
+            AppendUiLog(L"Could not find existing window");
+        }
+        CloseHandle(g_hSingleInstanceMutex);
+        g_hSingleInstanceMutex = nullptr;
+        return 0; // Exit this instance
+    }
 
     const std::wstring cmd_line = lpCmdLine ? lpCmdLine : L"";
     const bool resume_edge_bypass = cmd_line.find(L"--resume-edge-bypass") != std::wstring::npos;
