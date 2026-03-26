@@ -233,6 +233,10 @@ bool RuntimeEngineManager::isProcessAlive(int pid) const {
     }
     DWORD exitCode = 0;
     BOOL ok = GetExitCodeProcess(h, &exitCode);
+    if (!ok) {
+        DWORD err = GetLastError();
+        std::cerr << "[RuntimeEngineManager] GetExitCodeProcess failed for PID " << pid << " (error=" << err << ")" << std::endl;
+    }
     CloseHandle(h);
     return ok && exitCode == STILL_ACTIVE;
 #else
