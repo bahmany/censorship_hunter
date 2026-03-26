@@ -3712,6 +3712,27 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     int total_sources = static_cast<int>(sources.size());
     int downloaded_count = 0;
     
+    // Test proxy connection if provided
+    if (!proxy.empty()) {
+        std::cout << "[Download] Testing proxy connection: " << proxy << std::endl;
+        std::string proxy_url = "socks5h://" + proxy;
+        
+        // Test with a simple, reliable endpoint
+        std::string test_content = http_client_.get("https://httpbin.org/ip", 5000, proxy_url);
+        if (!test_content.empty()) {
+            std::cout << "[Download] Proxy test successful, response: " << test_content.substr(0, 100) << std::endl;
+        } else {
+            std::cout << "[Download] Proxy test failed, will try direct connection" << std::endl;
+            // Test direct connection as well
+            test_content = http_client_.get("https://httpbin.org/ip", 5000, "");
+            if (!test_content.empty()) {
+                std::cout << "[Download] Direct connection works, response: " << test_content.substr(0, 100) << std::endl;
+            } else {
+                std::cout << "[Download] Both proxy and direct connections failed!" << std::endl;
+            }
+        }
+    }
+    
     // Emit initial progress
     auto emitProgress = [&](const std::string& current_source, float progress, const std::string& status) {
         utils::JsonBuilder dj;
@@ -3727,6 +3748,39 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     };
     
     emitProgress("", 0.0f, "starting");
+    
+    // Test download from one source first
+    if (!sources.empty()) {
+        const std::string& test_source = sources[0];
+        std::cout << "[Download] Testing download from: " << test_source << std::endl;
+        
+        std::string proxy_url;
+        if (!proxy.empty()) {
+            proxy_url = "socks5h://" + proxy;
+        }
+        
+        std::string test_content = http_client_.get(test_source, 15000, proxy_url);
+        if (!test_content.empty()) {
+            std::cout << "[Download] Test download successful, got " << test_content.length() << " bytes" << std::endl;
+            
+            // Count configs in test content
+            int config_count = 0;
+            std::istringstream ss(test_content);
+            std::string line;
+            while (std::getline(ss, line)) {
+                line = utils::trim(line);
+                if (!line.empty() && (line.find("vmess://") == 0 || 
+                                   line.find("vless://") == 0 || 
+                                   line.find("trojan://") == 0 ||
+                                   line.find("ss://") == 0)) {
+                    config_count++;
+                }
+            }
+            std::cout << "[Download] Found " << config_count << " configs in test source" << std::endl;
+        } else {
+            std::cout << "[Download] Test download failed!" << std::endl;
+        }
+    }
     
     for (size_t i = 0; i < sources.size(); ++i) {
         if (stop_requested_.load()) {
@@ -3748,16 +3802,28 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
         
         try {
             // Set proxy if provided
+            std::string proxy_url;
             if (!proxy.empty()) {
-                // TODO: Set proxy in http_client_ - this depends on the actual HttpClient implementation
-                std::cout << "[Download] Using proxy: " << proxy << " for " << source << std::endl;
+                // Convert proxy format (e.g., "127.0.0.1:11808") to SOCKS5 format
+                proxy_url = "socks5h://" + proxy;
+                std::cout << "[Download] Using proxy: " << proxy_url << " for " << source << std::endl;
             }
             
-            // Download content using existing HttpClient
-            content = http_client_.get(source);
+            // Download content using existing HttpClient with proxy support
+            content = http_client_.get(source, 15000, proxy_url);  // 15 second timeout
             success = !content.empty();
             
+            if (!success && !proxy.empty()) {
+                std::cout << "[Download] Failed with proxy, trying direct connection for " << source << std::endl;
+                // Fallback to direct connection if proxy fails
+                content = http_client_.get(source, 15000, "");
+                success = !content.empty();
+            }
+            
             if (success) {
+                std::cout << "[Download] Successfully downloaded " << content.length() 
+                          << " bytes from " << source << std::endl;
+                
                 // Parse and add configs to database
                 std::vector<std::string> new_configs;
                 
@@ -3775,6 +3841,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
                 }
                 
                 configs_found = static_cast<int>(new_configs.size());
+                std::cout << "[Download] Parsed " << configs_found << " config lines from " << source << std::endl;
                 
                 if (!new_configs.empty() && config_db_) {
                     std::set<std::string> config_set(new_configs.begin(), new_configs.end());
@@ -3782,15 +3849,18 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
                     downloaded_count += unique_added;
                     std::cout << "[Download] Added " << unique_added << " unique configs from " << source 
                               << " (found " << configs_found << " total)" << std::endl;
+                } else if (new_configs.empty()) {
+                    std::cout << "[Download] No valid config formats found in " << source << std::endl;
                 }
                 
                 progress = static_cast<float>(i + 1) / total_sources;
                 emitProgress(source, progress, "completed");
                 
             } else {
-                error_msg = "Empty response";
+                error_msg = "Empty response or download failed";
+                std::cout << "[Download] Failed to download from " << source 
+                          << " (proxy: " << (proxy.empty() ? "none" : proxy) << ")" << std::endl;
                 emitProgress(source, progress, "failed");
-                std::cout << "[Download] Failed to download from " << source << std::endl;
             }
             
         } catch (const std::exception& e) {
