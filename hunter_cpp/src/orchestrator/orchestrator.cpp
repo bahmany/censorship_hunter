@@ -1453,22 +1453,30 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                 ok = false;
                 message = "no_sources_provided";
             } else {
-                // TODO: Implement actual config download logic here
-                // For now, just acknowledge the request
+                // Implement actual config download logic with progress tracking
                 std::cout << "[Orchestrator] download_configs: processing " << sources.size() << " sources" << std::endl;
                 if (!proxy.empty()) {
                     std::cout << "[Orchestrator] download_configs: using proxy " << proxy << std::endl;
                 }
                 
-                // Placeholder implementation - this would need actual HTTP download logic
+                // Start async download process
                 message = "download_started";
                 
-                // Build response with sources count
+                // Build response with sources count and initial progress
                 utils::JsonBuilder dj;
                 dj.add("sources_count", (int)sources.size())
                   .add("proxy", proxy)
-                  .add("status", "started");
+                  .add("status", "started")
+                  .add("current_source", "")
+                  .add("progress", 0.0)
+                  .add("downloaded_count", 0)
+                  .add("total_count", (int)sources.size());
                 data_json = dj.build();
+                
+                // Start background download thread
+                std::thread([this, sources, proxy]() {
+                    downloadConfigsAsync(sources, proxy);
+                }).detach();
             }
         } else {
             ok = false;
@@ -3698,6 +3706,98 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
     utils::mkdirRecursive(base);
     std::string status_path = base + "/HUNTER_status.json";
     utils::saveJsonFile(status_path, buildStatusJson(phase, last_tested, last_passed));
+}
+
+void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy) {
+    int total_sources = static_cast<int>(sources.size());
+    int downloaded_count = 0;
+    
+    // Emit initial progress
+    auto emitProgress = [&](const std::string& current_source, float progress, const std::string& status) {
+        utils::JsonBuilder dj;
+        dj.add("type", "download_progress")
+          .add("current_source", current_source)
+          .add("progress", progress)
+          .add("downloaded_count", downloaded_count)
+          .add("total_count", total_sources)
+          .add("status", status)
+          .add("proxy", proxy);
+        
+        std::cout << "##DOWNLOAD_PROGRESS##" << dj.build() << std::endl;
+    };
+    
+    emitProgress("", 0.0f, "starting");
+    
+    for (size_t i = 0; i < sources.size(); ++i) {
+        if (stop_requested_.load()) {
+            emitProgress("", static_cast<float>(downloaded_count) / total_sources, "stopped");
+            return;
+        }
+        
+        const std::string& source = sources[i];
+        float progress = static_cast<float>(i) / total_sources;
+        
+        emitProgress(source, progress, "downloading");
+        
+        // Use existing http_client_ with proxy if provided
+        std::string content;
+        bool success = false;
+        
+        try {
+            // Set proxy if provided
+            if (!proxy.empty()) {
+                // TODO: Set proxy in http_client_ - this depends on the actual HttpClient implementation
+                std::cout << "[Download] Using proxy: " << proxy << " for " << source << std::endl;
+            }
+            
+            // Download content using existing HttpClient
+            content = http_client_.get(source);
+            success = !content.empty();
+            
+            if (success) {
+                // Parse and add configs to database
+                std::vector<std::string> new_configs;
+                
+                // Simple parsing for common config formats
+                std::istringstream ss(content);
+                std::string line;
+                while (std::getline(ss, line)) {
+                    line = utils::trim(line);
+                    if (!line.empty() && (line.find("vmess://") == 0 || 
+                                       line.find("vless://") == 0 || 
+                                       line.find("trojan://") == 0 ||
+                                       line.find("ss://") == 0)) {
+                        new_configs.push_back(line);
+                    }
+                }
+                
+                if (!new_configs.empty() && config_db_) {
+                    std::set<std::string> config_set(new_configs.begin(), new_configs.end());
+                    int added = config_db_->addConfigs(config_set, "download");
+                    downloaded_count += added;
+                    std::cout << "[Download] Added " << added << " configs from " << source << std::endl;
+                }
+                
+                progress = static_cast<float>(i + 1) / total_sources;
+                emitProgress(source, progress, "completed");
+                
+            } else {
+                emitProgress(source, progress, "failed");
+                std::cout << "[Download] Failed to download from " << source << std::endl;
+            }
+            
+        } catch (const std::exception& e) {
+            emitProgress(source, progress, "error");
+            std::cout << "[Download] Error downloading " << source << ": " << e.what() << std::endl;
+        }
+        
+        // Small delay between downloads
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+    
+    // Final progress
+    emitProgress("", 1.0f, "finished");
+    std::cout << "[Download] Finished. Downloaded configs from " << downloaded_count << " sources" << std::endl;
 }
 
 } // namespace hunter

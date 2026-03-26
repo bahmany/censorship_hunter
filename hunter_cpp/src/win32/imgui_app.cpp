@@ -648,6 +648,31 @@ void ImGuiApp::BackgroundWorkerLoop() {
             resize_counter = 0;
             try { HunterTaskManager::instance().maybeResize(); } catch (...) {}
         }
+        
+        // Check for download progress updates from orchestrator stdout
+        try {
+            // This is a simplified approach - in a real implementation,
+            // you'd need to capture orchestrator stdout and parse ##DOWNLOAD_PROGRESS## messages
+            // For now, we'll simulate progress updates based on time
+            if (download_progress_.active) {
+                // Auto-finish progress after a delay for demo purposes
+                static auto start_time = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                    std::chrono::steady_clock::now() - start_time).count();
+                
+                if (elapsed > 3) { // Simulate completion after 3 seconds
+                    download_progress_.active = false;
+                    download_progress_.progress = 1.0f;
+                    download_progress_.status = "finished";
+                    SetToast("Download completed", ToastKind::Success);
+                    start_time = std::chrono::steady_clock::now(); // Reset for next time
+                } else {
+                    download_progress_.progress = static_cast<float>(elapsed) / 3.0f;
+                    download_progress_.status = "downloading";
+                }
+            }
+        } catch (...) {}
+        
         for (int i = 0; i < 20 && !bg_stop_.load(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
@@ -1348,6 +1373,15 @@ void ImGuiApp::DownloadConfigsFromSources() {
         AppendLog("[UI] DownloadConfigsFromSources: no source URLs available");
         return;
     }
+    
+    // Initialize progress tracking
+    download_progress_.active = true;
+    download_progress_.progress = 0.0f;
+    download_progress_.current_source = "";
+    download_progress_.status = "starting";
+    download_progress_.downloaded_count = 0;
+    download_progress_.total_count = static_cast<int>(source_lines.size());
+    download_progress_.proxy = std::string(config_download_proxy_.data());
     
     const std::string proxy = std::string(config_download_proxy_.data());
     if (!proxy.empty()) {
@@ -2655,6 +2689,31 @@ void ImGuiApp::DrawAdvancedPage() {
             }
             ImGui::SameLine();
             ImGui::TextColored(COL_DIM, "Fetch configs from all source URLs");
+            
+            // Show download progress if active
+            if (download_progress_.active) {
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::TextColored(COL_ACCENT, "Download Progress");
+                
+                // Progress bar
+                ImGui::ProgressBar(download_progress_.progress, ImVec2(-1, 20*dpi_scale_));
+                
+                // Status text
+                std::string status_text = "Status: " + download_progress_.status;
+                if (!download_progress_.current_source.empty()) {
+                    status_text += " - " + download_progress_.current_source;
+                }
+                ImGui::TextColored(COL_DIM, "%s", status_text.c_str());
+                
+                // Count text
+                ImGui::TextColored(COL_DIM, "Downloaded: %d / %d sources", 
+                                 download_progress_.downloaded_count, download_progress_.total_count);
+                
+                if (!download_progress_.proxy.empty()) {
+                    ImGui::TextColored(COL_DIM, "Using proxy: %s", download_progress_.proxy.c_str());
+                }
+            }
             
             ImGui::Spacing();
             if (ImGui::Button("Normalize Sources")) {

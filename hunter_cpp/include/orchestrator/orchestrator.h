@@ -272,6 +272,7 @@ private:
     int computeAdaptiveSleep();
     void replaceProvisionedPortsLocked(const std::vector<int>& dead_indices, double now,
                                        const std::set<std::string>& excluded_uris = {});
+    void downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy);
 };
 
 } // namespace hunter
