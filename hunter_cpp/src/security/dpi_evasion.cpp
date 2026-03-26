@@ -718,7 +718,8 @@ DpiEvasionOrchestrator::NetworkDiscoveryResult DpiEvasionOrchestrator::discoverE
             inet_pton(AF_INET, result.default_gateway.c_str(), &gw_addr);
             ULONG mac_buf[2] = {0};
             ULONG mac_len = 6;
-            if (SendARP(gw_addr, 0, mac_buf, &mac_len) == NO_ERROR) {
+            DWORD sendarp_ret = SendARP(gw_addr, 0, mac_buf, &mac_len);
+            if (sendarp_ret == NO_ERROR) {
                 unsigned char* m = (unsigned char*)mac_buf;
                 char ms[32];
                 snprintf(ms, sizeof(ms), "%02X:%02X:%02X:%02X:%02X:%02X",
@@ -726,13 +727,14 @@ DpiEvasionOrchestrator::NetworkDiscoveryResult DpiEvasionOrchestrator::discoverE
                 result.gateway_mac = ms;
                 emit("[DISCOVERY] Gateway MAC resolved via ARP: " + result.gateway_mac);
             } else {
-                emit("[DISCOVERY] Gateway MAC could not be resolved via ARP");
+                emit("[DISCOVERY] Gateway MAC could not be resolved via ARP (error=" + std::to_string(sendarp_ret) + ")");
             }
         } else {
             emit("[DISCOVERY] No active adapter with default gateway found");
         }
     } else {
-        emit("[DISCOVERY] GetAdaptersInfo failed");
+        DWORD err = GetLastError();
+        emit("[DISCOVERY] GetAdaptersInfo failed (error=" + std::to_string(err) + ")");
     }
 
     emit("[DISCOVERY] Step 2/6: collecting friendly interface name and DNS servers");
@@ -767,6 +769,9 @@ DpiEvasionOrchestrator::NetworkDiscoveryResult DpiEvasionOrchestrator::discoverE
                     }
                 }
             }
+        } else {
+            DWORD err = GetLastError();
+            emit("[DISCOVERY] GetAdaptersAddresses failed (error=" + std::to_string(err) + ")");
         }
     }
     if (dns_servers.empty()) {
@@ -790,7 +795,8 @@ DpiEvasionOrchestrator::NetworkDiscoveryResult DpiEvasionOrchestrator::discoverE
         if (rt_size > 0) {
             std::vector<char> rt_buf(rt_size);
             PMIB_IPFORWARDTABLE table = (PMIB_IPFORWARDTABLE)rt_buf.data();
-            if (GetIpForwardTable(table, &rt_size, FALSE) == NO_ERROR) {
+            DWORD fwd_ret = GetIpForwardTable(table, &rt_size, FALSE);
+            if (fwd_ret == NO_ERROR) {
                 for (DWORD i = 0; i < table->dwNumEntries; i++) {
                     auto& row = table->table[i];
                     if (row.dwForwardDest == 0 && row.dwForwardMask == 0) {
@@ -803,6 +809,8 @@ DpiEvasionOrchestrator::NetworkDiscoveryResult DpiEvasionOrchestrator::discoverE
                         break;
                     }
                 }
+            } else {
+                emit("[DISCOVERY] GetIpForwardTable failed (error=" + std::to_string(fwd_ret) + ")");
             }
         }
     }
