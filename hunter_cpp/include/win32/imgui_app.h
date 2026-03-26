@@ -290,6 +290,45 @@ private:
         std::string last_error;          // last error message if any
     };
     std::map<std::string, SourceDownloadHistory> source_history_;
+    
+    // ── Professional Source Management ──
+    struct SourceItem {
+        std::string url;
+        std::string name;
+        std::string description;
+        bool enabled = true;
+        int priority = 0;  // 0=normal, 1=high, 2=low
+        std::string category;  // "github", "telegram", "custom", etc.
+        double added_ts = 0.0;
+        double last_success_ts = 0.0;
+        int total_configs_found = 0;
+        int success_rate = 0;
+    };
+    
+    struct SourceManager {
+        std::vector<SourceItem> sources;
+        std::string version = "1.0";
+        double last_updated = 0.0;
+        int total_downloads = 0;
+        int successful_downloads = 0;
+    };
+    
+    SourceManager source_manager_;
+    
+    // Source management operations
+    void InitializeDefaultSources();
+    void LoadSourceManager();
+    void SaveSourceManager();
+    void AddSource(const std::string& url, const std::string& name = "", const std::string& category = "custom");
+    void RemoveSource(int index);
+    void EditSource(int index);
+    void MoveSourceUp(int index);
+    void MoveSourceDown(int index);
+    void ToggleSourceEnabled(int index);
+    void RefreshSourceStats();
+    std::vector<SourceItem> GetEnabledSources() const;
+    void ImportSourcesFromText(const std::string& text);
+    std::string ExportSourcesToText() const;
 
     // ── Frame timing (60 fps cap) ──
     std::chrono::steady_clock::time_point last_frame_time_{};

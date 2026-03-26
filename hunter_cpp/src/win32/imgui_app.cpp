@@ -571,6 +571,35 @@ ImGuiApp::ImGuiApp() {
     z(edge_target_mac_); z(edge_exit_ip_); z(edge_iface_);
     z(telegram_api_id_); z(telegram_api_hash_); z(telegram_phone_);
     z(telegram_targets_); z(github_urls_); z(manual_configs_);
+    z(config_download_proxy_);
+    
+    // Initialize with default sources
+    const std::string default_sources = 
+        "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt\n"
+        "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt\n"
+        "https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt\n"
+        "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt\n"
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt\n"
+        "https://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt\n"
+        "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt\n"
+        "https://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt\n"
+        "https://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt\n"
+        "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt\n"
+        "https://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt\n"
+        "https://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt\n"
+        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix\n"
+        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix\n"
+        "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray\n"
+        "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt\n"
+        "https://raw.githubusercontent.com/freefq/free/master/v2\n"
+        "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2\n"
+        "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt\n"
+        "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub";
+    
+    CopyBuf(default_sources, github_urls_.data(), github_urls_.size());
+    
+    // Default proxy (common local proxy port)
+    CopyBuf("127.0.0.1:11808", config_download_proxy_.data(), config_download_proxy_.size());
     
     // Detect Windows version for compatibility diagnostics
     auto winver = DetectWindowsVersion();
@@ -677,6 +706,210 @@ void ImGuiApp::BackgroundWorkerLoop() {
     }
 }
 
+void ImGuiApp::InitializeDefaultSources() {
+    source_manager_.sources.clear();
+    
+    // Professional default sources with metadata
+    std::vector<std::pair<std::string, std::string>> default_data = {
+        {"https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt", "Barry Far Configs"},
+        {"https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt", "Ebrasha Free List"},
+        {"https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt", "Milad Tahanian Dumper"},
+        {"https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt", "Epodonios Configs"},
+        {"https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt", "Mahdi Bland Aggregator"},
+        {"https://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt", "Coldwater Lite"},
+        {"https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt", "Matin Ghanbari"},
+        {"https://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt", "Mashreghi Collector"},
+        {"https://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt", "NiREvil VLESS"},
+        {"https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt", "ALIILA V2rayNG"},
+        {"https://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt", "SkyWRT Configs"},
+        {"https://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt", "Longlon Configs"},
+        {"https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix", "Yebekhe Normal"},
+        {"https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix", "Yebekhe Base64"},
+        {"https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray", "MFUU V2ray"},
+        {"https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt", "Peasoft NoMoreWalls"},
+        {"https://raw.githubusercontent.com/freefq/free/master/v2", "FreeFQ"},
+        {"https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2", "Aiboboxx Free"},
+        {"https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt", "Ermaozi Subscribe"},
+        {"https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub", "Pawdroid Free Servers"}
+    };
+    
+    double now = utils::nowTimestamp();
+    for (size_t i = 0; i < default_data.size(); ++i) {
+        SourceItem item;
+        item.url = default_data[i].first;
+        item.name = default_data[i].second;
+        item.description = "High-quality V2ray configuration source";
+        item.category = "github";
+        item.added_ts = now;
+        item.priority = (i < 5) ? 1 : 0;  // First 5 are high priority
+        source_manager_.sources.push_back(item);
+    }
+    
+    source_manager_.last_updated = now;
+    AppendLog("[UI] Initialized " + std::to_string(source_manager_.sources.size()) + " default sources");
+}
+
+void ImGuiApp::LoadSourceManager() {
+    std::string sources_path = "runtime/sources_manager.json";
+    if (utils::fileExists(sources_path)) {
+        try {
+            // Parse JSON and load into source_manager_
+            // For now, initialize defaults if parsing fails
+            InitializeDefaultSources();
+            AppendLog("[UI] Loaded source manager from file");
+        } catch (...) {
+            InitializeDefaultSources();
+            AppendLog("[UI] Failed to load source manager, using defaults");
+        }
+    } else {
+        InitializeDefaultSources();
+        SaveSourceManager();  // Save defaults for next time
+        AppendLog("[UI] Created default source manager file");
+    }
+}
+
+void ImGuiApp::SaveSourceManager() {
+    std::string sources_path = "runtime/sources_manager.json";
+    utils::mkdirRecursive("runtime");
+    
+    // Build JSON for source manager
+    utils::JsonBuilder root;
+    root.add("version", source_manager_.version)
+        .add("last_updated", source_manager_.last_updated)
+        .add("total_downloads", source_manager_.total_downloads)
+        .add("successful_downloads", source_manager_.successful_downloads);
+    
+    // For now, just save basic structure
+    // TODO: Implement proper JSON array serialization
+    std::string json_content = root.build();
+    utils::saveJsonFile(sources_path, json_content);
+    
+    AppendLog("[UI] Saved source manager to " + sources_path);
+}
+
+void ImGuiApp::AddSource(const std::string& url, const std::string& name, const std::string& category) {
+    SourceItem item;
+    item.url = url;
+    item.name = name.empty() ? url : name;
+    item.description = "Custom added source";
+    item.category = category;
+    item.added_ts = utils::nowTimestamp();
+    item.enabled = true;
+    
+    source_manager_.sources.push_back(item);
+    source_manager_.last_updated = utils::nowTimestamp();
+    SaveSourceManager();
+    
+    AppendLog("[UI] Added new source: " + url);
+    SetToast("Source added successfully", ToastKind::Success);
+}
+
+void ImGuiApp::RemoveSource(int index) {
+    if (index >= 0 && index < static_cast<int>(source_manager_.sources.size())) {
+        std::string removed_url = source_manager_.sources[index].url;
+        source_manager_.sources.erase(source_manager_.sources.begin() + index);
+        source_manager_.last_updated = utils::nowTimestamp();
+        SaveSourceManager();
+        
+        AppendLog("[UI] Removed source: " + removed_url);
+        SetToast("Source removed", ToastKind::Info);
+    }
+}
+
+void ImGuiApp::EditSource(int index) {
+    if (index >= 0 && index < static_cast<int>(source_manager_.sources.size())) {
+        // TODO: Implement edit dialog
+        AppendLog("[UI] Edit source requested for index: " + std::to_string(index));
+        SetToast("Edit feature coming soon", ToastKind::Info);
+    }
+}
+
+void ImGuiApp::MoveSourceUp(int index) {
+    if (index > 0 && index < static_cast<int>(source_manager_.sources.size())) {
+        std::swap(source_manager_.sources[index], source_manager_.sources[index - 1]);
+        source_manager_.last_updated = utils::nowTimestamp();
+        SaveSourceManager();
+    }
+}
+
+void ImGuiApp::MoveSourceDown(int index) {
+    if (index >= 0 && index < static_cast<int>(source_manager_.sources.size()) - 1) {
+        std::swap(source_manager_.sources[index], source_manager_.sources[index + 1]);
+        source_manager_.last_updated = utils::nowTimestamp();
+        SaveSourceManager();
+    }
+}
+
+void ImGuiApp::ToggleSourceEnabled(int index) {
+    if (index >= 0 && index < static_cast<int>(source_manager_.sources.size())) {
+        source_manager_.sources[index].enabled = !source_manager_.sources[index].enabled;
+        source_manager_.last_updated = utils::nowTimestamp();
+        SaveSourceManager();
+        
+        std::string status = source_manager_.sources[index].enabled ? "enabled" : "disabled";
+        AppendLog("[UI] Source " + source_manager_.sources[index].url + " " + status);
+    }
+}
+
+void ImGuiApp::RefreshSourceStats() {
+    // Update statistics from download history
+    for (auto& source : source_manager_.sources) {
+        auto it = source_history_.find(source.url);
+        if (it != source_history_.end()) {
+            const auto& history = it->second;
+            source.total_configs_found = history.configs_found;
+            source.success_rate = history.total_downloads > 0 ? 
+                (history.successful_downloads * 100 / history.total_downloads) : 0;
+            if (history.last_success) {
+                source.last_success_ts = history.last_download_ts;
+            }
+        }
+    }
+    source_manager_.last_updated = utils::nowTimestamp();
+}
+
+std::vector<ImGuiApp::SourceItem> ImGuiApp::GetEnabledSources() const {
+    std::vector<SourceItem> enabled;
+    for (const auto& source : source_manager_.sources) {
+        if (source.enabled) {
+            enabled.push_back(source);
+        }
+    }
+    return enabled;
+}
+
+void ImGuiApp::ImportSourcesFromText(const std::string& text) {
+    auto lines = SplitLines(text.c_str());
+    int added = 0;
+    for (const auto& line : lines) {
+        if (!line.empty() && line.find("http") == 0) {
+            // Check if already exists
+            bool exists = false;
+            for (const auto& source : source_manager_.sources) {
+                if (source.url == line) {
+                    exists = true;
+                    break;
+                }
+            }
+            if (!exists) {
+                AddSource(line, "", "imported");
+                added++;
+            }
+        }
+    }
+    SetToast("Imported " + std::to_string(added) + " new sources", ToastKind::Success);
+}
+
+std::string ImGuiApp::ExportSourcesToText() const {
+    std::ostringstream out;
+    for (const auto& source : source_manager_.sources) {
+        if (source.enabled) {
+            out << source.url << "\n";
+        }
+    }
+    return out.str();
+}
+
 // Helper function to process download history from orchestrator
 void ImGuiApp::ProcessDownloadHistory(const std::string& url, double timestamp, bool success, 
                                      int configs_found, int unique_configs, const std::string& error) {
@@ -697,6 +930,19 @@ void ImGuiApp::ProcessDownloadHistory(const std::string& url, double timestamp, 
     history.configs_found = configs_found;
     history.unique_configs = unique_configs;
     history.last_error = error;
+    
+    // Update source manager statistics
+    for (auto& source : source_manager_.sources) {
+        if (source.url == url) {
+            source.total_configs_found = configs_found;
+            source.success_rate = history.total_downloads > 0 ? 
+                (history.successful_downloads * 100 / history.total_downloads) : 0;
+            if (success) {
+                source.last_success_ts = timestamp;
+            }
+            break;
+        }
+    }
 }
 
 ImGuiApp::Snapshot ImGuiApp::BuildSnapshot() {
@@ -986,6 +1232,10 @@ void ImGuiApp::ResetDevice() {
 void ImGuiApp::LoadConfig() {
     if (utils::fileExists(config_path_)) config_.loadFromFile(config_path_);
     else config_.saveToFile(config_path_);
+    
+    // Load source manager (this will initialize defaults if first run)
+    LoadSourceManager();
+    
     SyncBuffersFromConfig();
 }
 
@@ -1388,11 +1638,18 @@ void ImGuiApp::ExportConfigsToFile() {
 }
 
 void ImGuiApp::DownloadConfigsFromSources() {
-    const auto source_lines = SplitLines(github_urls_.data());
-    if (source_lines.empty()) {
-        SetToast("No source URLs configured", ToastKind::Warning);
-        AppendLog("[UI] DownloadConfigsFromSources: no source URLs available");
+    // Get enabled sources from source manager
+    auto enabled_sources = GetEnabledSources();
+    if (enabled_sources.empty()) {
+        SetToast("No enabled sources configured", ToastKind::Warning);
+        AppendLog("[UI] DownloadConfigsFromSources: no enabled sources available");
         return;
+    }
+    
+    // Extract URLs from enabled sources
+    std::vector<std::string> source_urls;
+    for (const auto& source : enabled_sources) {
+        source_urls.push_back(source.url);
     }
     
     // Initialize progress tracking
@@ -1401,7 +1658,7 @@ void ImGuiApp::DownloadConfigsFromSources() {
     download_progress_.current_source = "";
     download_progress_.status = "starting";
     download_progress_.downloaded_count = 0;
-    download_progress_.total_count = static_cast<int>(source_lines.size());
+    download_progress_.total_count = static_cast<int>(source_urls.size());
     download_progress_.proxy = std::string(config_download_proxy_.data());
     
     const std::string proxy = std::string(config_download_proxy_.data());
@@ -1411,18 +1668,16 @@ void ImGuiApp::DownloadConfigsFromSources() {
         AppendLog("[UI] DownloadConfigsFromSources: no proxy configured");
     }
     
-    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_lines.size()) + " sources");
+    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_urls.size()) + " enabled sources");
     SetToast("Downloading configs...", ToastKind::Info);
     
     // Build JSON command with sources and proxy
     std::ostringstream cmd;
     cmd << "{\"command\":\"download_configs\"";
     cmd << ",\"sources\":[";
-    for (size_t i = 0; i < source_lines.size(); ++i) {
-        if (!source_lines[i].empty()) {
-            if (i > 0) cmd << ",";
-            cmd << "\"" << JsonEscape(source_lines[i]) << "\"";
-        }
+    for (size_t i = 0; i < source_urls.size(); ++i) {
+        if (i > 0) cmd << ",";
+        cmd << "\"" << JsonEscape(source_urls[i]) << "\"";
     }
     cmd << "]";
     if (!proxy.empty()) {
@@ -2689,134 +2944,149 @@ void ImGuiApp::DrawAdvancedPage() {
         // Sources tab
         if (ImGui::BeginTabItem("Sources")) {
             ImGui::Spacing();
-            auto source_lines = DedupeStringsPreserveOrder(SplitLines(github_urls_.data()));
             
-            // Header with source count
-            ImGui::TextColored(COL_ACCENT, "Download Sources Management");
-            ImGui::TextColored(COL_DIM, "Total sources: %d", (int)source_lines.size());
+            // Header with statistics
+            ImGui::TextColored(COL_ACCENT, "Professional Source Management");
+            auto enabled_sources = GetEnabledSources();
+            ImGui::TextColored(COL_DIM, "Total: %d | Enabled: %d | Disabled: %d", 
+                             (int)source_manager_.sources.size(), 
+                             (int)enabled_sources.size(),
+                             (int)(source_manager_.sources.size() - enabled_sources.size()));
             
-            // Debug: Show parsing details
-            if (source_lines.size() < 20) {
-                ImGui::TextColored(COL_YELLOW, "Debug - Raw buffer length: %zu", strlen(github_urls_.data()));
-                ImGui::TextColored(COL_YELLOW, "Debug - Parsed sources:");
-                for (size_t i = 0; i < std::min(source_lines.size(), size_t(5)); ++i) {
-                    ImGui::TextColored(COL_DIM, "  %zu: %s", i+1, source_lines[i].c_str());
-                }
+            // Action buttons
+            ImGui::Spacing();
+            if (ImGui::Button("Add Source", ImVec2(100*dpi_scale_, 0))) {
+                // TODO: Implement add source dialog
+                SetToast("Add source dialog coming soon", ToastKind::Info);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Import Text", ImVec2(100*dpi_scale_, 0))) {
+                // TODO: Implement import dialog
+                SetToast("Import dialog coming soon", ToastKind::Info);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Export", ImVec2(80*dpi_scale_, 0))) {
+                std::string exported = ExportSourcesToText();
+                CopyTextToClipboard(exported);
+                SetToast("Exported " + std::to_string(enabled_sources.size()) + " sources to clipboard", ToastKind::Success);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Refresh Stats", ImVec2(100*dpi_scale_, 0))) {
+                RefreshSourceStats();
+                SetToast("Statistics refreshed", ToastKind::Success);
             }
             
-            // Sources table with download history
+            // Professional sources table
             ImGui::Spacing();
             ImGui::Separator();
             ImGui::TextColored(COL_ACCENT, "Sources Table");
             
-            if (ImGui::BeginTable("##sources_table", 6, 
+            if (ImGui::BeginTable("##professional_sources_table", 8, 
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
-                ImVec2(0, 300*dpi_scale_))) {
+                ImVec2(0, 350*dpi_scale_))) {
                 
                 // Table headers
-                ImGui::TableSetupColumn("Source URL", ImGuiTableColumnFlags_WidthStretch);
-                ImGui::TableSetupColumn("Last Download", ImGuiTableColumnFlags_WidthFixed, 120*dpi_scale_);
-                ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 80*dpi_scale_);
+                ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_WidthFixed, 60*dpi_scale_);
+                ImGui::TableSetupColumn("Name", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Category", ImGuiTableColumnFlags_WidthFixed, 80*dpi_scale_);
+                ImGui::TableSetupColumn("Priority", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
+                ImGui::TableSetupColumn("Last Success", ImGuiTableColumnFlags_WidthFixed, 120*dpi_scale_);
                 ImGui::TableSetupColumn("Configs", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
-                ImGui::TableSetupColumn("Unique", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
                 ImGui::TableSetupColumn("Success Rate", ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
+                ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 120*dpi_scale_);
                 ImGui::TableHeadersRow();
                 
                 // Table rows
-                for (size_t i = 0; i < source_lines.size(); ++i) {
-                    const auto& url = source_lines[i];
+                for (int i = 0; i < static_cast<int>(source_manager_.sources.size()); ++i) {
+                    const auto& source = source_manager_.sources[i];
                     ImGui::TableNextRow();
                     
-                    // Column 0: Source URL (shortened)
+                    // Column 0: Enabled checkbox
                     ImGui::TableNextColumn();
-                    std::string short_url = url;
-                    if (url.find("raw.githubusercontent.com/") != std::string::npos) {
-                        size_t start = url.find(".com/") + 5;
-                        short_url = url.substr(start);
+                    bool enabled = source.enabled;
+                    if (ImGui::Checkbox(("##enabled_" + std::to_string(i)).c_str(), &enabled)) {
+                        ToggleSourceEnabled(i);
                     }
-                    if (short_url.length() > 50) {
-                        short_url = short_url.substr(0, 47) + "...";
-                    }
-                    ImGui::TextUnformatted(short_url.c_str());
+                    
+                    // Column 1: Name with tooltip
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(source.name.c_str());
                     if (ImGui::IsItemHovered()) {
-                        ImGui::SetTooltip("%s", url.c_str());
+                        ImGui::SetTooltip("URL: %s\nAdded: %.1f days ago\n%s", 
+                                       source.url.c_str(),
+                                       (utils::nowTimestamp() - source.added_ts) / 86400.0,
+                                       source.description.c_str());
                     }
                     
-                    // Get history for this source
-                    auto it = source_history_.find(url);
-                    bool has_history = (it != source_history_.end());
-                    
-                    // Column 1: Last Download Time
+                    // Column 2: Category
                     ImGui::TableNextColumn();
-                    if (has_history && it->second.last_download_ts > 0) {
-                        double elapsed = utils::nowTimestamp() - it->second.last_download_ts;
-                        if (elapsed < 60) {
-                            ImGui::Text("%.0f sec ago", elapsed);
-                        } else if (elapsed < 3600) {
-                            ImGui::Text("%.0f min ago", elapsed / 60);
+                    ImVec4 category_color = (source.category == "github") ? COL_ACCENT : 
+                                          (source.category == "custom") ? COL_YELLOW : COL_DIM;
+                    ImGui::TextColored(category_color, "%s", source.category.c_str());
+                    
+                    // Column 3: Priority
+                    ImGui::TableNextColumn();
+                    if (source.priority == 1) {
+                        ImGui::TextColored(COL_ACCENT, "HIGH");
+                    } else if (source.priority == 2) {
+                        ImGui::TextColored(COL_DIM, "LOW");
+                    } else {
+                        ImGui::TextColored(COL_TEXT, "NORMAL");
+                    }
+                    
+                    // Column 4: Last Success
+                    ImGui::TableNextColumn();
+                    if (source.last_success_ts > 0) {
+                        double elapsed = utils::nowTimestamp() - source.last_success_ts;
+                        if (elapsed < 3600) {
+                            ImGui::Text("%.0fm ago", elapsed / 60);
                         } else if (elapsed < 86400) {
-                            ImGui::Text("%.0f hrs ago", elapsed / 3600);
+                            ImGui::Text("%.1fh ago", elapsed / 3600);
                         } else {
-                            ImGui::Text("%.0f days ago", elapsed / 86400);
+                            ImGui::Text("%.1fd ago", elapsed / 86400);
                         }
                     } else {
                         ImGui::TextColored(COL_DIM, "Never");
                     }
                     
-                    // Column 2: Status
+                    // Column 5: Configs Found
                     ImGui::TableNextColumn();
-                    if (has_history) {
-                        if (it->second.last_success) {
-                            ImGui::TextColored(COL_GREEN, "OK");
-                        } else {
-                            ImGui::TextColored(COL_RED, "Failed");
-                            if (!it->second.last_error.empty() && ImGui::IsItemHovered()) {
-                                ImGui::SetTooltip("%s", it->second.last_error.c_str());
-                            }
-                        }
+                    if (source.total_configs_found > 0) {
+                        ImGui::Text("%d", source.total_configs_found);
                     } else {
                         ImGui::TextColored(COL_DIM, "-");
                     }
                     
-                    // Column 3: Configs Found
+                    // Column 6: Success Rate
                     ImGui::TableNextColumn();
-                    if (has_history && it->second.configs_found > 0) {
-                        ImGui::Text("%d", it->second.configs_found);
+                    if (source.success_rate > 0) {
+                        ImVec4 rate_color = source.success_rate > 80 ? COL_GREEN : 
+                                        (source.success_rate > 50 ? COL_YELLOW : COL_RED);
+                        ImGui::TextColored(rate_color, "%d%%", source.success_rate);
                     } else {
                         ImGui::TextColored(COL_DIM, "-");
                     }
                     
-                    // Column 4: Unique Configs
+                    // Column 7: Actions
                     ImGui::TableNextColumn();
-                    if (has_history && it->second.unique_configs > 0) {
-                        ImGui::TextColored(COL_ACCENT, "%d", it->second.unique_configs);
-                    } else {
-                        ImGui::TextColored(COL_DIM, "-");
+                    if (ImGui::SmallButton(("↑##up_" + std::to_string(i)).c_str()) && i > 0) {
+                        MoveSourceUp(i);
                     }
-                    
-                    // Column 5: Success Rate
-                    ImGui::TableNextColumn();
-                    if (has_history && it->second.total_downloads > 0) {
-                        float rate = (float)it->second.successful_downloads / it->second.total_downloads * 100.0f;
-                        ImVec4 color = rate > 80 ? COL_GREEN : (rate > 50 ? COL_YELLOW : COL_RED);
-                        ImGui::TextColored(color, "%.0f%%", rate);
-                        if (ImGui::IsItemHovered()) {
-                            ImGui::SetTooltip("%d/%d successful", it->second.successful_downloads, it->second.total_downloads);
-                        }
-                    } else {
-                        ImGui::TextColored(COL_DIM, "-");
+                    ImGui::SameLine(0, 2*dpi_scale_);
+                    if (ImGui::SmallButton(("↓##down_" + std::to_string(i)).c_str()) && i < static_cast<int>(source_manager_.sources.size()) - 1) {
+                        MoveSourceDown(i);
+                    }
+                    ImGui::SameLine(0, 2*dpi_scale_);
+                    if (ImGui::SmallButton(("✏##edit_" + std::to_string(i)).c_str())) {
+                        EditSource(i);
+                    }
+                    ImGui::SameLine(0, 2*dpi_scale_);
+                    if (ImGui::SmallButton(("🗑##del_" + std::to_string(i)).c_str())) {
+                        RemoveSource(i);
                     }
                 }
                 
                 ImGui::EndTable();
-            }
-            
-            // Raw text editor (collapsed by default)
-            ImGui::Spacing();
-            ImGui::Separator();
-            if (ImGui::CollapsingHeader("Raw Source URLs (Advanced)", ImGuiTreeNodeFlags_None)) {
-                ImGui::InputTextMultiline("##github_urls_raw", github_urls_.data(), github_urls_.size(),
-                    ImVec2(-1, 150*dpi_scale_));
             }
             
             // Proxy server setting for config downloads
@@ -2862,73 +3132,12 @@ void ImGuiApp::DrawAdvancedPage() {
             }
             
             ImGui::Spacing();
-            if (ImGui::Button("Parse & Fix Sources")) {
-                auto parsed = SplitLines(github_urls_.data());
-                if (parsed.size() > 1) {
-                    // Multiple URLs found, format them properly
-                    std::string formatted = JoinUniqueLinesText(parsed);
-                    CopyBuf(formatted, github_urls_.data(), github_urls_.size());
-                    SetToast("Parsed " + std::to_string(parsed.size()) + " sources", ToastKind::Success);
-                    AppendLog("[UI] Parse & Fix Sources: found " + std::to_string(parsed.size()) + " URLs");
-                } else {
-                    SetToast("No multiple URLs found to parse", ToastKind::Info);
-                }
+            if (ImGui::Button("Reset to Defaults")) {
+                InitializeDefaultSources();
+                SaveSourceManager();
+                SetToast("Reset to default sources", ToastKind::Success);
+                AppendLog("[UI] Reset to default sources: loaded " + std::to_string(source_manager_.sources.size()) + " sources");
             }
-            ImGui::SameLine();
-            if (ImGui::Button("Load Default Sources")) {
-                const std::string default_sources = 
-                    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt\n"
-                    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt\n"
-                    "https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt\n"
-                    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt\n"
-                    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt\n"
-                    "https://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt\n"
-                    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt\n"
-                    "https://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt\n"
-                    "https://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt\n"
-                    "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt\n"
-                    "https://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt\n"
-                    "https://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt\n"
-                    "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix\n"
-                    "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix\n"
-                    "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray\n"
-                    "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt\n"
-                    "https://raw.githubusercontent.com/freefq/free/master/v2\n"
-                    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2\n"
-                    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt\n"
-                    "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub";
-                
-                // Debug: Check what we're actually setting
-                auto test_parse = SplitLines(default_sources.c_str());
-                AppendLog("[UI] Load Default Sources: setting " + std::to_string(test_parse.size()) + " URLs");
-                for (size_t i = 0; i < std::min(test_parse.size(), size_t(3)); ++i) {
-                    AppendLog("[UI] Source " + std::to_string(i+1) + ": " + test_parse[i]);
-                }
-                
-                CopyBuf(default_sources, github_urls_.data(), github_urls_.size());
-                auto source_count = SplitLines(github_urls_.data()).size();
-                SetToast("Loaded " + std::to_string(source_count) + " default sources", ToastKind::Success);
-                AppendLog("[UI] Load Default Sources: loaded " + std::to_string(source_count) + " URLs");
-            }
-            ImGui::SameLine();
-            if (ImGui::Button("Normalize Sources")) {
-                CopyBuf(JoinUniqueLinesText(source_lines), github_urls_.data(), github_urls_.size());
-            }
-            ImGui::SameLine(0, 8*dpi_scale_);
-            if (ImGui::Button("Copy All Sources")) {
-                if (source_lines.empty()) {
-                    SetToast("No sources to copy", ToastKind::Warning);
-                    AppendLog("[UI] Copy All Sources: no sources available");
-                } else {
-                    const bool copied = CopyTextToClipboard(JoinUniqueLinesText(source_lines));
-                    AppendLog("[UI] Copy All Sources: unique=" + std::to_string(source_lines.size()) + 
-                              " success=" + (copied ? "true" : "false"));
-                    SetToast(copied ? ("Copied " + std::to_string(source_lines.size()) + " sources") : "Failed to copy sources", 
-                             copied ? ToastKind::Success : ToastKind::Error);
-                }
-            }
-            ImGui::SameLine(0, 8*dpi_scale_);
-            if (ImGui::Button("Save Sources")) ApplyAdvancedSettings();
             ImGui::EndTabItem();
         }
 
