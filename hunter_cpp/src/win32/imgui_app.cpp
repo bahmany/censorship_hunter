@@ -2670,6 +2670,15 @@ void ImGuiApp::DrawAdvancedPage() {
             ImGui::Spacing();
             auto source_lines = DedupeStringsPreserveOrder(SplitLines(github_urls_.data()));
             ImGui::TextColored(COL_DIM, "Unique sources: %d", (int)source_lines.size());
+            
+            // Debug: Show first few sources for verification
+            if (source_lines.size() > 0 && source_lines.size() < 5) {
+                ImGui::TextColored(COL_YELLOW, "Debug - Found sources:");
+                for (size_t i = 0; i < std::min(source_lines.size(), size_t(3)); ++i) {
+                    ImGui::TextColored(COL_DIM, "  %zu: %s", i+1, source_lines[i].c_str());
+                }
+            }
+            
             ImGui::InputTextMultiline("GitHub URLs", github_urls_.data(), github_urls_.size(),
                 ImVec2(-1, 200*dpi_scale_));
             
@@ -2716,6 +2725,48 @@ void ImGuiApp::DrawAdvancedPage() {
             }
             
             ImGui::Spacing();
+            if (ImGui::Button("Parse & Fix Sources")) {
+                auto parsed = SplitLines(github_urls_.data());
+                if (parsed.size() > 1) {
+                    // Multiple URLs found, format them properly
+                    std::string formatted = JoinUniqueLinesText(parsed);
+                    CopyBuf(formatted, github_urls_.data(), github_urls_.size());
+                    SetToast("Parsed " + std::to_string(parsed.size()) + " sources", ToastKind::Success);
+                    AppendLog("[UI] Parse & Fix Sources: found " + std::to_string(parsed.size()) + " URLs");
+                } else {
+                    SetToast("No multiple URLs found to parse", ToastKind::Info);
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Load Default Sources")) {
+                const std::string default_sources = 
+                    "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt\n"
+                    "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt\n"
+                    "https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt\n"
+                    "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt\n"
+                    "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt\n"
+                    "https://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt\n"
+                    "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt\n"
+                    "https://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt\n"
+                    "https://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt\n"
+                    "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt\n"
+                    "https://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt\n"
+                    "https://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt\n"
+                    "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix\n"
+                    "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix\n"
+                    "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray\n"
+                    "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt\n"
+                    "https://raw.githubusercontent.com/freefq/free/master/v2\n"
+                    "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2\n"
+                    "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt\n"
+                    "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub";
+                
+                CopyBuf(default_sources, github_urls_.data(), github_urls_.size());
+                auto source_count = SplitLines(default_sources.c_str()).size();
+                SetToast("Loaded " + std::to_string(source_count) + " default sources", ToastKind::Success);
+                AppendLog("[UI] Load Default Sources: loaded " + std::to_string(source_count) + " URLs");
+            }
+            ImGui::SameLine();
             if (ImGui::Button("Normalize Sources")) {
                 CopyBuf(JoinUniqueLinesText(source_lines), github_urls_.data(), github_urls_.size());
             }
