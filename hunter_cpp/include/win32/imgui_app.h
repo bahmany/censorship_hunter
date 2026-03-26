@@ -126,6 +126,8 @@ private:
     void ImportConfigsFromFile();
     void ExportConfigsToFile();
     void DownloadConfigsFromSources();
+    void ProcessDownloadHistory(const std::string& url, double timestamp, bool success, 
+                               int configs_found, int unique_configs, const std::string& error);
     void ApplyDiscoveryToEdgeInputs(const security::DpiEvasionOrchestrator::NetworkDiscoveryResult& result);
 
     // ── Task tracking for real-time UI feedback ──
@@ -275,6 +277,19 @@ private:
         std::string proxy;
     };
     DownloadProgress download_progress_;
+    
+    // ── Source download history tracking ──
+    struct SourceDownloadHistory {
+        std::string url;
+        double last_download_ts = 0.0;  // timestamp of last download attempt
+        bool last_success = false;       // was last download successful
+        int total_downloads = 0;         // total download attempts
+        int successful_downloads = 0;    // successful downloads
+        int configs_found = 0;           // configs found in last download
+        int unique_configs = 0;          // unique configs added to database
+        std::string last_error;          // last error message if any
+    };
+    std::map<std::string, SourceDownloadHistory> source_history_;
 
     // ── Frame timing (60 fps cap) ──
     std::chrono::steady_clock::time_point last_frame_time_{};

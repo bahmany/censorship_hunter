@@ -3742,6 +3742,9 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
         // Use existing http_client_ with proxy if provided
         std::string content;
         bool success = false;
+        int configs_found = 0;
+        int unique_added = 0;
+        std::string error_msg;
         
         try {
             // Set proxy if provided
@@ -3771,25 +3774,41 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
                     }
                 }
                 
+                configs_found = static_cast<int>(new_configs.size());
+                
                 if (!new_configs.empty() && config_db_) {
                     std::set<std::string> config_set(new_configs.begin(), new_configs.end());
-                    int added = config_db_->addConfigs(config_set, "download");
-                    downloaded_count += added;
-                    std::cout << "[Download] Added " << added << " configs from " << source << std::endl;
+                    unique_added = config_db_->addConfigs(config_set, "download");
+                    downloaded_count += unique_added;
+                    std::cout << "[Download] Added " << unique_added << " unique configs from " << source 
+                              << " (found " << configs_found << " total)" << std::endl;
                 }
                 
                 progress = static_cast<float>(i + 1) / total_sources;
                 emitProgress(source, progress, "completed");
                 
             } else {
+                error_msg = "Empty response";
                 emitProgress(source, progress, "failed");
                 std::cout << "[Download] Failed to download from " << source << std::endl;
             }
             
         } catch (const std::exception& e) {
+            error_msg = e.what();
             emitProgress(source, progress, "error");
             std::cout << "[Download] Error downloading " << source << ": " << e.what() << std::endl;
         }
+        
+        // Record download history
+        utils::JsonBuilder history;
+        history.add("type", "download_history")
+              .add("url", source)
+              .add("timestamp", utils::nowTimestamp())
+              .add("success", success)
+              .add("configs_found", configs_found)
+              .add("unique_configs", unique_added)
+              .add("error", error_msg);
+        std::cout << "##DOWNLOAD_HISTORY##" << history.build() << std::endl;
         
         // Small delay between downloads
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -3797,7 +3816,8 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     
     // Final progress
     emitProgress("", 1.0f, "finished");
-    std::cout << "[Download] Finished. Downloaded configs from " << downloaded_count << " sources" << std::endl;
+    std::cout << "[Download] Finished. Downloaded " << downloaded_count << " unique configs from " 
+              << total_sources << " sources" << std::endl;
 }
 
 } // namespace hunter

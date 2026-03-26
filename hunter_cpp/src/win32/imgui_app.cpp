@@ -650,22 +650,21 @@ void ImGuiApp::BackgroundWorkerLoop() {
         }
         
         // Check for download progress updates from orchestrator stdout
+        // In a real implementation, you would capture stdout and parse ##DOWNLOAD_PROGRESS## and ##DOWNLOAD_HISTORY## messages
+        // For now, we simulate progress updates
         try {
-            // This is a simplified approach - in a real implementation,
-            // you'd need to capture orchestrator stdout and parse ##DOWNLOAD_PROGRESS## messages
-            // For now, we'll simulate progress updates based on time
             if (download_progress_.active) {
-                // Auto-finish progress after a delay for demo purposes
+                // Auto-finish progress after orchestrator completes
                 static auto start_time = std::chrono::steady_clock::now();
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
                     std::chrono::steady_clock::now() - start_time).count();
                 
-                if (elapsed > 3) { // Simulate completion after 3 seconds
+                if (elapsed > 3) {
                     download_progress_.active = false;
                     download_progress_.progress = 1.0f;
                     download_progress_.status = "finished";
                     SetToast("Download completed", ToastKind::Success);
-                    start_time = std::chrono::steady_clock::now(); // Reset for next time
+                    start_time = std::chrono::steady_clock::now();
                 } else {
                     download_progress_.progress = static_cast<float>(elapsed) / 3.0f;
                     download_progress_.status = "downloading";
@@ -676,6 +675,28 @@ void ImGuiApp::BackgroundWorkerLoop() {
         for (int i = 0; i < 20 && !bg_stop_.load(); ++i)
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
+}
+
+// Helper function to process download history from orchestrator
+void ImGuiApp::ProcessDownloadHistory(const std::string& url, double timestamp, bool success, 
+                                     int configs_found, int unique_configs, const std::string& error) {
+    auto& history = source_history_[url];
+    
+    // Initialize if first time
+    if (history.url.empty()) {
+        history.url = url;
+    }
+    
+    // Update statistics
+    history.last_download_ts = timestamp;
+    history.last_success = success;
+    history.total_downloads++;
+    if (success) {
+        history.successful_downloads++;
+    }
+    history.configs_found = configs_found;
+    history.unique_configs = unique_configs;
+    history.last_error = error;
 }
 
 ImGuiApp::Snapshot ImGuiApp::BuildSnapshot() {
@@ -2669,18 +2690,125 @@ void ImGuiApp::DrawAdvancedPage() {
         if (ImGui::BeginTabItem("Sources")) {
             ImGui::Spacing();
             auto source_lines = DedupeStringsPreserveOrder(SplitLines(github_urls_.data()));
-            ImGui::TextColored(COL_DIM, "Unique sources: %d", (int)source_lines.size());
             
-            // Debug: Show first few sources for verification
-            if (source_lines.size() > 0 && source_lines.size() < 5) {
-                ImGui::TextColored(COL_YELLOW, "Debug - Found sources:");
-                for (size_t i = 0; i < std::min(source_lines.size(), size_t(3)); ++i) {
-                    ImGui::TextColored(COL_DIM, "  %zu: %s", i+1, source_lines[i].c_str());
+            // Header with source count
+            ImGui::TextColored(COL_ACCENT, "Download Sources Management");
+            ImGui::TextColored(COL_DIM, "Total sources: %d", (int)source_lines.size());
+            
+            // Sources table with download history
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(COL_ACCENT, "Sources Table");
+            
+            if (ImGui::BeginTable("##sources_table", 6, 
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
+                ImVec2(0, 300*dpi_scale_))) {
+                
+                // Table headers
+                ImGui::TableSetupColumn("Source URL", ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableSetupColumn("Last Download", ImGuiTableColumnFlags_WidthFixed, 120*dpi_scale_);
+                ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 80*dpi_scale_);
+                ImGui::TableSetupColumn("Configs", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
+                ImGui::TableSetupColumn("Unique", ImGuiTableColumnFlags_WidthFixed, 70*dpi_scale_);
+                ImGui::TableSetupColumn("Success Rate", ImGuiTableColumnFlags_WidthFixed, 90*dpi_scale_);
+                ImGui::TableHeadersRow();
+                
+                // Table rows
+                for (size_t i = 0; i < source_lines.size(); ++i) {
+                    const auto& url = source_lines[i];
+                    ImGui::TableNextRow();
+                    
+                    // Column 0: Source URL (shortened)
+                    ImGui::TableNextColumn();
+                    std::string short_url = url;
+                    if (url.find("raw.githubusercontent.com/") != std::string::npos) {
+                        size_t start = url.find(".com/") + 5;
+                        short_url = url.substr(start);
+                    }
+                    if (short_url.length() > 50) {
+                        short_url = short_url.substr(0, 47) + "...";
+                    }
+                    ImGui::TextUnformatted(short_url.c_str());
+                    if (ImGui::IsItemHovered()) {
+                        ImGui::SetTooltip("%s", url.c_str());
+                    }
+                    
+                    // Get history for this source
+                    auto it = source_history_.find(url);
+                    bool has_history = (it != source_history_.end());
+                    
+                    // Column 1: Last Download Time
+                    ImGui::TableNextColumn();
+                    if (has_history && it->second.last_download_ts > 0) {
+                        double elapsed = utils::nowTimestamp() - it->second.last_download_ts;
+                        if (elapsed < 60) {
+                            ImGui::Text("%.0f sec ago", elapsed);
+                        } else if (elapsed < 3600) {
+                            ImGui::Text("%.0f min ago", elapsed / 60);
+                        } else if (elapsed < 86400) {
+                            ImGui::Text("%.0f hrs ago", elapsed / 3600);
+                        } else {
+                            ImGui::Text("%.0f days ago", elapsed / 86400);
+                        }
+                    } else {
+                        ImGui::TextColored(COL_DIM, "Never");
+                    }
+                    
+                    // Column 2: Status
+                    ImGui::TableNextColumn();
+                    if (has_history) {
+                        if (it->second.last_success) {
+                            ImGui::TextColored(COL_GREEN, "OK");
+                        } else {
+                            ImGui::TextColored(COL_RED, "Failed");
+                            if (!it->second.last_error.empty() && ImGui::IsItemHovered()) {
+                                ImGui::SetTooltip("%s", it->second.last_error.c_str());
+                            }
+                        }
+                    } else {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
+                    
+                    // Column 3: Configs Found
+                    ImGui::TableNextColumn();
+                    if (has_history && it->second.configs_found > 0) {
+                        ImGui::Text("%d", it->second.configs_found);
+                    } else {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
+                    
+                    // Column 4: Unique Configs
+                    ImGui::TableNextColumn();
+                    if (has_history && it->second.unique_configs > 0) {
+                        ImGui::TextColored(COL_ACCENT, "%d", it->second.unique_configs);
+                    } else {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
+                    
+                    // Column 5: Success Rate
+                    ImGui::TableNextColumn();
+                    if (has_history && it->second.total_downloads > 0) {
+                        float rate = (float)it->second.successful_downloads / it->second.total_downloads * 100.0f;
+                        ImVec4 color = rate > 80 ? COL_GREEN : (rate > 50 ? COL_YELLOW : COL_RED);
+                        ImGui::TextColored(color, "%.0f%%", rate);
+                        if (ImGui::IsItemHovered()) {
+                            ImGui::SetTooltip("%d/%d successful", it->second.successful_downloads, it->second.total_downloads);
+                        }
+                    } else {
+                        ImGui::TextColored(COL_DIM, "-");
+                    }
                 }
+                
+                ImGui::EndTable();
             }
             
-            ImGui::InputTextMultiline("GitHub URLs", github_urls_.data(), github_urls_.size(),
-                ImVec2(-1, 200*dpi_scale_));
+            // Raw text editor (collapsed by default)
+            ImGui::Spacing();
+            ImGui::Separator();
+            if (ImGui::CollapsingHeader("Raw Source URLs (Advanced)", ImGuiTreeNodeFlags_None)) {
+                ImGui::InputTextMultiline("##github_urls_raw", github_urls_.data(), github_urls_.size(),
+                    ImVec2(-1, 150*dpi_scale_));
+            }
             
             // Proxy server setting for config downloads
             ImGui::Spacing();
