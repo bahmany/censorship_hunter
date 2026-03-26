@@ -1,6 +1,8 @@
 #include "win32/imgui_app.h"
 #include "resource.h"
 #include <windows.h>
+#include <shellapi.h>
+#include <securitybaseapi.h>
 #include <string>
 
 // Global mutex handle for single-instance check - kept alive for application lifetime
@@ -35,6 +37,51 @@ static void AppendUiLog(const wchar_t* line) {
 
 static bool PathExists(const std::wstring& path) {
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+// Check if current process is running with administrator privileges
+static bool IsRunningAsAdmin() {
+    BOOL isAdmin = FALSE;
+    PSID administratorsGroup = nullptr;
+    SID_IDENTIFIER_AUTHORITY ntAuthority = SECURITY_NT_AUTHORITY;
+    
+    if (AllocateAndInitializeSid(&ntAuthority, 2, SECURITY_BUILTIN_DOMAIN_RID, 
+                                 DOMAIN_ALIAS_RID_ADMINS, 0, 0, 0, 0, 0, 0, 
+                                 &administratorsGroup)) {
+        CheckTokenMembership(nullptr, administratorsGroup, &isAdmin);
+        FreeSid(administratorsGroup);
+    }
+    
+    return isAdmin == TRUE;
+}
+
+// Restart current application with administrator privileges
+// Returns true if restart was initiated, false on failure
+static bool RestartAsAdmin(const std::wstring& args = L"") {
+    wchar_t exePath[MAX_PATH];
+    if (GetModuleFileNameW(nullptr, exePath, MAX_PATH) == 0) {
+        DWORD err = GetLastError();
+        AppendUiLog((L"RestartAsAdmin: GetModuleFileNameW failed, error=" + std::to_wstring(err)).c_str());
+        return false;
+    }
+    
+    AppendUiLog(L"RestartAsAdmin: Requesting elevation...");
+    
+    SHELLEXECUTEINFOW sei = { sizeof(sei) };
+    sei.lpVerb = L"runas";  // This triggers UAC elevation
+    sei.lpFile = exePath;
+    sei.lpParameters = args.empty() ? nullptr : args.c_str();
+    sei.nShow = SW_NORMAL;
+    sei.fMask = SEE_MASK_NO_CONSOLE | SEE_MASK_FLAG_NO_UI;
+    
+    if (!ShellExecuteExW(&sei)) {
+        DWORD err = GetLastError();
+        AppendUiLog((L"RestartAsAdmin: ShellExecuteExW failed, error=" + std::to_wstring(err)).c_str());
+        return false;
+    }
+    
+    AppendUiLog(L"RestartAsAdmin: Elevation request succeeded, new process started");
+    return true;
 }
 
 static void SetCwdToExeDir() {
@@ -136,6 +183,26 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, PWSTR lpCmdLin
 
     const std::wstring cmd_line = lpCmdLine ? lpCmdLine : L"";
     const bool resume_edge_bypass = cmd_line.find(L"--resume-edge-bypass") != std::wstring::npos;
+    const bool require_admin = cmd_line.find(L"--require-admin") != std::wstring::npos;
+
+    // Check if admin elevation is required but not active
+    if (require_admin && !IsRunningAsAdmin()) {
+        AppendUiLog(L"Admin required but not running as admin - restarting with elevation...");
+        if (RestartAsAdmin(cmd_line)) {
+            // Successfully initiated restart with elevation - exit current instance
+            if (g_hSingleInstanceMutex) {
+                CloseHandle(g_hSingleInstanceMutex);
+                g_hSingleInstanceMutex = nullptr;
+            }
+            AppendUiLog(L"Exiting to allow elevated instance to take over");
+            return 0;
+        } else {
+            AppendUiLog(L"Failed to restart with elevation - continuing without admin rights");
+            // Optionally show error message
+            MessageBoxW(nullptr, L"Failed to obtain administrator privileges. Some features may not work correctly.", 
+                       L"Elevation Failed", MB_OK | MB_ICONWARNING | MB_TOPMOST);
+        }
+    }
 
     SetCwdToExeDir();
 
