@@ -25,12 +25,19 @@
 
 static bool isUserAdmin() {
     HANDLE token = nullptr;
-    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) return false;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        DWORD err = GetLastError();
+        std::cerr << "[isUserAdmin] OpenProcessToken failed (error=" << err << ")" << std::endl;
+        return false;
+    }
     TOKEN_ELEVATION elevation;
     DWORD size = sizeof(elevation);
     bool elevated = false;
     if (GetTokenInformation(token, TokenElevation, &elevation, sizeof(elevation), &size)) {
         elevated = elevation.TokenIsElevated != 0;
+    } else {
+        DWORD err = GetLastError();
+        std::cerr << "[isUserAdmin] GetTokenInformation failed (error=" << err << ")" << std::endl;
     }
     CloseHandle(token);
     return elevated;
