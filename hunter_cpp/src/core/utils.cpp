@@ -529,6 +529,8 @@ float getMemoryPercent() {
 #ifdef _WIN32
     MEMORYSTATUSEX ms; ms.dwLength=sizeof(ms);
     if(GlobalMemoryStatusEx(&ms)) return (float)ms.dwMemoryLoad;
+    DWORD err = GetLastError();
+    std::cerr << "[getMemoryPercent] GlobalMemoryStatusEx failed (error=" << err << ")" << std::endl;
     return 50.0f;
 #else
     struct sysinfo si; if(sysinfo(&si)==0){
