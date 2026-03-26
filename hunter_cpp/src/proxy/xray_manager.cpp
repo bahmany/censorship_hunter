@@ -116,10 +116,17 @@ void XRayManager::stopProcess(int pid) {
     if (pid <= 0) return;
 #ifdef _WIN32
     HANDLE h = OpenProcess(PROCESS_TERMINATE, FALSE, (DWORD)pid);
-    if (h) {
-        TerminateProcess(h, 0);
-        CloseHandle(h);
+    if (!h) {
+        DWORD err = GetLastError();
+        std::cerr << "[XRayManager] OpenProcess failed for PID " << pid 
+                  << " (error=" << err << ")" << std::endl;
+        std::lock_guard<std::mutex> lock(mutex_);
+        managed_pids_.erase(std::remove(managed_pids_.begin(), managed_pids_.end(), pid),
+                             managed_pids_.end());
+        return;
     }
+    TerminateProcess(h, 0);
+    CloseHandle(h);
 #else
     kill(pid, SIGTERM);
     usleep(100000); // 100ms

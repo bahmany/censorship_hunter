@@ -3010,22 +3010,26 @@ void HunterOrchestrator::killPortOccupants() {
     // Kill collected PIDs using Windows API (no shell needed)
     for (int pid : pids_to_kill) {
         HANDLE hProc = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, FALSE, pid);
-        if (hProc) {
-            char exe_name[MAX_PATH] = {};
-            DWORD size = MAX_PATH;
-            QueryFullProcessImageNameA(hProc, 0, exe_name, &size);
-            std::string name(exe_name);
-            
-            // Only kill xray processes, not system services
-            if (name.find("xray") != std::string::npos || 
-                name.find("sing-box") != std::string::npos ||
-                name.find("mihomo") != std::string::npos) {
-                std::cout << "[PortKill] Killing " << name << " (PID " << pid << ")" << std::endl;
-                TerminateProcess(hProc, 0);
-                killed_any = true;
-            }
-            CloseHandle(hProc);
+        if (!hProc) {
+            DWORD err = GetLastError();
+            std::cerr << "[PortKill] OpenProcess failed for PID " << pid 
+                      << " (error=" << err << ")" << std::endl;
+            continue;
         }
+        char exe_name[MAX_PATH] = {};
+        DWORD size = MAX_PATH;
+        QueryFullProcessImageNameA(hProc, 0, exe_name, &size);
+        std::string name(exe_name);
+        
+        // Only kill xray processes, not system services
+        if (name.find("xray") != std::string::npos || 
+            name.find("sing-box") != std::string::npos ||
+            name.find("mihomo") != std::string::npos) {
+            std::cout << "[PortKill] Killing " << name << " (PID " << pid << ")" << std::endl;
+            TerminateProcess(hProc, 0);
+            killed_any = true;
+        }
+        CloseHandle(hProc);
     }
     
     if (killed_any) {
