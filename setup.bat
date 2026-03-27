@@ -54,3 +54,4 @@ echo [4/4] Done.
 echo [OK] Setup executable created under installer\output\
 echo.
 pause
+
