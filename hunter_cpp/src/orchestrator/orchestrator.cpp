@@ -3847,6 +3847,7 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     int total_sources = static_cast<int>(sources.size());
     int downloaded_count = 0;
     int completed_sources = 0;
+    int successful_sources = 0;
     
     if (sources.empty()) {
         std::cout << "[Download] ERROR: No sources provided!" << std::endl;
@@ -4012,7 +4013,7 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
         if (stop_requested_.load()) {
             std::cout << "[Download] Download stopped by user request" << std::endl;
             emitProgress("", static_cast<float>(downloaded_count) / total_sources, "stopped", "");
-            return;
+            return successful_sources > 0;
         }
         
         const std::string& source = sources[i];
@@ -4114,6 +4115,7 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
             
             progress = static_cast<float>(i + 1) / total_sources;
             completed_sources = static_cast<int>(i + 1);
+            successful_sources++;
             emitProgress(source, progress, "completed", successful_proxy);
             
         } else {
