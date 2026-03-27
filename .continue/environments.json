@@ -1,0 +1,7 @@
+[
+  {
+    "install": "pip3 install requests",
+    "start": "python3 hunter_cpp/test_working_sources.py",
+    "resourceSize": "small"
+  }
+]
