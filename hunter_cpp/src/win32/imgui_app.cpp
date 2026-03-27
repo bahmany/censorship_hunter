@@ -1,8 +1,11 @@
 // imgui_app.cpp — Complete UI rewrite with proper multithreading
 #include "core/utils.h"
 #include "core/task_manager.h"
+#include "core/seed_data.h"
 #include "win32/imgui_app.h"
+#include "win32/font_awesome.h"
 #include "orchestrator/orchestrator.h"
+#include "resource.h"
 
 #include "third_party/imgui/imgui.h"
 #include "third_party/imgui/backends/imgui_impl_dx9.h"
@@ -21,11 +24,118 @@
 #include <algorithm>
 #include <chrono>
 #include <unordered_map>
+#include <iostream>
 
 IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace hunter {
 namespace win32 {
+
+// Icon cache for the application
+static HICON g_app_icon = nullptr;
+static HICON g_status_online = nullptr;
+static HICON g_status_offline = nullptr;
+static HICON g_status_working = nullptr;
+static HICON g_status_error = nullptr;
+static NOTIFYICONDATA g_notify_data = {};
+static bool g_tray_icon_added = false;
+
+// Load icons on startup
+static void LoadApplicationIcons() {
+    HMODULE hModule = GetModuleHandle(nullptr);
+    
+    // For now, use system icons to ensure functionality
+    if (!g_app_icon) {
+        g_app_icon = LoadIcon(hModule, MAKEINTRESOURCE(IDI_APP_ICON));
+        if (!g_app_icon) {
+            // Fallback to system icon if custom icon fails
+            g_app_icon = LoadIcon(nullptr, IDI_APPLICATION);
+            std::cout << "[Icon] Using system application icon" << std::endl;
+        } else {
+            std::cout << "[Icon] Loaded custom app icon successfully" << std::endl;
+        }
+    }
+    
+    // Load status icons with fallbacks
+    if (!g_status_online) {
+        g_status_online = LoadIcon(hModule, MAKEINTRESOURCE(IDI_STATUS_ONLINE));
+        if (!g_status_online) {
+            g_status_online = LoadIcon(nullptr, IDI_INFORMATION);
+            std::cout << "[Icon] Using system information icon for online status" << std::endl;
+        }
+    }
+    if (!g_status_offline) {
+        g_status_offline = LoadIcon(hModule, MAKEINTRESOURCE(IDI_STATUS_OFFLINE));
+        if (!g_status_offline) {
+            g_status_offline = LoadIcon(nullptr, IDI_ERROR);
+            std::cout << "[Icon] Using system error icon for offline status" << std::endl;
+        }
+    }
+    if (!g_status_working) {
+        g_status_working = LoadIcon(hModule, MAKEINTRESOURCE(IDI_STATUS_WORKING));
+        if (!g_status_working) {
+            g_status_working = LoadIcon(nullptr, IDI_WARNING);
+            std::cout << "[Icon] Using system warning icon for working status" << std::endl;
+        }
+    }
+    if (!g_status_error) {
+        g_status_error = LoadIcon(hModule, MAKEINTRESOURCE(IDI_STATUS_ERROR));
+        if (!g_status_error) {
+            g_status_error = LoadIcon(nullptr, IDI_HAND);
+            std::cout << "[Icon] Using system hand icon for error status" << std::endl;
+        }
+    }
+    
+    std::cout << "[Icon] Icon loading completed - App: " << (g_app_icon ? "OK" : "FAIL") 
+              << ", Online: " << (g_status_online ? "OK" : "FAIL")
+              << ", Offline: " << (g_status_offline ? "OK" : "FAIL") << std::endl;
+}
+
+// Cleanup icons on shutdown
+static void CleanupApplicationIcons() {
+    if (g_tray_icon_added) {
+        Shell_NotifyIcon(NIM_DELETE, &g_notify_data);
+        g_tray_icon_added = false;
+    }
+    if (g_app_icon) DestroyIcon(g_app_icon);
+    if (g_status_online) DestroyIcon(g_status_online);
+    if (g_status_offline) DestroyIcon(g_status_offline);
+    if (g_status_working) DestroyIcon(g_status_working);
+    if (g_status_error) DestroyIcon(g_status_error);
+    g_app_icon = nullptr;
+    g_status_online = nullptr;
+    g_status_offline = nullptr;
+    g_status_working = nullptr;
+    g_status_error = nullptr;
+}
+
+// Add tray icon
+static void AddTrayIcon(HWND hwnd) {
+    if (g_tray_icon_added || !g_app_icon) return;
+    
+    ZeroMemory(&g_notify_data, sizeof(NOTIFYICONDATA));
+    g_notify_data.cbSize = sizeof(NOTIFYICONDATA);
+    g_notify_data.hWnd = hwnd;
+    g_notify_data.uID = 1;
+    g_notify_data.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_notify_data.uCallbackMessage = WM_USER + 1;
+    g_notify_data.hIcon = g_app_icon;
+    wcscpy_s(g_notify_data.szTip, L"Hunter Censor");
+    
+    if (Shell_NotifyIcon(NIM_ADD, &g_notify_data)) {
+        g_tray_icon_added = true;
+    }
+}
+
+// Update tray icon based on status
+static void UpdateTrayIcon(bool running) {
+    if (!g_tray_icon_added) return;
+    
+    g_notify_data.hIcon = running ? g_status_online : g_status_offline;
+    if (g_notify_data.hIcon) {
+        Shell_NotifyIcon(NIM_MODIFY, &g_notify_data);
+    }
+}
 
 // ── Anonymous helpers ──
 namespace {
@@ -34,6 +144,7 @@ const char* PageLabel(ImGuiApp::Page p) {
     switch (p) {
         case ImGuiApp::Page::Home:       return "  Home  ";
         case ImGuiApp::Page::Configs:    return " Configs ";
+        case ImGuiApp::Page::Sources:    return " Sources ";
         case ImGuiApp::Page::Censorship: return " Censorship ";
         case ImGuiApp::Page::Logs:       return "  Logs  ";
         case ImGuiApp::Page::Advanced:   return " Advanced ";
@@ -486,12 +597,34 @@ void ImGuiApp::ReloadFonts() {
     builder.AddRanges(io.Fonts->GetGlyphRangesDefault());
     builder.AddRanges(io.Fonts->GetGlyphRangesCyrillic());
     builder.AddRanges(arabic_ranges);
+    if (FontAwesome::IsLoaded()) {
+        builder.AddText("\uf06e\uf044\uf1f8\uf067\uf068\uf00c\uf00d\uf002\uf019\uf093\uf021\uf013\uf05a\uf071\uf058\uf0c1\uf0c5\uf0ea\uf04b\uf04c\uf04d");
+    }
     builder.BuildRanges(&glyph_ranges);
+
+    ImFont* main_font = nullptr;
     if (!font_path.empty()) {
-        if (!io.Fonts->AddFontFromFileTTF(font_path.c_str(), sz, &cfg, glyph_ranges.Data))
-            io.Fonts->AddFontDefault();
+        main_font = io.Fonts->AddFontFromFileTTF(font_path.c_str(), sz, &cfg, glyph_ranges.Data);
     } else {
-        io.Fonts->AddFontDefault();
+        main_font = io.Fonts->AddFontDefault(&cfg);
+    }
+
+    if (!main_font) {
+        main_font = io.Fonts->AddFontDefault(&cfg);
+    }
+
+    if (FontAwesome::IsLoaded() && FontAwesome::GetFontData() && FontAwesome::GetFontSize() > 0) {
+        static const ImWchar icon_ranges[] = { 0xf000, 0xf8ff, 0 };
+        ImFontConfig icon_cfg = cfg;
+        icon_cfg.MergeMode = true;
+        icon_cfg.PixelSnapH = true;
+        icon_cfg.GlyphMinAdvanceX = sz * 0.8f;
+        io.Fonts->AddFontFromMemoryTTF(
+            const_cast<void*>(static_cast<const void*>(FontAwesome::GetFontData())),
+            static_cast<int>(FontAwesome::GetFontSize()),
+            sz * 0.85f,
+            &icon_cfg,
+            icon_ranges);
     }
     io.FontGlobalScale = 1.0f;
     if (d3d_device_) {
@@ -613,6 +746,7 @@ ImGuiApp::~ImGuiApp() {
     JoinThread(discovery_thread_);
     JoinThread(edge_bypass_thread_);
     StopHunter();
+    CleanupApplicationIcons();
     if (hwnd_) {
         ImGui_ImplDX9_Shutdown();
         ImGui_ImplWin32_Shutdown();
@@ -679,26 +813,71 @@ void ImGuiApp::BackgroundWorkerLoop() {
         }
         
         // Check for download progress updates from orchestrator stdout
-        // In a real implementation, you would capture stdout and parse ##DOWNLOAD_PROGRESS## and ##DOWNLOAD_HISTORY## messages
-        // For now, we simulate progress updates
+        // Parse ##DOWNLOAD_PROGRESS## and ##DOWNLOAD_LOG## messages from LogRingBuffer
         try {
-            if (download_progress_.active) {
-                // Auto-finish progress after orchestrator completes
-                static auto start_time = std::chrono::steady_clock::now();
-                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - start_time).count();
-                
-                if (elapsed > 3) {
-                    download_progress_.active = false;
-                    download_progress_.progress = 1.0f;
-                    download_progress_.status = "finished";
-                    SetToast("Download completed", ToastKind::Success);
-                    start_time = std::chrono::steady_clock::now();
-                } else {
-                    download_progress_.progress = static_cast<float>(elapsed) / 3.0f;
-                    download_progress_.status = "downloading";
+            auto& log_buffer = utils::LogRingBuffer::instance();
+            auto fresh_logs = log_buffer.fetchSince(download_log_generation_, 100);
+            for (const auto& log : fresh_logs) {
+                // Parse download progress messages
+                if (log.find("##DOWNLOAD_PROGRESS##") != std::string::npos) {
+                    // Extract JSON after the prefix
+                    size_t json_start = log.find('{');
+                    if (json_start != std::string::npos) {
+                        std::string json_str = log.substr(json_start);
+                        // Parse JSON fields
+                        auto extractValue = [&json_str](const std::string& key) -> std::string {
+                            std::string needle = "\"" + key + "\"";
+                            size_t kp = json_str.find(needle);
+                            if (kp == std::string::npos) return "";
+                            size_t col = json_str.find(':', kp + needle.size());
+                            if (col == std::string::npos) return "";
+                            // Skip whitespace
+                            size_t val_start = col + 1;
+                            while (val_start < json_str.size() && (json_str[val_start] == ' ' || json_str[val_start] == '\t')) val_start++;
+                            if (val_start >= json_str.size()) return "";
+                            // Handle string vs number
+                            if (json_str[val_start] == '"') {
+                                size_t val_end = json_str.find('"', val_start + 1);
+                                if (val_end != std::string::npos) {
+                                    return json_str.substr(val_start + 1, val_end - val_start - 1);
+                                }
+                            } else {
+                                // Number - find end
+                                size_t val_end = val_start;
+                                while (val_end < json_str.size() && (isdigit(json_str[val_end]) || json_str[val_end] == '.' || json_str[val_end] == '-')) val_end++;
+                                return json_str.substr(val_start, val_end - val_start);
+                            }
+                            return "";
+                        };
+                        
+                        download_progress_.current_source = extractValue("current_source");
+                        download_progress_.status = extractValue("status");
+                        std::string prog_str = extractValue("progress");
+                        if (!prog_str.empty()) download_progress_.progress = std::stof(prog_str);
+                        std::string dl_count = extractValue("downloaded_count");
+                        if (!dl_count.empty()) download_progress_.downloaded_count = std::stoi(dl_count);
+                        std::string tot_count = extractValue("total_count");
+                        if (!tot_count.empty()) download_progress_.total_count = std::stoi(tot_count);
+                        download_progress_.proxy = extractValue("proxy");
+                        
+                        // Check for completion
+                        if (download_progress_.status == "finished" || download_progress_.status == "completed") {
+                            download_progress_.active = false;
+                            download_progress_.progress = 1.0f;
+                            SetToast("Download completed", ToastKind::Success);
+                        }
+                    }
+                } else if (log.find("##DOWNLOAD_LOG##") != std::string::npos) {
+                    // Extract log message after prefix
+                    size_t msg_start = log.find("##DOWNLOAD_LOG##") + 16;
+                    if (msg_start < log.size()) {
+                        std::string msg = log.substr(msg_start);
+                        download_logs_.push_back(msg);
+                        if (download_logs_.size() > 100) download_logs_.erase(download_logs_.begin());
+                    }
                 }
             }
+            download_log_generation_ = log_buffer.generation();
         } catch (...) {}
         
         for (int i = 0; i < 20 && !bg_stop_.load(); ++i)
@@ -739,9 +918,10 @@ void ImGuiApp::InitializeDefaultSources() {
         item.url = default_data[i].first;
         item.name = default_data[i].second;
         item.description = "High-quality V2ray configuration source";
-        item.category = "github";
+        item.category = (i < 5) ? "premium" : "primary";  // All sources are allowed
         item.added_ts = now;
         item.priority = (i < 5) ? 1 : 0;  // First 5 are high priority
+        item.enabled = true;  // All sources auto-selected
         source_manager_.sources.push_back(item);
     }
     
@@ -750,40 +930,130 @@ void ImGuiApp::InitializeDefaultSources() {
 }
 
 void ImGuiApp::LoadSourceManager() {
-    std::string sources_path = "runtime/sources_manager.json";
+    const std::string sources_path = "runtime/sources_manager.tsv";
+    InitializeDefaultSources();
+
     if (utils::fileExists(sources_path)) {
-        try {
-            // Parse JSON and load into source_manager_
-            // For now, initialize defaults if parsing fails
-            InitializeDefaultSources();
-            AppendLog("[UI] Loaded source manager from file");
-        } catch (...) {
-            InitializeDefaultSources();
-            AppendLog("[UI] Failed to load source manager, using defaults");
+        std::ifstream in(sources_path);
+        std::string line;
+        std::vector<SourceItem> loaded;
+        while (std::getline(in, line)) {
+            line = utils::trim(line);
+            if (line.empty() || line[0] == '#') continue;
+            std::vector<std::string> cols;
+            std::istringstream row(line);
+            std::string col;
+            while (std::getline(row, col, '\t')) cols.push_back(col);
+            if (cols.size() < 10) continue;
+
+            SourceItem item;
+            item.enabled = cols[0] == "1";
+            try { item.priority = std::stoi(cols[1]); } catch (...) {}
+            item.category = cols[2];
+            try { item.added_ts = std::stod(cols[3]); } catch (...) {}
+            try { item.last_success_ts = std::stod(cols[4]); } catch (...) {}
+            try { item.total_configs_found = std::stoi(cols[5]); } catch (...) {}
+            try { item.success_rate = std::stoi(cols[6]); } catch (...) {}
+            item.name = cols[7];
+            item.description = cols[8];
+            item.url = cols[9];
+            if (!item.url.empty()) loaded.push_back(std::move(item));
+        }
+        if (!loaded.empty()) {
+            source_manager_.sources = std::move(loaded);
+            AppendLog("[UI] Loaded source manager from disk");
         }
     } else {
-        InitializeDefaultSources();
-        SaveSourceManager();  // Save defaults for next time
+        SaveSourceManager();
         AppendLog("[UI] Created default source manager file");
     }
+
+    const auto configured_urls = DedupeStringsPreserveOrder(config_.githubUrls());
+    if (!configured_urls.empty()) {
+        std::set<std::string> configured_set(configured_urls.begin(), configured_urls.end());
+        for (auto& source : source_manager_.sources) {
+            source.enabled = configured_set.find(source.url) != configured_set.end();
+        }
+        for (const auto& url : configured_urls) {
+            bool exists = false;
+            for (const auto& source : source_manager_.sources) {
+                if (source.url == url) { exists = true; break; }
+            }
+            if (!exists) {
+                SourceItem item;
+                item.url = url;
+                item.name = url;
+                item.description = "Imported from persisted config";
+                item.category = "custom";
+                item.enabled = true;
+                item.added_ts = utils::nowTimestamp();
+                source_manager_.sources.push_back(std::move(item));
+            }
+        }
+    }
+
+    std::vector<std::string> enabled_urls;
+    enabled_urls.reserve(source_manager_.sources.size());
+    for (const auto& source : source_manager_.sources) {
+        if (source.enabled) enabled_urls.push_back(source.url);
+    }
+    CopyBuf(JoinUniqueLinesText(enabled_urls), github_urls_.data(), github_urls_.size());
+    RefreshSourceStats();
 }
 
 void ImGuiApp::SaveSourceManager() {
-    std::string sources_path = "runtime/sources_manager.json";
+    const std::string sources_path = "runtime/sources_manager.tsv";
     utils::mkdirRecursive("runtime");
-    
-    // Build JSON for source manager
-    utils::JsonBuilder root;
-    root.add("version", source_manager_.version)
-        .add("last_updated", source_manager_.last_updated)
-        .add("total_downloads", source_manager_.total_downloads)
-        .add("successful_downloads", source_manager_.successful_downloads);
-    
-    // For now, just save basic structure
-    // TODO: Implement proper JSON array serialization
-    std::string json_content = root.build();
-    utils::saveJsonFile(sources_path, json_content);
-    
+    source_manager_.last_updated = utils::nowTimestamp();
+
+    auto sanitize = [](std::string v) {
+        for (char& c : v) {
+            if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+        }
+        return v;
+    };
+
+    std::ofstream out(sources_path, std::ios::trunc);
+    out << "# enabled\tpriority\tcategory\tadded_ts\tlast_success_ts\ttotal_configs_found\tsuccess_rate\tname\tdescription\turl\n";
+    for (const auto& source : source_manager_.sources) {
+        out << (source.enabled ? "1" : "0") << '\t'
+            << source.priority << '\t'
+            << sanitize(source.category) << '\t'
+            << source.added_ts << '\t'
+            << source.last_success_ts << '\t'
+            << source.total_configs_found << '\t'
+            << source.success_rate << '\t'
+            << sanitize(source.name) << '\t'
+            << sanitize(source.description) << '\t'
+            << source.url << '\n';
+    }
+
+    std::ofstream hist_out("runtime/source_history.tsv", std::ios::trunc);
+    hist_out << "# url\tlast_download_ts\tlast_success\ttotal_downloads\tsuccessful_downloads\tconfigs_found\tunique_configs\tlast_error\n";
+    for (const auto& entry : source_history_) {
+        const auto& history = entry.second;
+        std::string err = history.last_error;
+        for (char& c : err) {
+            if (c == '\t' || c == '\r' || c == '\n') c = ' ';
+        }
+        hist_out << history.url << '\t'
+                 << history.last_download_ts << '\t'
+                 << (history.last_success ? "1" : "0") << '\t'
+                 << history.total_downloads << '\t'
+                 << history.successful_downloads << '\t'
+                 << history.configs_found << '\t'
+                 << history.unique_configs << '\t'
+                 << err << '\n';
+    }
+
+    std::vector<std::string> enabled_urls;
+    enabled_urls.reserve(source_manager_.sources.size());
+    for (const auto& source : source_manager_.sources) {
+        if (source.enabled) enabled_urls.push_back(source.url);
+    }
+    config_.setGithubUrls(enabled_urls);
+    CopyBuf(JoinUniqueLinesText(enabled_urls), github_urls_.data(), github_urls_.size());
+
     AppendLog("[UI] Saved source manager to " + sources_path);
 }
 
@@ -943,6 +1213,7 @@ void ImGuiApp::ProcessDownloadHistory(const std::string& url, double timestamp, 
             break;
         }
     }
+    SaveSourceManager();
 }
 
 ImGuiApp::Snapshot ImGuiApp::BuildSnapshot() {
@@ -1033,11 +1304,21 @@ bool ImGuiApp::Create(HINSTANCE hInstance, int nCmdShow) {
     hinstance_ = hInstance;
     LoadConfig();
     EnsureOrchestrator();
+    LoadApplicationIcons();
+    
+    // Initialize FontAwesome for icons
+    if (!FontAwesome::LoadFont()) {
+        std::cout << "[UI] FontAwesome font loading failed, using fallback icons" << std::endl;
+    } else {
+        std::cout << "[UI] FontAwesome font loaded successfully" << std::endl;
+    }
 
     WNDCLASSEXW wc{};
     wc.cbSize = sizeof(wc); wc.style = CS_CLASSDC;
     wc.lpfnWndProc = WindowProc; wc.hInstance = hinstance_;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hIcon = LoadIcon(hinstance_, MAKEINTRESOURCE(IDI_APP_ICON));
+    wc.hIconSm = LoadIcon(hinstance_, MAKEINTRESOURCE(IDI_APP_ICON_SMALL));
     wc.lpszClassName = L"HunterCensorWindow";
     if (!RegisterClassExW(&wc)) return false;
 
@@ -1045,6 +1326,9 @@ bool ImGuiApp::Create(HINSTANCE hInstance, int nCmdShow) {
         WS_OVERLAPPEDWINDOW, 100, 100, 1440, 920,
         nullptr, nullptr, hinstance_, this);
     if (!hwnd_) return false;
+
+    // Add tray icon
+    AddTrayIcon(hwnd_);
 
     if (!CreateDeviceD3D()) {
         CleanupDeviceD3D(); DestroyWindow(hwnd_); hwnd_ = nullptr; return false;
@@ -1233,6 +1517,14 @@ void ImGuiApp::LoadConfig() {
     if (utils::fileExists(config_path_)) config_.loadFromFile(config_path_);
     else config_.saveToFile(config_path_);
     
+    // Ensure seed data exists for first run setup
+    std::string runtime_dir = utils::dirName(config_path_);
+    if (runtime_dir.empty()) runtime_dir = "runtime";
+    bool seed_created = hunter::SeedData::ensureSeedData(runtime_dir);
+    if (seed_created) {
+        AppendLog("[UI] Created seed data for first run setup");
+    }
+    
     // Load source manager (this will initialize defaults if first run)
     LoadSourceManager();
     
@@ -1275,6 +1567,7 @@ void ImGuiApp::StartHunter() {
     AppendLog("[UI] Start requested");
     orchestrator_stopping_ = false;
     orchestrator_running_ = true;
+    UpdateTrayIcon(true);  // Update tray icon to online status
     orchestrator_thread_ = std::thread([this]{
         try {
             HunterOrchestrator* orchestrator = nullptr;
@@ -1288,6 +1581,7 @@ void ImGuiApp::StartHunter() {
         catch (...) { AppendLog("[ERR] Unknown orchestrator error"); }
         orchestrator_running_ = false;
         orchestrator_stopping_ = false;
+        UpdateTrayIcon(false);  // Update tray icon to offline status
         AppendLog("[UI] Orchestrator thread exited");
     });
     AppendLog("[UI] Hunter started");
@@ -1303,6 +1597,7 @@ void ImGuiApp::StopHunter() {
     JoinThread(orchestrator_thread_);
     orchestrator_running_ = false;
     orchestrator_stopping_ = false;
+    UpdateTrayIcon(false);  // Update tray icon to offline status
     AppendLog("[UI] Hunter stopped");
 }
 
@@ -1570,10 +1865,18 @@ void ImGuiApp::ApplyDiscoveryToEdgeInputs(const security::DpiEvasionOrchestrator
 // ── Advanced settings (async) ──
 void ImGuiApp::ApplyAdvancedSettings() {
     const auto clean_targets = DedupeStringsPreserveOrder(SplitLines(telegram_targets_.data()));
-    const auto clean_github_urls = DedupeStringsPreserveOrder(SplitLines(github_urls_.data()));
+    std::vector<std::string> clean_github_urls;
+    for (const auto& source : source_manager_.sources) {
+        if (source.enabled) clean_github_urls.push_back(source.url);
+    }
+    if (clean_github_urls.empty()) {
+        clean_github_urls = DedupeStringsPreserveOrder(SplitLines(github_urls_.data()));
+    } else {
+        clean_github_urls = DedupeStringsPreserveOrder(clean_github_urls);
+    }
     CopyBuf(JoinUniqueLinesText(clean_targets), telegram_targets_.data(), telegram_targets_.size());
     CopyBuf(JoinUniqueLinesText(clean_github_urls), github_urls_.data(), github_urls_.size());
-
+    
     std::ostringstream cmd;
     cmd << "{\"command\":\"update_runtime_settings\""
         << ",\"xray_path\":\"" << JsonEscape(xray_path_.data()) << "\""
@@ -1612,6 +1915,7 @@ void ImGuiApp::ApplyAdvancedSettings() {
     config_.setGithubUrls(clean_github_urls);
     config_.set("config_download_proxy", std::string(config_download_proxy_.data()));
     SaveConfigToDisk();
+    SaveSourceManager();
 
     RunCommandAsync(cmd.str());
     SetToast("Settings saved", ToastKind::Success);
@@ -1637,20 +1941,106 @@ void ImGuiApp::ExportConfigsToFile() {
     RunCommandAsync("{\"command\":\"export_config_db\",\"path\":\"" + JsonEscape(path) + "\"}");
 }
 
+void ImGuiApp::ExportSeedDataForPackaging() {
+    std::string runtime_dir = utils::dirName(config_path_);
+    if (runtime_dir.empty()) runtime_dir = "runtime";
+    
+    std::string export_dir = runtime_dir + "/seed_export";
+    bool success = hunter::SeedData::exportForPackaging(runtime_dir, export_dir);
+    
+    if (success) {
+        SetToast("Seed data exported for packaging", ToastKind::Success);
+        AppendLog("[UI] Exported seed data to " + export_dir);
+    } else {
+        SetToast("Failed to export seed data", ToastKind::Error);
+        AppendLog("[UI] Failed to export seed data");
+    }
+}
+
 void ImGuiApp::DownloadConfigsFromSources() {
-    // Get enabled sources from source manager
-    auto enabled_sources = GetEnabledSources();
-    if (enabled_sources.empty()) {
-        SetToast("No enabled sources configured", ToastKind::Warning);
-        AppendLog("[UI] DownloadConfigsFromSources: no enabled sources available");
+    std::cout << "[UI] DownloadConfigsFromSources called!" << std::endl;
+    AppendLog("[UI] DownloadConfigsFromSources called!");
+    
+    // Debug: Check source manager state
+    AppendLog("[UI] DownloadConfigsFromSources: source_manager has " + std::to_string(source_manager_.sources.size()) + " sources");
+    std::cout << "[UI] Source manager has " << source_manager_.sources.size() << " sources" << std::endl;
+    
+    // Get ALL sources (not just enabled ones) - all sources are auto-selected
+    std::vector<SourceItem> all_sources;
+    for (const auto& source : source_manager_.sources) {
+        // Only include premium/allowed sources
+        if (source.category == "primary" || source.category == "premium" || source.enabled) {
+            all_sources.push_back(source);
+        }
+    }
+    
+    AppendLog("[UI] DownloadConfigsFromSources: found " + std::to_string(all_sources.size()) + " allowed sources (all auto-selected)");
+    std::cout << "[UI] Found " << all_sources.size() << " allowed sources (all auto-selected)" << std::endl;
+    
+    if (all_sources.empty()) {
+        SetToast("No allowed sources configured", ToastKind::Warning);
+        AppendLog("[UI] DownloadConfigsFromSources: no allowed sources available");
+        
+        // Try to load seed data if no sources exist
+        if (source_manager_.sources.empty()) {
+            AppendLog("[UI] DownloadConfigsFromSources: no sources at all, trying to load seed data");
+            std::cout << "[UI] No sources found, loading seed data..." << std::endl;
+            SeedData::ensureSeedData("runtime");
+            LoadSourceManager();
+            
+            // Retry with seed data
+            all_sources.clear();
+            for (const auto& source : source_manager_.sources) {
+                if (source.category == "primary" || source.category == "premium" || source.enabled) {
+                    all_sources.push_back(source);
+                }
+            }
+            
+            AppendLog("[UI] DownloadConfigsFromSources: after seed load, have " + std::to_string(all_sources.size()) + " allowed sources");
+            std::cout << "[UI] After seed load: " << all_sources.size() << " allowed sources" << std::endl;
+        }
+        
+        // If still no sources, fallback to hardcoded URLs
+        if (all_sources.empty()) {
+            AppendLog("[UI] DownloadConfigsFromSources: still no sources, using fallback URLs");
+            std::cout << "[UI] Still no sources, using fallback URLs..." << std::endl;
+            std::vector<std::string> fallback_urls = config_.githubUrls();
+            if (!fallback_urls.empty()) {
+                AppendLog("[UI] DownloadConfigsFromSources: using " + std::to_string(fallback_urls.size()) + " fallback URLs");
+                std::cout << "[UI] Using " << fallback_urls.size() << " fallback URLs" << std::endl;
+                
+                const std::string proxy = std::string(config_download_proxy_.data());
+                if (!proxy.empty()) {
+                    AppendLog("[UI] DownloadConfigsFromSources: using proxy " + proxy);
+                    std::cout << "[UI] Using proxy: " << proxy << std::endl;
+                }
+                
+                std::string sources_json = "[";
+                for (size_t i = 0; i < fallback_urls.size(); ++i) {
+                    if (i > 0) sources_json += ",";
+                    sources_json += "\"" + fallback_urls[i] + "\"";
+                }
+                sources_json += "]";
+                
+                std::string command = "{\"command\":\"download_configs\",\"sources\":" + sources_json + ",\"proxy\":\"" + JsonEscape(proxy) + "\"}";
+                AppendLog("[UI] DownloadConfigsFromSources: sending command: " + command);
+                std::cout << "[UI] Sending download command: " << command << std::endl;
+                RunCommandAsync(command);
+                SetToast("Downloading from fallback URLs...", ToastKind::Info);
+                return;
+            }
+        }
         return;
     }
     
-    // Extract URLs from enabled sources
+    // Extract URLs from all sources (all are auto-selected)
     std::vector<std::string> source_urls;
-    for (const auto& source : enabled_sources) {
+    for (const auto& source : all_sources) {
         source_urls.push_back(source.url);
     }
+    
+    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_urls.size()) + " auto-selected sources");
+    std::cout << "[UI] Starting download from " << source_urls.size() << " auto-selected sources" << std::endl;
     
     // Initialize progress tracking
     download_progress_.active = true;
@@ -1985,7 +2375,7 @@ void ImGuiApp::DrawNavBar() {
         s.db_alive, s.db_total, s.db_avg_latency, s.cycle_count);
     ImGui::Separator();
 
-    const Page pages[] = {Page::Home, Page::Configs, Page::Censorship, Page::Logs, Page::Advanced, Page::About};
+    const Page pages[] = {Page::Home, Page::Configs, Page::Sources, Page::Censorship, Page::Logs, Page::Advanced, Page::About};
     for (auto p : pages) {
         bool sel = (page_ == p);
         if (sel) {
@@ -2381,6 +2771,7 @@ void ImGuiApp::DrawFrame() {
     switch (page_) {
         case Page::Home:       DrawHomePage(); break;
         case Page::Configs:    DrawConfigsPage(); break;
+        case Page::Sources:    DrawSourcesPage(); break;
         case Page::Censorship: DrawCensorshipPage(); break;
         case Page::Logs:       DrawLogsPage(); break;
         case Page::Advanced:   DrawAdvancedPage(); break;

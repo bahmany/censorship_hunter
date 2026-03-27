@@ -33,6 +33,7 @@ set(CORE_SOURCES
     src/core/models.cpp
     src/core/utils.cpp
     src/core/task_manager.cpp
+    src/core/seed_data.cpp
 )
 
 # ─── Network Library Sources ───
@@ -160,6 +161,8 @@ if(WIN32)
     add_executable(huntercensor
         src/win32/win_main.cpp
         src/win32/imgui_app.cpp
+        src/win32/imgui_sources_page.cpp
+        src/win32/font_awesome.cpp
         src/win32/qr_code.cpp
         src/win32/resource.rc
         third_party/imgui/imgui.cpp

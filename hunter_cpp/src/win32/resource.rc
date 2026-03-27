@@ -1,6 +1,24 @@
 #include "resource.h"
 #include <windows.h>
 
+// Icons
+IDI_APP_ICON               ICON "icons/app.ico"
+IDI_APP_ICON_SMALL         ICON "icons/app_small.ico"
+IDI_APP_ICON_LARGE         ICON "icons/app_large.ico"
+
+IDI_STATUS_ONLINE         ICON "icons/online.ico"
+IDI_STATUS_OFFLINE        ICON "icons/offline.ico"
+IDI_STATUS_WORKING        ICON "icons/working.ico"
+IDI_STATUS_ERROR          ICON "icons/error.ico"
+
+IDI_CONFIG                ICON "icons/config.ico"
+IDI_DOWNLOAD              ICON "icons/download.ico"
+IDI_SETTINGS              ICON "icons/settings.ico"
+IDI_LOGS                  ICON "icons/logs.ico"
+IDI_CENSORSHIP            ICON "icons/censorship.ico"
+IDI_SOURCES               ICON "icons/sources.ico"
+IDI_ABOUT                 ICON "icons/about.ico"
+
 1 RT_MANIFEST "huntercensor.exe.manifest"
 
 1 VERSIONINFO

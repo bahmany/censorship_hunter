@@ -2,6 +2,23 @@
 
 // Application icon
 #define IDI_APP_ICON               101
+#define IDI_APP_ICON_SMALL         102
+#define IDI_APP_ICON_LARGE         103
+
+// Status icons
+#define IDI_STATUS_ONLINE         201
+#define IDI_STATUS_OFFLINE        202
+#define IDI_STATUS_WORKING        203
+#define IDI_STATUS_ERROR          204
+
+// Function icons
+#define IDI_CONFIG                301
+#define IDI_DOWNLOAD              302
+#define IDI_SETTINGS              303
+#define IDI_LOGS                  304
+#define IDI_CENSORSHIP            305
+#define IDI_SOURCES               306
+#define IDI_ABOUT                 307
 
 // Control IDs
 #define IDC_START_BUTTON           1001

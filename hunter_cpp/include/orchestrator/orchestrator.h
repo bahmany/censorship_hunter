@@ -211,6 +211,13 @@ public:
     };
     std::vector<PortSlot> getProvisionedPorts() const;
 
+    /**
+     * @brief Download configs from multiple sources with proxy fallback chain
+     * @param sources List of source URLs to download from
+     * @param proxy App-configured proxy (empty string if none)
+     */
+    void downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy);
+
 private:
     HunterConfig& config_;
 
@@ -272,7 +279,6 @@ private:
     int computeAdaptiveSleep();
     void replaceProvisionedPortsLocked(const std::vector<int>& dead_indices, double now,
                                        const std::set<std::string>& excluded_uris = {});
-    void downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy);
 };
 
 } // namespace hunter

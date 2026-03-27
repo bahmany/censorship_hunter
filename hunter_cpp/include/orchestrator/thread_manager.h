@@ -268,5 +268,8 @@ private:
     std::vector<BaseWorker*> all_workers_;
 };
 
+// Utility functions for GitHub proxy management
+std::vector<int> githubProxyPorts(HunterOrchestrator* orch);
+
 } // namespace orchestrator
 } // namespace hunter

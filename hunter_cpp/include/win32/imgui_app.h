@@ -26,7 +26,7 @@ namespace win32 {
 
 class ImGuiApp {
 public:
-    enum class Page { Home, Configs, Censorship, Logs, Advanced, About };
+    enum class Page { Home, Configs, Sources, Censorship, Logs, Advanced, About };
     enum class ToastKind { Info, Success, Warning, Error };
 
     ImGuiApp();
@@ -125,6 +125,7 @@ private:
     void ApplyAdvancedSettings();
     void ImportConfigsFromFile();
     void ExportConfigsToFile();
+    void ExportSeedDataForPackaging();
     void DownloadConfigsFromSources();
     void ProcessDownloadHistory(const std::string& url, double timestamp, bool success, 
                                int configs_found, int unique_configs, const std::string& error);
@@ -175,6 +176,7 @@ private:
     void DrawNavBar();
     void DrawHomePage();
     void DrawConfigsPage();
+    void DrawSourcesPage();
     void DrawCensorshipPage();
     void DrawLogsPage();
     void DrawAdvancedPage();
@@ -275,8 +277,17 @@ private:
         int downloaded_count = 0;
         int total_count = 0;
         std::string proxy;
+        
+        // Enhanced download tracking
+        double downloaded_size = 0.0;      // Total bytes downloaded
+        double total_size = 0.0;           // Estimated total size
+        double speed = 0.0;                // Current download speed (bytes/sec)
+        double start_time = 0.0;           // Download start time
+        double last_update_time = 0.0;     // Last progress update time
     };
     DownloadProgress download_progress_;
+    std::vector<std::string> download_logs_;
+    uint64_t download_log_generation_ = 0;  // Track processed logs for download progress
     
     // ── Source download history tracking ──
     struct SourceDownloadHistory {
