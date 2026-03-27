@@ -24,12 +24,43 @@
 #include <algorithm>
 #include <chrono>
 #include <unordered_map>
+#include <set>
 #include <iostream>
 
 IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 namespace hunter {
 namespace win32 {
+
+namespace {
+
+const std::vector<std::string>& hardcodedDefaultRepos() {
+    static const std::vector<std::string> repos = {
+        "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt",
+        "https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt",
+        "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
+        "https://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt",
+        "https://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt",
+        "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt",
+        "https://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix",
+        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix",
+        "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
+        "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt",
+        "https://raw.githubusercontent.com/freefq/free/master/v2",
+        "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
+        "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
+        "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+    };
+    return repos;
+}
+
+} // namespace
 
 // Icon cache for the application
 static HICON g_app_icon = nullptr;
@@ -968,7 +999,15 @@ void ImGuiApp::LoadSourceManager() {
         AppendLog("[UI] Created default source manager file");
     }
 
-    const auto configured_urls = DedupeStringsPreserveOrder(config_.githubUrls());
+    auto configured_urls = DedupeStringsPreserveOrder(config_.githubUrls());
+    configured_urls.erase(
+        std::remove_if(configured_urls.begin(), configured_urls.end(),
+                       [](const std::string& u) {
+                           const std::string clean = utils::trim(u);
+                           return !(clean.rfind("http://", 0) == 0 || clean.rfind("https://", 0) == 0);
+                       }),
+        configured_urls.end());
+
     if (!configured_urls.empty()) {
         std::set<std::string> configured_set(configured_urls.begin(), configured_urls.end());
         for (auto& source : source_manager_.sources) {
@@ -989,6 +1028,27 @@ void ImGuiApp::LoadSourceManager() {
                 item.added_ts = utils::nowTimestamp();
                 source_manager_.sources.push_back(std::move(item));
             }
+        }
+    }
+
+    // Ensure hardcoded default repositories are always present in Sources panel.
+    for (const auto& repo : hardcodedDefaultRepos()) {
+        bool exists = false;
+        for (const auto& source : source_manager_.sources) {
+            if (source.url == repo) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            SourceItem item;
+            item.url = repo;
+            item.name = repo;
+            item.description = "Permanent default source";
+            item.category = "primary";
+            item.enabled = true;
+            item.added_ts = utils::nowTimestamp();
+            source_manager_.sources.push_back(std::move(item));
         }
     }
 
@@ -1958,89 +2018,53 @@ void ImGuiApp::ExportSeedDataForPackaging() {
 }
 
 void ImGuiApp::DownloadConfigsFromSources() {
-    std::cout << "[UI] DownloadConfigsFromSources called!" << std::endl;
-    AppendLog("[UI] DownloadConfigsFromSources called!");
-    
-    // Debug: Check source manager state
-    AppendLog("[UI] DownloadConfigsFromSources: source_manager has " + std::to_string(source_manager_.sources.size()) + " sources");
-    std::cout << "[UI] Source manager has " << source_manager_.sources.size() << " sources" << std::endl;
-    
-    // Get ALL sources (not just enabled ones) - all sources are auto-selected
-    std::vector<SourceItem> all_sources;
-    for (const auto& source : source_manager_.sources) {
-        // Only include premium/allowed sources
-        if (source.category == "primary" || source.category == "premium" || source.enabled) {
-            all_sources.push_back(source);
-        }
-    }
-    
-    AppendLog("[UI] DownloadConfigsFromSources: found " + std::to_string(all_sources.size()) + " allowed sources (all auto-selected)");
-    std::cout << "[UI] Found " << all_sources.size() << " allowed sources (all auto-selected)" << std::endl;
-    
-    if (all_sources.empty()) {
-        SetToast("No allowed sources configured", ToastKind::Warning);
-        AppendLog("[UI] DownloadConfigsFromSources: no allowed sources available");
-        
-        // Try to load seed data if no sources exist
-        if (source_manager_.sources.empty()) {
-            AppendLog("[UI] DownloadConfigsFromSources: no sources at all, trying to load seed data");
-            std::cout << "[UI] No sources found, loading seed data..." << std::endl;
-            SeedData::ensureSeedData("runtime");
-            LoadSourceManager();
-            
-            // Retry with seed data
-            all_sources.clear();
-            for (const auto& source : source_manager_.sources) {
-                if (source.category == "primary" || source.category == "premium" || source.enabled) {
-                    all_sources.push_back(source);
-                }
-            }
-            
-            AppendLog("[UI] DownloadConfigsFromSources: after seed load, have " + std::to_string(all_sources.size()) + " allowed sources");
-            std::cout << "[UI] After seed load: " << all_sources.size() << " allowed sources" << std::endl;
-        }
-        
-        // If still no sources, fallback to hardcoded URLs
-        if (all_sources.empty()) {
-            AppendLog("[UI] DownloadConfigsFromSources: still no sources, using fallback URLs");
-            std::cout << "[UI] Still no sources, using fallback URLs..." << std::endl;
-            std::vector<std::string> fallback_urls = config_.githubUrls();
-            if (!fallback_urls.empty()) {
-                AppendLog("[UI] DownloadConfigsFromSources: using " + std::to_string(fallback_urls.size()) + " fallback URLs");
-                std::cout << "[UI] Using " << fallback_urls.size() << " fallback URLs" << std::endl;
-                
-                const std::string proxy = std::string(config_download_proxy_.data());
-                if (!proxy.empty()) {
-                    AppendLog("[UI] DownloadConfigsFromSources: using proxy " + proxy);
-                    std::cout << "[UI] Using proxy: " << proxy << std::endl;
-                }
-                
-                std::string sources_json = "[";
-                for (size_t i = 0; i < fallback_urls.size(); ++i) {
-                    if (i > 0) sources_json += ",";
-                    sources_json += "\"" + fallback_urls[i] + "\"";
-                }
-                sources_json += "]";
-                
-                std::string command = "{\"command\":\"download_configs\",\"sources\":" + sources_json + ",\"proxy\":\"" + JsonEscape(proxy) + "\"}";
-                AppendLog("[UI] DownloadConfigsFromSources: sending command: " + command);
-                std::cout << "[UI] Sending download command: " << command << std::endl;
-                RunCommandAsync(command);
-                SetToast("Downloading from fallback URLs...", ToastKind::Info);
-                return;
-            }
-        }
-        return;
-    }
-    
-    // Extract URLs from all sources (all are auto-selected)
     std::vector<std::string> source_urls;
-    for (const auto& source : all_sources) {
-        source_urls.push_back(source.url);
+    source_urls.reserve(source_manager_.sources.size());
+
+    // Prefer explicitly enabled sources.
+    for (const auto& source : source_manager_.sources) {
+        if (!source.enabled) continue;
+        const std::string url = utils::trim(source.url);
+        if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+            source_urls.push_back(url);
+        }
     }
-    
-    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_urls.size()) + " auto-selected sources");
-    std::cout << "[UI] Starting download from " << source_urls.size() << " auto-selected sources" << std::endl;
+
+    // Fallback: if user disabled everything, use configured GitHub source list.
+    if (source_urls.empty()) {
+        const auto fallback_urls = config_.githubUrls();
+        for (const auto& url : fallback_urls) {
+            const std::string clean = utils::trim(url);
+            if (clean.rfind("http://", 0) == 0 || clean.rfind("https://", 0) == 0) {
+                source_urls.push_back(clean);
+            }
+        }
+        if (source_urls.empty()) {
+            // Final safety net: permanent hardcoded defaults.
+            for (const auto& url : hardcodedDefaultRepos()) {
+                source_urls.push_back(url);
+            }
+            AppendLog("[UI] Download started from hardcoded default source list (" + std::to_string(source_urls.size()) + ").");
+        }
+        if (source_urls.empty()) {
+            SetToast("No valid source URL found", ToastKind::Warning);
+            AppendLog("[UI] Download skipped: no valid source URL found.");
+            return;
+        }
+        AppendLog("[UI] Download started from fallback URL list (" + std::to_string(source_urls.size()) + ").");
+    }
+
+    // De-duplicate while keeping order.
+    std::vector<std::string> unique_urls;
+    unique_urls.reserve(source_urls.size());
+    std::set<std::string> seen;
+    for (const auto& url : source_urls) {
+        if (seen.insert(url).second) {
+            unique_urls.push_back(url);
+        }
+    }
+    source_urls.swap(unique_urls);
+    AppendLog("[UI] DownloadConfigsFromSources: launching " + std::to_string(source_urls.size()) + " sources.");
     
     // Initialize progress tracking
     download_progress_.active = true;
@@ -2058,8 +2082,7 @@ void ImGuiApp::DownloadConfigsFromSources() {
         AppendLog("[UI] DownloadConfigsFromSources: no proxy configured");
     }
     
-    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_urls.size()) + " enabled sources");
-    SetToast("Downloading configs...", ToastKind::Info);
+    SetToast("Downloading configs from " + std::to_string(source_urls.size()) + " source(s)...", ToastKind::Info);
     
     // Build JSON command with sources and proxy
     std::ostringstream cmd;
