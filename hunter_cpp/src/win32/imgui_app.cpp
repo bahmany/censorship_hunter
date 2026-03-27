@@ -32,6 +32,36 @@ IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARA
 namespace hunter {
 namespace win32 {
 
+namespace {
+
+const std::vector<std::string>& hardcodedDefaultRepos() {
+    static const std::vector<std::string> repos = {
+        "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt",
+        "https://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt",
+        "https://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
+        "https://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt",
+        "https://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt",
+        "https://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt",
+        "https://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt",
+        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix",
+        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix",
+        "https://raw.githubusercontent.com/mfuu/v2ray/master/v2ray",
+        "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt",
+        "https://raw.githubusercontent.com/freefq/free/master/v2",
+        "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
+        "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
+        "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+    };
+    return repos;
+}
+
+} // namespace
+
 // Icon cache for the application
 static HICON g_app_icon = nullptr;
 static HICON g_status_online = nullptr;
@@ -998,6 +1028,27 @@ void ImGuiApp::LoadSourceManager() {
                 item.added_ts = utils::nowTimestamp();
                 source_manager_.sources.push_back(std::move(item));
             }
+        }
+    }
+
+    // Ensure hardcoded default repositories are always present in Sources panel.
+    for (const auto& repo : hardcodedDefaultRepos()) {
+        bool exists = false;
+        for (const auto& source : source_manager_.sources) {
+            if (source.url == repo) {
+                exists = true;
+                break;
+            }
+        }
+        if (!exists) {
+            SourceItem item;
+            item.url = repo;
+            item.name = repo;
+            item.description = "Permanent default source";
+            item.category = "primary";
+            item.enabled = true;
+            item.added_ts = utils::nowTimestamp();
+            source_manager_.sources.push_back(std::move(item));
         }
     }
 
@@ -1987,6 +2038,13 @@ void ImGuiApp::DownloadConfigsFromSources() {
             if (clean.rfind("http://", 0) == 0 || clean.rfind("https://", 0) == 0) {
                 source_urls.push_back(clean);
             }
+        }
+        if (source_urls.empty()) {
+            // Final safety net: permanent hardcoded defaults.
+            for (const auto& url : hardcodedDefaultRepos()) {
+                source_urls.push_back(url);
+            }
+            AppendLog("[UI] Download started from hardcoded default source list (" + std::to_string(source_urls.size()) + ").");
         }
         if (source_urls.empty()) {
             SetToast("No valid source URL found", ToastKind::Warning);
