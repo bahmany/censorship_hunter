@@ -177,6 +177,21 @@ bool SeedData::exportForPackaging(const std::string& runtime_dir, const std::str
             success = false;
         }
     }
+
+    // Copy full config DB snapshot for offline setup bundles
+    std::string db_src = runtime_dir + "/HUNTER_config_db.tsv";
+    std::string db_dst = export_dir + "/HUNTER_config_db.tsv";
+    if (utils::fileExists(db_src)) {
+        std::ifstream src(db_src, std::ios::binary);
+        std::ofstream dst(db_dst, std::ios::binary);
+        if (src && dst) {
+            dst << src.rdbuf();
+            std::cout << "[SeedData] Exported runtime DB snapshot for packaging" << std::endl;
+        } else {
+            std::cerr << "[SeedData] Failed to export runtime DB snapshot" << std::endl;
+            success = false;
+        }
+    }
     
     return success;
 }
