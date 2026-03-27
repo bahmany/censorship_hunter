@@ -136,6 +136,8 @@ private:
     HunterOrchestrator* orch_;
     bool first_run_ = true;
     int download_count_ = 0;
+    double last_success_ts_ = 0.0;
+    bool pending_connectivity_retry_ = false;
     std::set<std::string> seen_;
     std::string cache_path_;
 

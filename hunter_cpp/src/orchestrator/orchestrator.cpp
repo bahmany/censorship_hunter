@@ -1496,6 +1496,10 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                 std::cerr << "[DL_DEBUG] ERROR: No sources!" << std::endl;
                 ok = false;
                 message = "no_sources_provided";
+            } else if (isDownloadInProgress()) {
+                ok = false;
+                message = "download_already_running";
+                std::cerr << "[DL_DEBUG] Download already running, rejecting new request" << std::endl;
             } else {
                 std::cerr << "[DL_DEBUG] Processing " << sources.size() << " sources" << std::endl;
                 
@@ -1515,10 +1519,6 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                 
                 std::cerr << "[DL_DEBUG] About to create thread..." << std::endl;
             
-            // Ensure HTTP client is initialized before starting download thread
-            http_client_.get("https://httpbin.org/ip", 3000, "");
-            std::cerr << "[DL_DEBUG] HTTP client initialized" << std::endl;
-            
             try {
                 // Create thread with explicit launch policy
                 std::thread dl_thread([this, sources, proxy]() {
@@ -1526,7 +1526,8 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                     std::cout << "[DL_THREAD] Thread started! sources=" << sources.size() << std::endl;
                     
                     try {
-                        downloadConfigsAsync(sources, proxy);
+                        bool finished = downloadConfigsAsync(sources, proxy);
+                        (void)finished;
                         std::cerr << "[DL_THREAD] downloadConfigsAsync finished" << std::endl;
                         std::cout << "[DL_THREAD] downloadConfigsAsync finished" << std::endl;
                     } catch (const std::exception& e) {
@@ -3830,7 +3831,17 @@ void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_test
     utils::saveJsonFile(status_path, buildStatusJson(phase, last_tested, last_passed));
 }
 
-void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy) {
+bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy) {
+    bool expected = false;
+    if (!download_in_progress_.compare_exchange_strong(expected, true)) {
+        utils::LogRingBuffer::instance().push("[Download] Skipped: another download is already running");
+        return false;
+    }
+    struct DownloadGuard {
+        std::atomic<bool>& flag;
+        ~DownloadGuard() { flag.store(false); }
+    } guard{download_in_progress_};
+
     std::cout << "[Download] downloadConfigsAsync started with " << sources.size() << " sources" << std::endl;
     
     int total_sources = static_cast<int>(sources.size());
@@ -3839,7 +3850,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     
     if (sources.empty()) {
         std::cout << "[Download] ERROR: No sources provided!" << std::endl;
-        return;
+        return false;
     }
     
     std::cout << "[Download] Sources to download:" << std::endl;
@@ -3963,7 +3974,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     if (working_proxies.empty()) {
         std::cout << "[Download] ERROR: No working connectivity options available!" << std::endl;
         std::cout << "[Download] This might be due to network restrictions or proxy issues" << std::endl;
-        return;
+        return false;
     }
     
     std::cout << "[Download] Found " << working_proxies.size() << " working connectivity options" << std::endl;
@@ -4139,6 +4150,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     std::cout << "[Download] Summary: " << downloaded_count << " configs added, " 
               << total_sources << " sources processed" << std::endl;
     emitLog("COMPLETED: Downloaded " + std::to_string(downloaded_count) + " unique configs from " + std::to_string(total_sources) + " sources");
+    return successful_sources > 0;
 }
 
 } // namespace hunter

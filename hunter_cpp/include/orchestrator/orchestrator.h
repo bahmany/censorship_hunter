@@ -216,7 +216,8 @@ public:
      * @param sources List of source URLs to download from
      * @param proxy App-configured proxy (empty string if none)
      */
-    void downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy);
+    bool downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy);
+    bool isDownloadInProgress() const { return download_in_progress_.load(); }
 
 private:
     HunterConfig& config_;
@@ -240,6 +241,7 @@ private:
 
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> paused_{false};
+    std::atomic<bool> download_in_progress_{false};
 
     // Speed controls (atomic for thread-safe live updates)
     std::atomic<int> speed_max_threads_{10};
