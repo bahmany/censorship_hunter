@@ -219,6 +219,38 @@ bool loadImportCandidates(const std::string& file_path, std::set<std::string>& v
     return true;
 }
 
+std::set<std::string> extractDownloadConfigs(const std::string& content, int* invalid_count = nullptr) {
+    std::set<std::string> extracted = utils::extractRawUrisFromText(content);
+
+    const auto decoded_whole = utils::tryDecodeAndExtract(content);
+    extracted.insert(decoded_whole.begin(), decoded_whole.end());
+
+    std::istringstream lines(content);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::string trimmed = utils::trim(line);
+        if (trimmed.empty()) continue;
+        if (trimmed.find("://") != std::string::npos) {
+            extracted.insert(trimmed);
+            continue;
+        }
+        const auto decoded_line = utils::tryDecodeAndExtract(trimmed);
+        extracted.insert(decoded_line.begin(), decoded_line.end());
+    }
+
+    std::set<std::string> valid;
+    int local_invalid = 0;
+    for (const auto& uri : extracted) {
+        if (isImportableProxyUri(uri)) {
+            valid.insert(uri);
+        } else {
+            local_invalid++;
+        }
+    }
+    if (invalid_count) *invalid_count = local_invalid;
+    return valid;
+}
+
 } 
 
 HunterOrchestrator::HunterOrchestrator(HunterConfig& config)
@@ -3803,6 +3835,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     
     int total_sources = static_cast<int>(sources.size());
     int downloaded_count = 0;
+    int completed_sources = 0;
     
     if (sources.empty()) {
         std::cout << "[Download] ERROR: No sources provided!" << std::endl;
@@ -3941,7 +3974,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
         dj.add("type", "download_progress")
           .add("current_source", current_source)
           .add("progress", progress)
-          .add("downloaded_count", downloaded_count)
+          .add("downloaded_count", completed_sources)
           .add("total_count", total_sources)
           .add("status", status)
           .add("proxy", used_proxy);
@@ -4042,34 +4075,25 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
             std::cout << "[Download] Successfully downloaded " << content.length() 
                       << " bytes from " << source << std::endl;
             
-            // Parse and add configs to database
-            std::vector<std::string> new_configs;
-            
-            // Simple parsing for common config formats
-            std::istringstream ss(content);
-            std::string line;
-            while (std::getline(ss, line)) {
-                line = utils::trim(line);
-                if (!line.empty() && (line.find("vmess://") == 0 || 
-                                   line.find("vless://") == 0 || 
-                                   line.find("trojan://") == 0 ||
-                                   line.find("ss://") == 0)) {
-                    new_configs.push_back(line);
-                }
-            }
-            
-            configs_found = static_cast<int>(new_configs.size());
+            // Parse and add configs to main database
+            int invalid_configs = 0;
+            std::set<std::string> valid_configs = extractDownloadConfigs(content, &invalid_configs);
+            configs_found = static_cast<int>(valid_configs.size());
             std::cout << "[Download] Parsed " << configs_found << " config lines from " << source << std::endl;
             emitLog("Parsed " + std::to_string(configs_found) + " configs from " + source);
             
-            if (!new_configs.empty() && config_db_) {
-                std::set<std::string> config_set(new_configs.begin(), new_configs.end());
-                unique_added = config_db_->addConfigs(config_set, "download");
+            if (!valid_configs.empty() && config_db_) {
+                int promoted_existing = 0;
+                unique_added = config_db_->addConfigsWithPriority(valid_configs, "download", &promoted_existing);
                 downloaded_count += unique_added;
                 std::cout << "[Download] Added " << unique_added << " unique configs from " << source 
-                          << " (found " << configs_found << " total)" << std::endl;
+                          << " (found " << configs_found << " total, refreshed "
+                          << promoted_existing << " existing, invalid " << invalid_configs << ")" << std::endl;
                 emitLog("Added " + std::to_string(unique_added) + " unique configs from " + source);
-            } else if (new_configs.empty()) {
+                if (promoted_existing > 0) {
+                    emitLog("Refreshed " + std::to_string(promoted_existing) + " existing configs from " + source);
+                }
+            } else if (valid_configs.empty()) {
                 std::cout << "[Download] WARNING: No valid config formats found in " << source << std::endl;
                 emitLog("WARNING: No valid configs found in " + source);
             } else if (!config_db_) {
@@ -4078,6 +4102,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
             }
             
             progress = static_cast<float>(i + 1) / total_sources;
+            completed_sources = static_cast<int>(i + 1);
             emitProgress(source, progress, "completed", successful_proxy);
             
         } else {
@@ -4085,6 +4110,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
             std::cout << "[Download] Failed to download from " << source 
                       << " after trying " << working_proxies.size() << " connectivity options" << std::endl;
             emitLog("FAILED: Could not download from " + source + " - all proxies failed");
+            completed_sources = static_cast<int>(i + 1);
             emitProgress(source, progress, "failed", "");
         }
         
