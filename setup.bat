@@ -79,6 +79,18 @@ if exist "release_package\runtime\HUNTER_config_db.tsv" (
     copy /y "release_package\runtime\HUNTER_config_db.tsv" "runtime\HUNTER_config_db.tsv" >nul
     echo [OK] Runtime config database copied
 )
+if exist "release_package\runtime\HUNTER_config_db_export.txt" (
+    copy /y "release_package\runtime\HUNTER_config_db_export.txt" "runtime\HUNTER_config_db_export.txt" >nul
+    echo [OK] Runtime config export copied
+)
+if exist "release_package\runtime\sources_manager.tsv" (
+    copy /y "release_package\runtime\sources_manager.tsv" "runtime\sources_manager.tsv" >nul
+    echo [OK] Runtime sources manager copied
+)
+if exist "release_package\runtime\source_history.tsv" (
+    copy /y "release_package\runtime\source_history.tsv" "runtime\source_history.tsv" >nul
+    echo [OK] Runtime source history copied
+)
 if exist "release_package\runtime\HUNTER_balancer_cache.json" (
     copy /y "release_package\runtime\HUNTER_balancer_cache.json" "runtime\HUNTER_balancer_cache.json" >nul
     echo [OK] Main balancer cache copied

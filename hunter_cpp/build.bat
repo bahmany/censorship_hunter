@@ -76,6 +76,48 @@ if exist build\hunter_tests.exe (
     echo Copied huntercensor.exe to release_package
 )
 
+echo Syncing latest runtime/config data into release_package and installer staging...
+if not exist ..\release_package\runtime mkdir ..\release_package\runtime
+if not exist ..\release_package\config mkdir ..\release_package\config
+if not exist ..\installer\staging\runtime mkdir ..\installer\staging\runtime
+if not exist ..\installer\staging\config mkdir ..\installer\staging\config
+
+if exist ..\runtime\HUNTER_config_db.tsv (
+    copy /y ..\runtime\HUNTER_config_db.tsv ..\release_package\runtime\HUNTER_config_db.tsv >nul
+    copy /y ..\runtime\HUNTER_config_db.tsv ..\installer\staging\runtime\HUNTER_config_db.tsv >nul
+    echo [OK] Synced runtime\HUNTER_config_db.tsv
+)
+if exist ..\runtime\HUNTER_config_db_export.txt (
+    copy /y ..\runtime\HUNTER_config_db_export.txt ..\release_package\runtime\HUNTER_config_db_export.txt >nul
+    copy /y ..\runtime\HUNTER_config_db_export.txt ..\installer\staging\runtime\HUNTER_config_db_export.txt >nul
+    echo [OK] Synced runtime\HUNTER_config_db_export.txt
+)
+if exist ..\runtime\sources_manager.tsv (
+    copy /y ..\runtime\sources_manager.tsv ..\release_package\runtime\sources_manager.tsv >nul
+    copy /y ..\runtime\sources_manager.tsv ..\installer\staging\runtime\sources_manager.tsv >nul
+    echo [OK] Synced runtime\sources_manager.tsv
+)
+if exist ..\runtime\source_history.tsv (
+    copy /y ..\runtime\source_history.tsv ..\release_package\runtime\source_history.tsv >nul
+    copy /y ..\runtime\source_history.tsv ..\installer\staging\runtime\source_history.tsv >nul
+    echo [OK] Synced runtime\source_history.tsv
+)
+if exist ..\config\All_Configs_Sub.txt (
+    copy /y ..\config\All_Configs_Sub.txt ..\release_package\config\All_Configs_Sub.txt >nul
+    copy /y ..\config\All_Configs_Sub.txt ..\installer\staging\config\All_Configs_Sub.txt >nul
+    echo [OK] Synced config\All_Configs_Sub.txt
+)
+if exist ..\config\all_extracted_configs.txt (
+    copy /y ..\config\all_extracted_configs.txt ..\release_package\config\all_extracted_configs.txt >nul
+    copy /y ..\config\all_extracted_configs.txt ..\installer\staging\config\all_extracted_configs.txt >nul
+    echo [OK] Synced config\all_extracted_configs.txt
+)
+if exist ..\config\sub.txt (
+    copy /y ..\config\sub.txt ..\release_package\config\sub.txt >nul
+    copy /y ..\config\sub.txt ..\installer\staging\config\sub.txt >nul
+    echo [OK] Synced config\sub.txt
+)
+
 echo.
 echo === Build succeeded ===
 echo Executable: build\huntercensor.exe

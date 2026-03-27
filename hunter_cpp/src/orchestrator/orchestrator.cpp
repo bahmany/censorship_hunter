@@ -4105,6 +4105,15 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
                 if (promoted_existing > 0) {
                     emitLog("Refreshed " + std::to_string(promoted_existing) + " existing configs from " + source);
                 }
+                // Persist main DB immediately so new downloads are usable even after restart/crash.
+                if (unique_added > 0 || promoted_existing > 0) {
+                    try {
+                        const int saved_rows = config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
+                        emitLog("Persisted DB snapshot (" + std::to_string(saved_rows) + " rows) after " + source);
+                    } catch (const std::exception& e) {
+                        emitLog("WARNING: Failed to persist DB after " + source + ": " + e.what());
+                    }
+                }
             } else if (valid_configs.empty()) {
                 std::cout << "[Download] WARNING: No valid config formats found in " << source << std::endl;
                 emitLog("WARNING: No valid configs found in " + source);
