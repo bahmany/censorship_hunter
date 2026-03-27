@@ -969,7 +969,15 @@ void ImGuiApp::LoadSourceManager() {
         AppendLog("[UI] Created default source manager file");
     }
 
-    const auto configured_urls = DedupeStringsPreserveOrder(config_.githubUrls());
+    auto configured_urls = DedupeStringsPreserveOrder(config_.githubUrls());
+    configured_urls.erase(
+        std::remove_if(configured_urls.begin(), configured_urls.end(),
+                       [](const std::string& u) {
+                           const std::string clean = utils::trim(u);
+                           return !(clean.rfind("http://", 0) == 0 || clean.rfind("https://", 0) == 0);
+                       }),
+        configured_urls.end());
+
     if (!configured_urls.empty()) {
         std::set<std::string> configured_set(configured_urls.begin(), configured_urls.end());
         for (auto& source : source_manager_.sources) {
