@@ -11,7 +11,7 @@ set "ISCC_PATH=C:\Program Files (x86)\Inno Setup 6\iscc.exe"
 set "ISS_FILE=installer\hunter_setup.iss"
 
 echo [1/4] Building native app and syncing staging artifacts...
-call hunter_cpp\build.bat
+call hunter_cpp\build.bat --no-pause
 if errorlevel 1 (
     echo [ERROR] build.bat failed.
     exit /b 1

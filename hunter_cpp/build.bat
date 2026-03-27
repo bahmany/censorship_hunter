@@ -1,5 +1,6 @@
 @echo off
 setlocal enabledelayedexpansion
+cd /d "%~dp0"
 
 echo === Building Hunter C++ with MSYS2 UCRT64 ===
 
@@ -149,4 +150,5 @@ echo   build\huntercensor.exe
 echo   or
 echo   ..\release_package\huntercensor.exe
 echo.
+if /i "%~1"=="--no-pause" exit /b 0
 pause
