@@ -4,7 +4,7 @@
 ; Bundles cached configs for immediate start in censored networks
 
 #define MyAppName "huntercensor"
-#define MyAppVersion "1.4.0"
+#define MyAppVersion "1.4.1"
 #define MyAppPublisher "Hunter Project"
 #define MyAppExeName "huntercensor.exe"
 #define MyStagingDir "D:\projects\v2ray\pythonProject1\hunter\installer\staging"
@@ -60,7 +60,6 @@ Source: "{#MyStagingDir}\hountersansor.exe"; DestDir: "{app}"; DestName: "hunter
 
 ; CLI + proxy cores in bin\ (CLI is statically linked, no DLL deps)
 Source: "{#MyStagingDir}\bin\sing-box.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
-Source: "{#MyStagingDir}\bin\tor.exe"; DestDir: "{app}\bin"; Flags: ignoreversion
 
 ; Icon
 Source: "{#MyStagingDir}\app_icon.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -71,6 +70,7 @@ Source: "{#MyStagingDir}\config\all_extracted_configs.txt"; DestDir: "{app}\conf
 Source: "{#MyStagingDir}\config\sub.txt"; DestDir: "{app}\config"; Flags: ignoreversion
 
 ; Pre-loaded runtime cache (only install if not already present - don't overwrite user data)
+Source: "{#MyStagingDir}\runtime\HUNTER_all_cache.txt"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 Source: "{#MyStagingDir}\runtime\HUNTER_gold.txt"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 Source: "{#MyStagingDir}\runtime\HUNTER_silver.txt"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
 Source: "{#MyStagingDir}\runtime\HUNTER_balancer_cache.json"; DestDir: "{app}\runtime"; Flags: onlyifdoesntexist
@@ -97,7 +97,6 @@ Filename: "{app}\{#MyAppExeName}"; Description: "Launch huntercensor"; Flags: no
 Filename: "taskkill"; Parameters: "/F /IM huntercensor.exe"; Flags: runhidden; RunOnceId: "KillDashboard"
 Filename: "taskkill"; Parameters: "/F /IM hountersansor.exe"; Flags: runhidden; RunOnceId: "KillLegacyDashboard"
 Filename: "taskkill"; Parameters: "/F /IM sing-box.exe"; Flags: runhidden; RunOnceId: "KillSingBox"
-Filename: "taskkill"; Parameters: "/F /IM tor.exe"; Flags: runhidden; RunOnceId: "KillTor"
 
 [UninstallDelete]
 Type: filesandordirs; Name: "{app}\runtime"
@@ -125,7 +124,6 @@ begin
   Exec('taskkill', '/F /IM huntercensor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM hountersansor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   Exec('taskkill', '/F /IM sing-box.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Exec('taskkill', '/F /IM tor.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
   // Wait a moment for processes to fully terminate
   Sleep(2000);
 end;
