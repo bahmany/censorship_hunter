@@ -79,8 +79,29 @@ if exist build\hunter_tests.exe (
 echo Syncing latest runtime/config data into release_package and installer staging...
 if not exist ..\release_package\runtime mkdir ..\release_package\runtime
 if not exist ..\release_package\config mkdir ..\release_package\config
+if not exist ..\release_package\bin mkdir ..\release_package\bin
 if not exist ..\installer\staging\runtime mkdir ..\installer\staging\runtime
 if not exist ..\installer\staging\config mkdir ..\installer\staging\config
+if not exist ..\installer\staging\bin mkdir ..\installer\staging\bin
+
+copy /y build\huntercensor.exe ..\installer\staging\huntercensor.exe >nul
+echo [OK] Synced installer staging executable
+
+if exist ..\bin\sing-box.exe (
+    copy /y ..\bin\sing-box.exe ..\release_package\bin\sing-box.exe >nul
+    copy /y ..\bin\sing-box.exe ..\installer\staging\bin\sing-box.exe >nul
+    echo [OK] Synced bin\sing-box.exe
+)
+if exist ..\bin\tor.exe (
+    copy /y ..\bin\tor.exe ..\release_package\bin\tor.exe >nul
+    copy /y ..\bin\tor.exe ..\installer\staging\bin\tor.exe >nul
+    echo [OK] Synced bin\tor.exe
+)
+if exist ..\bin\geosite.dat (
+    copy /y ..\bin\geosite.dat ..\release_package\bin\geosite.dat >nul
+    copy /y ..\bin\geosite.dat ..\installer\staging\bin\geosite.dat >nul
+    echo [OK] Synced bin\geosite.dat
+)
 
 if exist ..\runtime\HUNTER_config_db.tsv (
     copy /y ..\runtime\HUNTER_config_db.tsv ..\release_package\runtime\HUNTER_config_db.tsv >nul
