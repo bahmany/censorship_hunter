@@ -24,6 +24,7 @@
 #include <algorithm>
 #include <chrono>
 #include <unordered_map>
+#include <set>
 #include <iostream>
 
 IMGUI_IMPL_API LRESULT ImGui_ImplWin32_WndProcHandler(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -1958,89 +1959,46 @@ void ImGuiApp::ExportSeedDataForPackaging() {
 }
 
 void ImGuiApp::DownloadConfigsFromSources() {
-    std::cout << "[UI] DownloadConfigsFromSources called!" << std::endl;
-    AppendLog("[UI] DownloadConfigsFromSources called!");
-    
-    // Debug: Check source manager state
-    AppendLog("[UI] DownloadConfigsFromSources: source_manager has " + std::to_string(source_manager_.sources.size()) + " sources");
-    std::cout << "[UI] Source manager has " << source_manager_.sources.size() << " sources" << std::endl;
-    
-    // Get ALL sources (not just enabled ones) - all sources are auto-selected
-    std::vector<SourceItem> all_sources;
-    for (const auto& source : source_manager_.sources) {
-        // Only include premium/allowed sources
-        if (source.category == "primary" || source.category == "premium" || source.enabled) {
-            all_sources.push_back(source);
-        }
-    }
-    
-    AppendLog("[UI] DownloadConfigsFromSources: found " + std::to_string(all_sources.size()) + " allowed sources (all auto-selected)");
-    std::cout << "[UI] Found " << all_sources.size() << " allowed sources (all auto-selected)" << std::endl;
-    
-    if (all_sources.empty()) {
-        SetToast("No allowed sources configured", ToastKind::Warning);
-        AppendLog("[UI] DownloadConfigsFromSources: no allowed sources available");
-        
-        // Try to load seed data if no sources exist
-        if (source_manager_.sources.empty()) {
-            AppendLog("[UI] DownloadConfigsFromSources: no sources at all, trying to load seed data");
-            std::cout << "[UI] No sources found, loading seed data..." << std::endl;
-            SeedData::ensureSeedData("runtime");
-            LoadSourceManager();
-            
-            // Retry with seed data
-            all_sources.clear();
-            for (const auto& source : source_manager_.sources) {
-                if (source.category == "primary" || source.category == "premium" || source.enabled) {
-                    all_sources.push_back(source);
-                }
-            }
-            
-            AppendLog("[UI] DownloadConfigsFromSources: after seed load, have " + std::to_string(all_sources.size()) + " allowed sources");
-            std::cout << "[UI] After seed load: " << all_sources.size() << " allowed sources" << std::endl;
-        }
-        
-        // If still no sources, fallback to hardcoded URLs
-        if (all_sources.empty()) {
-            AppendLog("[UI] DownloadConfigsFromSources: still no sources, using fallback URLs");
-            std::cout << "[UI] Still no sources, using fallback URLs..." << std::endl;
-            std::vector<std::string> fallback_urls = config_.githubUrls();
-            if (!fallback_urls.empty()) {
-                AppendLog("[UI] DownloadConfigsFromSources: using " + std::to_string(fallback_urls.size()) + " fallback URLs");
-                std::cout << "[UI] Using " << fallback_urls.size() << " fallback URLs" << std::endl;
-                
-                const std::string proxy = std::string(config_download_proxy_.data());
-                if (!proxy.empty()) {
-                    AppendLog("[UI] DownloadConfigsFromSources: using proxy " + proxy);
-                    std::cout << "[UI] Using proxy: " << proxy << std::endl;
-                }
-                
-                std::string sources_json = "[";
-                for (size_t i = 0; i < fallback_urls.size(); ++i) {
-                    if (i > 0) sources_json += ",";
-                    sources_json += "\"" + fallback_urls[i] + "\"";
-                }
-                sources_json += "]";
-                
-                std::string command = "{\"command\":\"download_configs\",\"sources\":" + sources_json + ",\"proxy\":\"" + JsonEscape(proxy) + "\"}";
-                AppendLog("[UI] DownloadConfigsFromSources: sending command: " + command);
-                std::cout << "[UI] Sending download command: " << command << std::endl;
-                RunCommandAsync(command);
-                SetToast("Downloading from fallback URLs...", ToastKind::Info);
-                return;
-            }
-        }
-        return;
-    }
-    
-    // Extract URLs from all sources (all are auto-selected)
     std::vector<std::string> source_urls;
-    for (const auto& source : all_sources) {
-        source_urls.push_back(source.url);
+    source_urls.reserve(source_manager_.sources.size());
+
+    // Prefer explicitly enabled sources.
+    for (const auto& source : source_manager_.sources) {
+        if (!source.enabled) continue;
+        const std::string url = utils::trim(source.url);
+        if (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0) {
+            source_urls.push_back(url);
+        }
     }
-    
-    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_urls.size()) + " auto-selected sources");
-    std::cout << "[UI] Starting download from " << source_urls.size() << " auto-selected sources" << std::endl;
+
+    // Fallback: if user disabled everything, use configured GitHub source list.
+    if (source_urls.empty()) {
+        const auto fallback_urls = config_.githubUrls();
+        for (const auto& url : fallback_urls) {
+            const std::string clean = utils::trim(url);
+            if (clean.rfind("http://", 0) == 0 || clean.rfind("https://", 0) == 0) {
+                source_urls.push_back(clean);
+            }
+        }
+        if (source_urls.empty()) {
+            SetToast("No valid source URL found", ToastKind::Warning);
+            AppendLog("[UI] Download skipped: no valid source URL found.");
+            return;
+        }
+        AppendLog("[UI] Download started from fallback URL list (" + std::to_string(source_urls.size()) + ").");
+    }
+
+    // De-duplicate while keeping order.
+    std::vector<std::string> unique_urls;
+    unique_urls.reserve(source_urls.size());
+    std::set<std::string> seen;
+    for (const auto& url : source_urls) {
+        if (seen.insert(url).second) {
+            unique_urls.push_back(url);
+        }
+    }
+    source_urls.swap(unique_urls);
+    AppendLog("[UI] DownloadConfigsFromSources: launching " + std::to_string(source_urls.size()) + " sources.");
     
     // Initialize progress tracking
     download_progress_.active = true;
@@ -2058,8 +2016,7 @@ void ImGuiApp::DownloadConfigsFromSources() {
         AppendLog("[UI] DownloadConfigsFromSources: no proxy configured");
     }
     
-    AppendLog("[UI] DownloadConfigsFromSources: starting download from " + std::to_string(source_urls.size()) + " enabled sources");
-    SetToast("Downloading configs...", ToastKind::Info);
+    SetToast("Downloading configs from " + std::to_string(source_urls.size()) + " source(s)...", ToastKind::Info);
     
     // Build JSON command with sources and proxy
     std::ostringstream cmd;

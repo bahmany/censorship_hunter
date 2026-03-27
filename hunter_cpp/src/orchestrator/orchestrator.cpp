@@ -3835,6 +3835,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     
     int total_sources = static_cast<int>(sources.size());
     int downloaded_count = 0;
+    int completed_sources = 0;
     
     if (sources.empty()) {
         std::cout << "[Download] ERROR: No sources provided!" << std::endl;
@@ -3973,7 +3974,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
         dj.add("type", "download_progress")
           .add("current_source", current_source)
           .add("progress", progress)
-          .add("downloaded_count", downloaded_count)
+          .add("downloaded_count", completed_sources)
           .add("total_count", total_sources)
           .add("status", status)
           .add("proxy", used_proxy);
@@ -4101,6 +4102,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
             }
             
             progress = static_cast<float>(i + 1) / total_sources;
+            completed_sources = static_cast<int>(i + 1);
             emitProgress(source, progress, "completed", successful_proxy);
             
         } else {
@@ -4108,6 +4110,7 @@ void HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
             std::cout << "[Download] Failed to download from " << source 
                       << " after trying " << working_proxies.size() << " connectivity options" << std::endl;
             emitLog("FAILED: Could not download from " + source + " - all proxies failed");
+            completed_sources = static_cast<int>(i + 1);
             emitProgress(source, progress, "failed", "");
         }
         
