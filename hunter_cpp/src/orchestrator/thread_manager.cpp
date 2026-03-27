@@ -776,128 +776,60 @@ void GitHubDownloaderWorker::execute() {
         << " sources (cap=" << cap << ") with proxy fallback";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
-    // Use the new downloadConfigsAsync method which includes proxy fallback
-    // Note: This runs in background thread, so we need to track progress differently
-    std::atomic<int> configs_downloaded{0};
-    std::atomic<int> sources_attempted{0};
-    std::atomic<int> sources_successful{0};
-    
-    // Create a promise/future to track completion
-    std::promise<bool> download_promise;
-    std::future<bool> download_future = download_promise.get_future();
-    
-    // Start async download with proxy fallback
-    std::thread download_thread([this, enabled_sources, &configs_downloaded, &sources_attempted, &sources_successful, &download_promise, cap]() {
-        try {
-            // Get app-configured proxy for background downloads
-            std::string app_proxy = orch_->config().getString("config_download_proxy", "");
-            
-            // Use the orchestrator's downloadConfigsAsync method
-            orch_->downloadConfigsAsync(enabled_sources, app_proxy);
-            
-            // For now, estimate success - in a real implementation we'd need progress callbacks
-            sources_successful.store(static_cast<int>(enabled_sources.size()));
-            configs_downloaded.store(cap); // Estimate
-            download_promise.set_value(true);
-        } catch (const std::exception& e) {
-            utils::LogRingBuffer::instance().push("[GitHubBG] Download error: " + std::string(e.what()));
-            download_promise.set_value(false);
-        }
-    });
-    
-    // Wait for completion with timeout
-    auto status = download_future.wait_for(std::chrono::seconds(60));
-    if (status == std::future_status::timeout) {
-        utils::LogRingBuffer::instance().push("[GitHubBG] Download timeout, will continue next cycle");
-        download_thread.detach();
-        updateExtra("reason", "timeout");
-        interval_seconds = 300;
-        return;
-    }
-    
-    bool success = download_future.get();
-    download_thread.join();
-    
-    sources_attempted.store(static_cast<int>(enabled_sources.size()));
-    
-    // Create refresh result for compatibility
-    GitHubRefreshResult refresh;
-    refresh.fetched_total = configs_downloaded.load();
-    refresh.valid_total = configs_downloaded.load(); // Assume all are valid for compatibility
-    refresh.invalid_total = 0;
-    refresh.appended = configs_downloaded.load();
-    refresh.added = configs_downloaded.load();
-    refresh.reason = success ? "success" : "failed";
-    refresh.timestamp = utils::nowTimestamp();
-    
-    // Copy values to compatibility fields
-    refresh.total_fetched = refresh.fetched_total;
-    refresh.valid_configs = refresh.valid_total;
-    refresh.sources_found = sources_attempted.load();
-    
-    // Enhanced logging for GitHub refresh
-    if (!success) {
-        updateExtra("last_count", "0");
-        updateExtra("valid_count", "0");
-        updateExtra("reason", "download_failed");
-        utils::LogRingBuffer::instance().push("[GitHubBG] Download failed, skipping this cycle");
-        interval_seconds = 300;
-        return;
-    } else if (refresh.fetched_total == 0) {
-        updateExtra("last_count", "0");
-        updateExtra("valid_count", "0");
-        updateExtra("reason", "no_configs");
-        utils::LogRingBuffer::instance().push("[GitHubBG] No configs fetched from sources");
-        interval_seconds = 300;
+    if (orch_->isDownloadInProgress()) {
+        updateExtra("reason", "download_busy");
+        interval_seconds = 30;
+        utils::LogRingBuffer::instance().push("[GitHubBG] Download already running, retrying in 30s");
         return;
     }
 
-    // Update status with fetched data
-    updateExtra("last_count", std::to_string(refresh.total_fetched));
-    updateExtra("valid_count", std::to_string(refresh.valid_configs));
-    updateExtra("invalid_filtered", std::to_string(refresh.invalid_total));
-    updateExtra("new_appended", std::to_string(refresh.appended));
-    updateExtra("new_added_db", std::to_string(refresh.added));
-    updateExtra("reason", refresh.reason);
+    const auto* db_before_ptr = orch_->configDb();
+    const int db_size_before = db_before_ptr ? db_before_ptr->size() : 0;
+    const std::string app_proxy = orch_->config().getString("config_download_proxy", "");
+    const bool success = orch_->downloadConfigsAsync(enabled_sources, app_proxy);
+    const double now_ts = utils::nowTimestamp();
+
+    auto* db_after_ptr = orch_->configDb();
+    const int db_size_after = db_after_ptr ? db_after_ptr->size() : db_size_before;
+    const int db_added = std::max(0, db_size_after - db_size_before);
+
+    updateExtra("sources_found", std::to_string((int)enabled_sources.size()));
+    updateExtra("db_added", std::to_string(db_added));
+    updateExtra("db_size", std::to_string(db_size_after));
+
+    if (!success) {
+        pending_connectivity_retry_ = true;
+        updateExtra("reason", "connectivity_retry_pending");
+        utils::LogRingBuffer::instance().push("[GitHubBG] No connectivity/new payload. Will retry every 30s until online.");
+        interval_seconds = 30;
+        return;
+    }
+
+    pending_connectivity_retry_ = false;
+    last_success_ts_ = now_ts;
+    download_count_++;
+
+    updateExtra("downloads", std::to_string(download_count_));
+    updateExtra("last_success_ts", std::to_string(last_success_ts_));
+    updateExtra("reason", "success");
 
     auto* db = orch_->configDb();
     if (db) {
-        network::ConfigDatabase::TagStats tag_stats = db->getTagStats("github_bg");
-        updateExtra("db_size", std::to_string(db->size()));
-        updateExtra("github_total", std::to_string(tag_stats.total));
-        updateExtra("github_alive", std::to_string(tag_stats.alive));
-        updateExtra("github_avg_latency_ms", std::to_string(tag_stats.avg_latency_ms));
-        updateExtra("github_untested", std::to_string(tag_stats.untested));
-        updateExtra("github_needs_retest", std::to_string(tag_stats.needs_retest));
+        network::ConfigDatabase::TagStats tag_stats = db->getTagStats("download");
+        updateExtra("download_total", std::to_string(tag_stats.total));
+        updateExtra("download_alive", std::to_string(tag_stats.alive));
+        updateExtra("download_untested", std::to_string(tag_stats.untested));
+        updateExtra("download_needs_retest", std::to_string(tag_stats.needs_retest));
     }
 
-    download_count_++;
-    updateExtra("downloads", std::to_string(download_count_));
-    updateExtra("last_success_ts", std::to_string(refresh.timestamp));
+    // Default schedule: every 30 minutes.
+    interval_seconds = constants::GITHUB_BG_INTERVAL_S;
 
-    // Log success with detailed stats
-    std::ostringstream success_msg;
-    success_msg << "[GitHubBG] Success: fetched=" << refresh.total_fetched 
-                << " valid=" << refresh.valid_configs
-                << " sources=" << refresh.sources_found
-                << " timestamp=" << refresh.timestamp;
-    utils::LogRingBuffer::instance().push(success_msg.str());
-
-    { std::ostringstream _ls; _ls << "[GitHubBG] Accepted " << refresh.valid_configs << " valid configs from "
-              << refresh.total_fetched << " fetched, appended " << refresh.appended << ", db+" << refresh.added;
-      utils::LogRingBuffer::instance().push(_ls.str()); }
-
-    // In continuous mode, check GitHub sources more frequently (still can be overridden by env)
-    const int env_interval = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_INTERVAL_S", -1);
-    const bool continuous2 = HunterConfig::getEnvBool("HUNTER_CONTINUOUS", true);
-    if (continuous2 && env_interval <= 0) {
-        interval_seconds = std::min(interval_seconds, 300);
-    }
-    
-    // Log final status
     std::ostringstream final_msg;
-    final_msg << "[GitHubBG] Cycle complete: interval=" << interval_seconds 
-              << "s download_count=" << download_count_;
+    final_msg << "[GitHubBG] Cycle complete: interval=" << interval_seconds
+              << "s download_count=" << download_count_
+              << " db_added=" << db_added
+              << " pending_retry=" << (pending_connectivity_retry_ ? "1" : "0");
     utils::LogRingBuffer::instance().push(final_msg.str());
 }
 
