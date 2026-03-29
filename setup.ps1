@@ -35,7 +35,24 @@ if ($missing.Count -gt 0) {
     throw "Staging is incomplete. Missing: $missingList"
 }
 
-Write-Host "[3/4] Running Inno Setup compiler..."
+Write-Host "[3/5] Refreshing staged config bundle from the 20 built-in sources..."
+$refreshScript = Join-Path $repoRoot "installer\refresh_staging_configs.py"
+if (Test-Path -LiteralPath $refreshScript) {
+    $python = Get-Command python -ErrorAction SilentlyContinue
+    if (-not $python) { $python = Get-Command py -ErrorAction SilentlyContinue }
+    if ($python) {
+        & $python.Source $refreshScript
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Config refresh script failed with exit code $LASTEXITCODE. Setup will continue with current staged config files."
+        }
+    } else {
+        Write-Warning "Python was not found; skipping automatic staged config refresh."
+    }
+} else {
+    Write-Warning "Refresh script not found; skipping automatic staged config refresh."
+}
+
+Write-Host "[4/5] Running Inno Setup compiler..."
 $isccCandidates = @(
     "C:\Program Files (x86)\Inno Setup 6\iscc.exe",
     "C:\Program Files\Inno Setup 6\iscc.exe"
@@ -51,5 +68,5 @@ if ($LASTEXITCODE -ne 0) {
     throw "Inno Setup compile failed with exit code $LASTEXITCODE"
 }
 
-Write-Host "[4/4] Done."
+Write-Host "[5/5] Done."
 Write-Host "[OK] Setup executable created under installer\output\"
