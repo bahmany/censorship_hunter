@@ -2594,21 +2594,19 @@ std::string HunterOrchestrator::recheckLiveProvisionedPorts() {
                 "[RecheckLive] Found " + std::to_string((int)passed_uris.size()) + 
                 " trusted live proxies, triggering automatic config download");
             
-            // Trigger automatic download with live proxies
+            // Trigger automatic ordered download (managed, no detached thread).
             std::vector<std::string> github_urls = config_.githubUrls();
             if (!github_urls.empty()) {
-                // Create download task with live proxy priority
-                auto download_task = [this, github_urls]() {
+                if (isDownloadInProgress()) {
+                    utils::LogRingBuffer::instance().push("[RecheckLive] Auto-download skipped: another download is active");
+                } else {
                     try {
                         downloadConfigsAsync(github_urls, "");
                     } catch (const std::exception& e) {
                         utils::LogRingBuffer::instance().push(
                             "[RecheckLive] Auto-download failed: " + std::string(e.what()));
                     }
-                };
-                
-                // Run download in background
-                std::thread(download_task).detach();
+                }
             }
         } else {
             utils::LogRingBuffer::instance().push(
@@ -3843,6 +3841,18 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     } guard{download_in_progress_};
 
     std::cout << "[Download] downloadConfigsAsync started with " << sources.size() << " sources" << std::endl;
+
+    std::vector<int> temporary_bootstrap_pids;
+    struct TempProxyGuard {
+        proxy::RuntimeEngineManager& manager;
+        std::vector<int>& pids;
+        ~TempProxyGuard() {
+            for (int pid : pids) {
+                if (pid > 0) manager.stopProcess(pid);
+            }
+            pids.clear();
+        }
+    } temp_proxy_guard{runtime_engine_manager_, temporary_bootstrap_pids};
     
     int total_sources = static_cast<int>(sources.size());
     int downloaded_count = 0;
@@ -3973,9 +3983,68 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     }
     
     if (working_proxies.empty()) {
-        std::cout << "[Download] ERROR: No working connectivity options available!" << std::endl;
-        std::cout << "[Download] This might be due to network restrictions or proxy issues" << std::endl;
-        return false;
+        std::cout << "[Download] No direct/system/local connectivity; trying temporary proxy bootstrap from live configs..." << std::endl;
+        utils::LogRingBuffer::instance().push("[Download] No connectivity path. Trying bootstrap using currently alive configs.");
+
+        if (config_db_) {
+            auto records = config_db_->getAllRecords(500);
+            std::stable_sort(records.begin(), records.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
+                if (a.alive != b.alive) return a.alive > b.alive;
+                if (a.last_alive_time != b.last_alive_time) return a.last_alive_time > b.last_alive_time;
+                return a.latency_ms < b.latency_ms;
+            });
+
+            for (const auto& rec : records) {
+                if (!rec.alive) continue;
+                if (stop_requested_.load()) break;
+
+                auto parsed = network::UriParser::parse(rec.uri);
+                if (!parsed.has_value() || !parsed->isValid()) continue;
+
+                const int temp_port = reserveTemporaryListenPort();
+                if (temp_port <= 0) continue;
+
+                std::string preferred_engine = rec.engine_used.empty() ? config_db_->getPreferredEngine(rec.uri) : rec.engine_used;
+                std::string engine = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
+                if (engine.empty()) continue;
+
+                std::string config_text = runtime_engine_manager_.generateConfig(*parsed, temp_port, engine);
+                std::string config_path = runtime_engine_manager_.writeConfigFile(engine, config_text);
+                int pid = runtime_engine_manager_.startProcess(engine, config_path);
+                if (pid <= 0) continue;
+
+                bool ready = false;
+                if (utils::waitForPortAlive(temp_port, 5000, 100)) {
+                    auto probe = utils::probeLocalMixedPort(temp_port, 1500);
+                    ready = probe.mixed_ready();
+                }
+                if (!ready) {
+                    runtime_engine_manager_.stopProcess(pid);
+                    continue;
+                }
+
+                const std::string proxy_hostport = "127.0.0.1:" + std::to_string(temp_port);
+                const std::string proxy_url = "socks5h://" + proxy_hostport;
+                std::string probe = http_client_.get(test_url, 6000, proxy_url);
+                if (probe.empty()) {
+                    runtime_engine_manager_.stopProcess(pid);
+                    continue;
+                }
+
+                temporary_bootstrap_pids.push_back(pid);
+                working_proxies.push_back(proxy_hostport);
+                utils::LogRingBuffer::instance().push(
+                    "[Download] Bootstrap proxy online from live config: " + proxy_hostport +
+                    " engine=" + engine);
+                break;
+            }
+        }
+
+        if (working_proxies.empty()) {
+            std::cout << "[Download] ERROR: No working connectivity options available!" << std::endl;
+            std::cout << "[Download] This might be due to network restrictions or proxy issues" << std::endl;
+            return false;
+        }
     }
     
     std::cout << "[Download] Found " << working_proxies.size() << " working connectivity options" << std::endl;
