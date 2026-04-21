@@ -47,6 +47,13 @@ ninja
 - Add tests for new functionality
 - Update documentation if behavior changes
 
+### CI and Merge Status
+
+- If a PR shows **"No conflicts with base branch"** and GitHub reports **"Merging can be performed automatically"**, the branch is mergeable from a code-conflict perspective.
+- If an external AI/agent check fails with an execution error (for example, an "Agent encountered an error" status), treat it as a tooling failure first, not automatically a code regression.
+- Before deciding not to merge, rerun the failed check once and verify required project checks (build/tests/security) are still green.
+- If the failed check is non-blocking and the maintainer confirms no code issues, leave a short PR comment (for example: "still in progress" or "safe to merge") so reviewers know the expected next action.
+
 ## Reporting Issues
 
 When reporting bugs, please include:
