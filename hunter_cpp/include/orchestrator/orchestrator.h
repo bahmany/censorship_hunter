@@ -7,6 +7,7 @@
 #include <atomic>
 #include <memory>
 #include <set>
+#include <thread>
 
 #include "core/config.h"
 #include "core/models.h"
@@ -242,6 +243,8 @@ private:
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> paused_{false};
     std::atomic<bool> download_in_progress_{false};
+    std::mutex download_thread_mutex_;
+    std::thread download_thread_;
 
     // Speed controls (atomic for thread-safe live updates)
     std::atomic<int> speed_max_threads_{10};
