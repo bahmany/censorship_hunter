@@ -762,8 +762,8 @@ ImGuiApp::ImGuiApp() {
     
     CopyBuf(default_sources, github_urls_.data(), github_urls_.size());
     
-    // Default proxy (common local proxy port)
-    CopyBuf("127.0.0.1:11808", config_download_proxy_.data(), config_download_proxy_.size());
+    // Default: direct download. User may optionally set a proxy in Advanced page.
+    CopyBuf("", config_download_proxy_.data(), config_download_proxy_.size());
     
     // Detect Windows version for compatibility diagnostics
     auto winver = DetectWindowsVersion();
@@ -2833,22 +2833,35 @@ void ImGuiApp::DrawConfigsPage() {
     // Import/Export section
     if (ImGui::CollapsingHeader("Import / Export", ImGuiTreeNodeFlags_DefaultOpen)) {
         ImGui::Indent(8*dpi_scale_);
+        ImGui::TextColored(COL_DIM, "Import supports .txt, .json, .conf and base64 subscription content.");
         if (ImGui::Button("Browse##imp")) {
             auto p = OpenFileDialog("Text Files\0*.txt;*.json;*.conf\0All\0*.*\0");
             if (!p.empty()) CopyBuf(p, import_path_.data(), import_path_.size());
         }
-        ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
-        ImGui::InputText("##imppath", import_path_.data(), import_path_.size());
-        if (ImGui::Button("Import")) ImportConfigsFromFile();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-110*dpi_scale_);
+        ImGui::InputTextWithHint("##imppath", "Path to file...", import_path_.data(), import_path_.size());
+        ImGui::SameLine();
+        if (ImGui::Button("Import", ImVec2(96*dpi_scale_, 0))) {
+            ImportConfigsFromFile();
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("Import configs from selected file.");
+        }
 
         ImGui::Spacing();
+        ImGui::TextColored(COL_DIM, "Export saves the currently known config database to a text file.");
         if (ImGui::Button("Browse##exp")) {
             auto p = SaveFileDialog("Text\0*.txt\0All\0*.*\0", "txt");
             if (!p.empty()) CopyBuf(p, export_path_.data(), export_path_.size());
         }
-        ImGui::SameLine(); ImGui::SetNextItemWidth(-1);
-        ImGui::InputText("##exppath", export_path_.data(), export_path_.size());
-        if (ImGui::Button("Export")) ExportConfigsToFile();
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(-110*dpi_scale_);
+        ImGui::InputTextWithHint("##exppath", "Output file path...", export_path_.data(), export_path_.size());
+        ImGui::SameLine();
+        if (ImGui::Button("Export", ImVec2(96*dpi_scale_, 0))) {
+            ExportConfigsToFile();
+        }
         ImGui::Unindent(8*dpi_scale_);
     }
 
