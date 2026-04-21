@@ -618,6 +618,12 @@ void HunterOrchestrator::start() {
 void HunterOrchestrator::stop() {
     stop_requested_ = true;
     paused_ = false;
+    {
+        std::lock_guard<std::mutex> lk(download_thread_mutex_);
+        if (download_thread_.joinable()) {
+            download_thread_.join();
+        }
+    }
     
     // Persist ConfigDB before shutdown
     if (config_db_) {
@@ -1459,18 +1465,12 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
         } else if (command == "ping") {
             message = "pong";
         } else if (command == "download_configs") {
-            std::cerr << "[DL_DEBUG] ENTER download_configs handler" << std::endl;
-            
             // Extract sources array and proxy setting
             std::vector<std::string> sources;
             std::string proxy = extractString("proxy");
-            
-            std::cerr << "[DL_DEBUG] Proxy extracted: " << (proxy.empty() ? "EMPTY" : proxy) << std::endl;
-            
+
             // Parse sources array from JSON
             size_t sources_start = json_line.find("\"sources\":[");
-            std::cerr << "[DL_DEBUG] Looking for sources in JSON" << std::endl;
-            
             if (sources_start != std::string::npos) {
                 sources_start = json_line.find('[', sources_start) + 1;
                 size_t sources_end = json_line.find(']', sources_start);
@@ -1489,24 +1489,16 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                     }
                 }
             }
-            
-            std::cerr << "[DL_DEBUG] Parsed " << sources.size() << " sources" << std::endl;
-            
+
             if (sources.empty()) {
-                std::cerr << "[DL_DEBUG] ERROR: No sources!" << std::endl;
                 ok = false;
                 message = "no_sources_provided";
             } else if (isDownloadInProgress()) {
                 ok = false;
                 message = "download_already_running";
-                std::cerr << "[DL_DEBUG] Download already running, rejecting new request" << std::endl;
             } else {
-                std::cerr << "[DL_DEBUG] Processing " << sources.size() << " sources" << std::endl;
-                
                 // Start async download process
                 message = "download_started";
-                
-                // Build response
                 utils::JsonBuilder dj;
                 dj.add("sources_count", (int)sources.size())
                   .add("proxy", proxy)
@@ -1516,54 +1508,28 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                   .add("downloaded_count", 0)
                   .add("total_count", (int)sources.size());
                 data_json = dj.build();
-                
-                std::cerr << "[DL_DEBUG] About to create thread..." << std::endl;
-            
-            try {
-                // Create thread with explicit launch policy
-                std::thread dl_thread([this, sources, proxy]() {
-                    std::cerr << "[DL_THREAD] Thread started! sources=" << sources.size() << std::endl;
-                    std::cout << "[DL_THREAD] Thread started! sources=" << sources.size() << std::endl;
-                    
-                    try {
-                        bool finished = downloadConfigsAsync(sources, proxy);
-                        (void)finished;
-                        std::cerr << "[DL_THREAD] downloadConfigsAsync finished" << std::endl;
-                        std::cout << "[DL_THREAD] downloadConfigsAsync finished" << std::endl;
-                    } catch (const std::exception& e) {
-                        std::cerr << "[DL_THREAD] EXCEPTION: " << e.what() << std::endl;
-                        std::cout << "[DL_THREAD] EXCEPTION: " << e.what() << std::endl;
-                    } catch (...) {
-                        std::cerr << "[DL_THREAD] UNKNOWN EXCEPTION" << std::endl;
-                        std::cout << "[DL_THREAD] UNKNOWN EXCEPTION" << std::endl;
+
+                try {
+                    std::lock_guard<std::mutex> lk(download_thread_mutex_);
+                    if (download_thread_.joinable()) {
+                        download_thread_.join();
                     }
-                    
-                    std::cerr << "[DL_THREAD] Thread ending" << std::endl;
-                    std::cout << "[DL_THREAD] Thread ending" << std::endl;
-                });
-                
-                std::cerr << "[DL_DEBUG] Thread created successfully" << std::endl;
-                
-                // Check if thread is joinable before detaching
-                if (dl_thread.joinable()) {
-                    std::cerr << "[DL_DEBUG] Thread is joinable, detaching..." << std::endl;
-                    dl_thread.detach();
-                    std::cerr << "[DL_DEBUG] Thread detached SUCCESS" << std::endl;
-                    std::cout << "[DL_DEBUG] Download thread started successfully" << std::endl;
-                } else {
-                    std::cerr << "[DL_DEBUG] ERROR: Thread not joinable!" << std::endl;
-                    ok = false;
-                    message = "thread_not_joinable";
+                    download_thread_ = std::thread([this, sources, proxy]() {
+                        try {
+                            (void)downloadConfigsAsync(sources, proxy);
+                        } catch (const std::exception& e) {
+                            utils::LogRingBuffer::instance().push(
+                                std::string("[Download] worker exception: ") + e.what());
+                        } catch (...) {
+                            utils::LogRingBuffer::instance().push("[Download] worker unknown exception");
+                        }
+                    });
                 }
-                    
                 } catch (const std::exception& e) {
-                    std::cerr << "[DL_DEBUG] Thread creation FAILED: " << e.what() << std::endl;
                     ok = false;
-                    message = "thread_creation_failed";
+                    message = std::string("thread_creation_failed: ") + e.what();
                 }
             }
-            
-            std::cerr << "[DL_DEBUG] EXIT download_configs handler" << std::endl;
         } else {
             ok = false;
             message = "unknown_command";
@@ -3945,9 +3911,13 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     
     // Test proxy connectivity and build working proxy list
     std::vector<std::string> working_proxies;
-    std::string test_url = "https://httpbin.org/ip";
-    
-    std::cout << "[Download] Testing proxy connectivity with test URL: " << test_url << std::endl;
+    static const std::vector<std::string> connectivity_urls = {
+        "https://www.gstatic.com/generate_204",
+        "https://cp.cloudflare.com/generate_204",
+        "https://httpbin.org/ip"
+    };
+    std::cout << "[Download] Testing proxy connectivity using "
+              << connectivity_urls.size() << " probe URLs" << std::endl;
     
     for (const auto& test_proxy : proxy_chain) {
         std::string proxy_url;
@@ -3957,25 +3927,30 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
         
         std::cout << "[Download] Testing connectivity: " << (test_proxy.empty() ? "direct" : test_proxy) << std::endl;
         
-        try {
-            std::string test_content = http_client_.get(test_url, 5000, proxy_url);
-            
-            if (!test_content.empty()) {
-                working_proxies.push_back(test_proxy);
-                std::cout << "[Download] Connectivity test PASSED for: " << (test_proxy.empty() ? "direct" : test_proxy) << std::endl;
-                std::cout << "[Download] Test response size: " << test_content.length() << " bytes" << std::endl;
-            } else {
-                std::cout << "[Download] Connectivity test FAILED for: " << (test_proxy.empty() ? "direct" : test_proxy) << " (empty response)" << std::endl;
-            }
-        } catch (const std::exception& e) {
-            std::cout << "[Download] Connectivity test EXCEPTION for: " << (test_proxy.empty() ? "direct" : test_proxy) << " - " << e.what() << std::endl;
+        bool proxy_ok = false;
+        for (const auto& test_url : connectivity_urls) {
+            try {
+                std::string test_content = http_client_.get(test_url, 5000, proxy_url);
+                if (!test_content.empty()) {
+                    proxy_ok = true;
+                    break;
+                }
+            } catch (...) {}
         }
+
+        if (proxy_ok) {
+            working_proxies.push_back(test_proxy);
+            std::cout << "[Download] Connectivity test PASSED for: "
+                      << (test_proxy.empty() ? "direct" : test_proxy) << std::endl;
+        } else {
+            std::cout << "[Download] Connectivity test FAILED for: "
+                      << (test_proxy.empty() ? "direct" : test_proxy) << std::endl;
+            }
     }
     
     if (working_proxies.empty()) {
-        std::cout << "[Download] ERROR: No working connectivity options available!" << std::endl;
-        std::cout << "[Download] This might be due to network restrictions or proxy issues" << std::endl;
-        return false;
+        std::cout << "[Download] Connectivity probes failed for all options; attempting fallback chain anyway" << std::endl;
+        working_proxies = proxy_chain;
     }
     
     std::cout << "[Download] Found " << working_proxies.size() << " working connectivity options" << std::endl;
