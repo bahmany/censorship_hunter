@@ -251,7 +251,7 @@ std::set<std::string> extractDownloadConfigs(const std::string& content, int* in
     return valid;
 }
 
-} 
+} // namespace
 
 HunterOrchestrator::HunterOrchestrator(HunterConfig& config)
     : config_(config),
@@ -1524,7 +1524,6 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
                             utils::LogRingBuffer::instance().push("[Download] worker unknown exception");
                         }
                     });
-                }
                 } catch (const std::exception& e) {
                     ok = false;
                     message = std::string("thread_creation_failed: ") + e.what();

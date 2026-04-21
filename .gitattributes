@@ -1,0 +1,5 @@
+# Ensure binary files are treated as binary
+*.ico binary
+*.png binary
+*.exe binary
+*.dll binary
