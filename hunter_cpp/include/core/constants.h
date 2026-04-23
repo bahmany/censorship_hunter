@@ -8,7 +8,7 @@ namespace hunter {
 namespace constants {
 
 // ─── Version ───
-constexpr const char* HUNTER_VERSION = "1.0.0";
+constexpr const char* HUNTER_VERSION = "1.5.0";
 constexpr const char* HUNTER_NAME = "Hunter C++";
 
 // ─── Network Defaults ───
@@ -85,6 +85,12 @@ inline const std::vector<std::string>& githubRepos() {
         "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
         "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
         "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/reality",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vless",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/trojan",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vmess",
+        "https://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/all.txt",
     };
     return repos;
 }

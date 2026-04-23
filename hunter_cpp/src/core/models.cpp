@@ -60,16 +60,18 @@ HardwareSnapshot HardwareSnapshot::detect() {
 
     if (snap.ram_percent >= 95) {
         snap.mode = ResourceMode::ULTRA_MINIMAL;
-        snap.io_pool_size = std::max(10, base / 2);
+        // Severe pressure: aggressively reduce parallelism to limit thrashing.
+        snap.io_pool_size = std::min(14, std::max(8, base / 2));
         snap.cpu_pool_size = 2;
-        snap.max_configs = 80;
-        snap.scan_chunk = 20;
+        snap.max_configs = 100;
+        snap.scan_chunk = 24;
     } else if (snap.ram_percent >= 90) {
         snap.mode = ResourceMode::MINIMAL;
-        snap.io_pool_size = std::max(10, base);
+        // High pressure: keep throughput but avoid spawning too many workers.
+        snap.io_pool_size = std::min(20, std::max(10, base));
         snap.cpu_pool_size = 2;
-        snap.max_configs = 150;
-        snap.scan_chunk = 30;
+        snap.max_configs = 180;
+        snap.scan_chunk = 36;
     } else if (snap.ram_percent >= 85) {
         snap.mode = ResourceMode::REDUCED;
         snap.io_pool_size = std::max(10, base + 2);
