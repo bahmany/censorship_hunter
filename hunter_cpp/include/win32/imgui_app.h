@@ -93,7 +93,7 @@ private:
     std::shared_ptr<const Snapshot> snap_ptr_;
 
     // ── Async command queue (commands run off-UI-thread) ──
-    struct CmdResult { bool ok; std::string message; };
+    struct CmdResult { bool ok; std::string message; std::string command; };
     void PostCommand(std::function<void()> fn);
     void RunCommandAsync(const std::string& json);
     void DrainCommandResults();
@@ -182,6 +182,7 @@ private:
     void DrawAdvancedPage();
     void DrawAboutPage();
     void DrawQrModal();
+    void DrawImportModal();
 
     // ── Drawing helpers ──
     void DrawCard(const char* label, const char* value);
@@ -249,6 +250,14 @@ private:
     std::string qr_popup_uri_;
     std::string qr_popup_error_;
     qr::Matrix qr_popup_matrix_{};
+    bool import_modal_open_ = false;
+    bool import_modal_in_flight_ = false;
+    uint64_t import_modal_started_ms_ = 0;
+    int import_modal_db_before_ = 0;
+    int import_modal_total_detected_ = 0;
+    int import_modal_added_ = 0;
+    int import_modal_dupes_ = 0;
+    std::string import_modal_report_;
 
     // ── Text buffers for input fields ──
     std::array<char, 512> xray_path_{};

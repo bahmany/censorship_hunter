@@ -1372,7 +1372,7 @@ void ImGuiApp::RunCommandAsync(const std::string& json) {
         AppendLog(std::string(ok ? "[CMD] #" : "[ERR] #") + std::to_string(seq) +
                   " finished in " + std::to_string(elapsed_ms) + " ms: " +
                   (msg.empty() ? "done" : msg));
-        { std::lock_guard<std::mutex> lk(result_mutex_); cmd_results_.push_back({ok, msg}); }
+        { std::lock_guard<std::mutex> lk(result_mutex_); cmd_results_.push_back({ok, msg, command}); }
     });
 }
 
@@ -1382,6 +1382,21 @@ void ImGuiApp::DrainCommandResults() {
         auto r = std::move(cmd_results_.front());
         cmd_results_.pop_front();
         if (!r.message.empty()) SetToast(r.message, r.ok ? ToastKind::Success : ToastKind::Error, 3000);
+
+        if (import_modal_in_flight_ && r.command == "import_config_file") {
+            std::shared_ptr<const Snapshot> sp;
+            { std::lock_guard<std::mutex> lk2(snap_mutex_); sp = snap_ptr_; }
+            const int db_now = sp ? sp->db_total : import_modal_db_before_;
+            import_modal_added_ = std::max(0, db_now - import_modal_db_before_);
+            import_modal_dupes_ = std::max(0, import_modal_total_detected_ - import_modal_added_);
+            import_modal_report_ =
+                std::string(r.ok ? "Import completed.\n" : "Import finished with warnings.\n") +
+                "Added: " + std::to_string(import_modal_added_) +
+                "\nDuplicate/Already existed: " + std::to_string(import_modal_dupes_) +
+                "\nTotal detected in file: " + std::to_string(import_modal_total_detected_) +
+                (r.message.empty() ? std::string() : "\nResult: " + r.message);
+            import_modal_in_flight_ = false;
+        }
     }
 }
 
@@ -2543,7 +2558,7 @@ void ImGuiApp::DrawHomePage() {
     // Use a table for responsive layout - left side stats, right side buttons
     if (ImGui::BeginTable("##hero_layout", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(-1, 0))) {
         ImGui::TableSetupColumn("##stats", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("##buttons", ImGuiTableColumnFlags_WidthFixed, 280*dpi_scale_);
+        ImGui::TableSetupColumn("##buttons", ImGuiTableColumnFlags_WidthFixed, 260*dpi_scale_);
         ImGui::TableNextRow();
         
         // Left: Status indicators
@@ -2574,9 +2589,10 @@ void ImGuiApp::DrawHomePage() {
             ImGui::PopStyleColor();
         }
         ImGui::SameLine(0, 8*dpi_scale_);
-        if (ImGui::Button("Configs", ImVec2(btn_width, btn_height))) page_ = Page::Configs;
-        ImGui::SameLine(0, 8*dpi_scale_);
-        if (ImGui::Button("Censorship", ImVec2(90*dpi_scale_, btn_height))) page_ = Page::Censorship;
+        if (ImGui::Button("Import", ImVec2(90*dpi_scale_, btn_height))) {
+            import_modal_open_ = true;
+            import_modal_report_.clear();
+        }
         
         ImGui::EndTable();
     }
@@ -2756,6 +2772,17 @@ void ImGuiApp::DrawHomePage() {
         CopyTextToClipboard(JoinUniqueLinesText(uris));
         SetToast("Copied TG configs", ToastKind::Success);
     }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextColored(COL_DIM, "More tools");
+    if (ImGui::Button("Configs", ImVec2(100*dpi_scale_, 0))) page_ = Page::Configs;
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Sources", ImVec2(100*dpi_scale_, 0))) page_ = Page::Sources;
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Censorship", ImVec2(110*dpi_scale_, 0))) page_ = Page::Censorship;
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Advanced", ImVec2(100*dpi_scale_, 0))) page_ = Page::Advanced;
 }
 
 void ImGuiApp::DrawQrModal() {
@@ -2821,6 +2848,81 @@ void ImGuiApp::DrawQrModal() {
     ImGui::EndPopup();
 }
 
+void ImGuiApp::DrawImportModal() {
+    if (import_modal_open_) {
+        ImGui::OpenPopup("Import Configs (Quick)");
+        import_modal_open_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(620 * dpi_scale_, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Import Configs (Quick)", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextColored(COL_ACCENT, "Import configs from file (Home)");
+    ImGui::TextColored(COL_DIM, "Supports txt/json/conf/base64. Report shows added vs duplicate.");
+    ImGui::Spacing();
+
+    if (!import_modal_in_flight_) {
+        if (ImGui::Button("Browse File", ImVec2(120 * dpi_scale_, 0))) {
+            auto p = OpenFileDialog("Text Files\0*.txt;*.json;*.conf\0All\0*.*\0");
+            if (!p.empty()) CopyBuf(p, import_path_.data(), import_path_.size());
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(430 * dpi_scale_);
+        ImGui::InputTextWithHint("##home_import_path", "Path to config file...", import_path_.data(), import_path_.size());
+
+        if (ImGui::Button("Start Import", ImVec2(130 * dpi_scale_, 0))) {
+            const std::string path = utils::trim(import_path_.data());
+            if (path.empty()) {
+                SetToast("Pick a file first", ToastKind::Warning);
+            } else {
+                std::ifstream in(path, std::ios::binary);
+                std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                import_modal_total_detected_ = static_cast<int>(utils::tryDecodeAndExtract(body).size());
+                std::shared_ptr<const Snapshot> sp;
+                { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+                import_modal_db_before_ = sp ? sp->db_total : 0;
+                import_modal_started_ms_ = utils::nowMs();
+                import_modal_report_.clear();
+                import_modal_added_ = 0;
+                import_modal_dupes_ = 0;
+                import_modal_in_flight_ = true;
+                ImportConfigsFromFile();
+            }
+        }
+    } else {
+        const uint64_t elapsed_ms = utils::nowMs() - import_modal_started_ms_;
+        const float progress = std::min(0.98f, static_cast<float>(elapsed_ms) / 7000.0f);
+        ImGui::ProgressBar(progress, ImVec2(-1, 0), "Importing...");
+        ImGui::TextColored(COL_DIM, "Detected in file: %d", import_modal_total_detected_);
+
+        std::shared_ptr<const Snapshot> sp;
+        { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+        const int db_now = sp ? sp->db_total : import_modal_db_before_;
+        const int added = std::max(0, db_now - import_modal_db_before_);
+
+        if (elapsed_ms > 30000) {
+            import_modal_added_ = added;
+            import_modal_dupes_ = std::max(0, import_modal_total_detected_ - import_modal_added_);
+            import_modal_report_ =
+                "Import timeout fallback report.\nAdded: " + std::to_string(import_modal_added_) +
+                "\nDuplicate/Already existed: " + std::to_string(import_modal_dupes_) +
+                "\nTotal detected in file: " + std::to_string(import_modal_total_detected_);
+            import_modal_in_flight_ = false;
+        }
+    }
+
+    if (!import_modal_report_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(COL_GREEN, "Report");
+        ImGui::PushTextWrapPos(580 * dpi_scale_);
+        ImGui::TextUnformatted(import_modal_report_.c_str());
+        ImGui::PopTextWrapPos();
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Close", ImVec2(100 * dpi_scale_, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 void ImGuiApp::DrawFrame() {
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
 
@@ -2864,6 +2966,7 @@ void ImGuiApp::DrawFrame() {
     }
 
     DrawQrModal();
+    DrawImportModal();
 
     ImGui::EndChild();
     ImGui::End();
