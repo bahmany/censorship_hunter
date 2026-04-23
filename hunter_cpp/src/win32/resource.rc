@@ -20,8 +20,8 @@
 1 RT_MANIFEST "huntercensor.exe.manifest"
 
 1 VERSIONINFO
-FILEVERSION 1,3,0,0
-PRODUCTVERSION 1,3,0,0
+FILEVERSION 1,5,0,0
+PRODUCTVERSION 1,5,0,0
 FILEOS 0x40004L
 FILETYPE 0x1L
 {
@@ -31,12 +31,12 @@ FILETYPE 0x1L
         {
             VALUE "CompanyName", "Hunter Project"
             VALUE "FileDescription", "huntercensor - Anti-Censorship Discovery Tool"
-            VALUE "FileVersion", "1.3.0"
+            VALUE "FileVersion", "1.5.0"
             VALUE "InternalName", "huntercensor"
             VALUE "LegalCopyright", "Copyright (C) 2026"
             VALUE "OriginalFilename", "huntercensor.exe"
             VALUE "ProductName", "huntercensor"
-            VALUE "ProductVersion", "1.3.0"
+            VALUE "ProductVersion", "1.5.0"
         }
     }
     BLOCK "VarFileInfo"

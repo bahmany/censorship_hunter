@@ -56,6 +56,12 @@ const std::vector<std::string>& hardcodedDefaultRepos() {
         "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2",
         "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt",
         "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/reality",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vless",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/trojan",
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vmess",
+        "https://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/all.txt",
     };
     return repos;
 }
@@ -308,16 +314,16 @@ bool IContains(const std::string& text, const char* needle) {
 }
 
 // Colour palette
-static const ImVec4 COL_BG       = {0.07f, 0.07f, 0.09f, 1.0f};
-static const ImVec4 COL_CARD     = {0.11f, 0.12f, 0.15f, 1.0f};
-static const ImVec4 COL_ACCENT   = {0.22f, 0.47f, 0.95f, 1.0f};
-static const ImVec4 COL_GREEN    = {0.18f, 0.80f, 0.44f, 1.0f};
-static const ImVec4 COL_RED      = {0.92f, 0.34f, 0.34f, 1.0f};
-static const ImVec4 COL_YELLOW   = {1.00f, 0.78f, 0.24f, 1.0f};
-static const ImVec4 COL_AMBER    = {1.00f, 0.65f, 0.10f, 1.0f};
-static const ImVec4 COL_CYAN     = {0.30f, 0.78f, 1.00f, 1.0f};
-static const ImVec4 COL_DIM      = {0.55f, 0.57f, 0.62f, 1.0f};
-static const ImVec4 COL_TEXT     = {0.88f, 0.90f, 0.94f, 1.0f};
+static const ImVec4 COL_BG       = {0.06f, 0.07f, 0.10f, 1.0f};
+static const ImVec4 COL_CARD     = {0.10f, 0.12f, 0.16f, 1.0f};
+static const ImVec4 COL_ACCENT   = {0.34f, 0.62f, 0.95f, 1.0f};
+static const ImVec4 COL_GREEN    = {0.24f, 0.78f, 0.56f, 1.0f};
+static const ImVec4 COL_RED      = {0.90f, 0.38f, 0.41f, 1.0f};
+static const ImVec4 COL_YELLOW   = {0.96f, 0.79f, 0.32f, 1.0f};
+static const ImVec4 COL_AMBER    = {0.98f, 0.68f, 0.20f, 1.0f};
+static const ImVec4 COL_CYAN     = {0.39f, 0.83f, 0.94f, 1.0f};
+static const ImVec4 COL_DIM      = {0.62f, 0.66f, 0.74f, 1.0f};
+static const ImVec4 COL_TEXT     = {0.93f, 0.95f, 0.98f, 1.0f};
 
 ImVec4 ToastBg(ImGuiApp::ToastKind kind) {
     switch (kind) {
@@ -524,32 +530,41 @@ bool QueryProcessIoCountersForPid(int pid, uint64_t& read_bytes, uint64_t& write
     return true;
 }
 
-int CountEstablishedConnectionsForLocalPort(int port) {
-    if (port <= 0) return 0;
+std::unordered_map<int, int> BuildEstablishedConnectionCountByPort() {
+    std::unordered_map<int, int> counts;
     ULONG table_size = 0;
     GetExtendedTcpTable(nullptr, &table_size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0);
-    if (table_size == 0) return 0;
+    if (table_size == 0) return counts;
     std::vector<unsigned char> buffer(table_size);
     PMIB_TCPTABLE_OWNER_PID table = reinterpret_cast<PMIB_TCPTABLE_OWNER_PID>(buffer.data());
     if (GetExtendedTcpTable(table, &table_size, FALSE, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0) != NO_ERROR) {
-        return 0;
+        return counts;
     }
-    int count = 0;
     for (DWORD i = 0; i < table->dwNumEntries; ++i) {
         const auto& row = table->table[i];
-        const int local_port = ntohs(static_cast<u_short>(row.dwLocalPort));
-        if (local_port != port) continue;
-        if (row.dwState == MIB_TCP_STATE_ESTAB) count++;
+        if (row.dwState != MIB_TCP_STATE_ESTAB) continue;
+        const int local_port = ntohs(static_cast<u_short>(row.dwLocalPort & 0xFFFF));
+        if (local_port > 0) counts[local_port]++;
     }
-    return count;
+    return counts;
 }
 
 std::vector<LiveProxyActivitySample> CollectLiveProxyActivitySamples(const std::vector<HunterOrchestrator::PortSlot>& slots) {
     static std::unordered_map<int, ProcessIoSample> history;
+    static std::vector<LiveProxyActivitySample> cached_samples;
+    static uint64_t last_collect_ms = 0;
+    static uint64_t last_prune_ms = 0;
+
+    const uint64_t now_ms = utils::nowMs();
+    // Heavy Win32 process/network queries are expensive; cache for ~1 second.
+    if (!cached_samples.empty() && now_ms > last_collect_ms && (now_ms - last_collect_ms) < 1000) {
+        return cached_samples;
+    }
+
     std::set<int> active_pids;
     std::vector<LiveProxyActivitySample> samples;
     samples.reserve(slots.size());
-    const uint64_t now_ms = utils::nowMs();
+    const auto established_by_port = BuildEstablishedConnectionCountByPort();
 
     for (const auto& slot : slots) {
         if (slot.port <= 0 || slot.pid <= 0) continue;
@@ -558,7 +573,8 @@ std::vector<LiveProxyActivitySample> CollectLiveProxyActivitySamples(const std::
         sample.port = slot.port;
         sample.pid = slot.pid;
         sample.process_alive = slot.alive && slot.pid > 0;
-        sample.established_connections = CountEstablishedConnectionsForLocalPort(slot.port);
+        auto conn_it = established_by_port.find(slot.port);
+        sample.established_connections = (conn_it != established_by_port.end()) ? conn_it->second : 0;
 
         uint64_t read_bytes = 0;
         uint64_t write_bytes = 0;
@@ -582,11 +598,17 @@ std::vector<LiveProxyActivitySample> CollectLiveProxyActivitySamples(const std::
         samples.push_back(sample);
     }
 
-    for (auto it = history.begin(); it != history.end();) {
-        if (active_pids.find(it->first) == active_pids.end()) it = history.erase(it);
-        else ++it;
+    // Prune stale PID history at a low cadence to avoid per-frame hash churn.
+    if (last_prune_ms == 0 || (now_ms - last_prune_ms) >= 5000) {
+        for (auto it = history.begin(); it != history.end();) {
+            if (active_pids.find(it->first) == active_pids.end()) it = history.erase(it);
+            else ++it;
+        }
+        last_prune_ms = now_ms;
     }
 
+    cached_samples = samples;
+    last_collect_ms = now_ms;
     return samples;
 }
 
@@ -687,34 +709,34 @@ void ImGuiApp::SetupStyle() {
     ImGuiStyle& s = ImGui::GetStyle();
     s = ImGuiStyle();
     ImGui::StyleColorsDark();
-    s.WindowRounding    = 6.0f;
-    s.FrameRounding     = 5.0f;
-    s.GrabRounding      = 4.0f;
-    s.TabRounding       = 5.0f;
-    s.ChildRounding     = 6.0f;
-    s.ScrollbarRounding = 6.0f;
-    s.WindowPadding     = {10, 10};
-    s.FramePadding      = {8, 5};
-    s.ItemSpacing       = {8, 6};
-    s.ItemInnerSpacing  = {6, 4};
-    s.CellPadding       = {6, 4};
-    s.ScrollbarSize     = 14.0f;
+    s.WindowRounding    = 10.0f;
+    s.FrameRounding     = 8.0f;
+    s.GrabRounding      = 6.0f;
+    s.TabRounding       = 8.0f;
+    s.ChildRounding     = 10.0f;
+    s.ScrollbarRounding = 10.0f;
+    s.WindowPadding     = {12, 12};
+    s.FramePadding      = {10, 6};
+    s.ItemSpacing       = {10, 8};
+    s.ItemInnerSpacing  = {7, 5};
+    s.CellPadding       = {8, 6};
+    s.ScrollbarSize     = 15.0f;
     s.WindowBorderSize  = 0.0f;
     s.ChildBorderSize   = 1.0f;
 
     auto& c = s.Colors;
     c[ImGuiCol_WindowBg]       = COL_BG;
-    c[ImGuiCol_ChildBg]        = {0.09f, 0.09f, 0.12f, 1.0f};
-    c[ImGuiCol_PopupBg]        = {0.10f, 0.10f, 0.13f, 0.96f};
-    c[ImGuiCol_Border]         = {0.20f, 0.21f, 0.26f, 0.60f};
-    c[ImGuiCol_FrameBg]        = {0.13f, 0.14f, 0.18f, 1.0f};
-    c[ImGuiCol_FrameBgHovered] = {0.18f, 0.20f, 0.26f, 1.0f};
-    c[ImGuiCol_FrameBgActive]  = {0.22f, 0.25f, 0.33f, 1.0f};
+    c[ImGuiCol_ChildBg]        = {0.09f, 0.11f, 0.15f, 1.0f};
+    c[ImGuiCol_PopupBg]        = {0.08f, 0.10f, 0.14f, 0.98f};
+    c[ImGuiCol_Border]         = {0.26f, 0.30f, 0.37f, 0.56f};
+    c[ImGuiCol_FrameBg]        = {0.12f, 0.15f, 0.20f, 1.0f};
+    c[ImGuiCol_FrameBgHovered] = {0.17f, 0.23f, 0.31f, 1.0f};
+    c[ImGuiCol_FrameBgActive]  = {0.22f, 0.29f, 0.38f, 1.0f};
     c[ImGuiCol_TitleBg]        = COL_BG;
     c[ImGuiCol_TitleBgActive]  = COL_BG;
-    c[ImGuiCol_Button]         = {0.16f, 0.34f, 0.80f, 1.0f};
-    c[ImGuiCol_ButtonHovered]  = {0.22f, 0.44f, 0.92f, 1.0f};
-    c[ImGuiCol_ButtonActive]   = {0.12f, 0.28f, 0.70f, 1.0f};
+    c[ImGuiCol_Button]         = {0.23f, 0.45f, 0.84f, 1.0f};
+    c[ImGuiCol_ButtonHovered]  = {0.31f, 0.55f, 0.94f, 1.0f};
+    c[ImGuiCol_ButtonActive]   = {0.18f, 0.38f, 0.76f, 1.0f};
     c[ImGuiCol_Header]         = {0.16f, 0.18f, 0.24f, 1.0f};
     c[ImGuiCol_HeaderHovered]  = {0.22f, 0.26f, 0.34f, 1.0f};
     c[ImGuiCol_HeaderActive]   = {0.18f, 0.24f, 0.34f, 1.0f};
@@ -758,7 +780,13 @@ ImGuiApp::ImGuiApp() {
         "https://raw.githubusercontent.com/freefq/free/master/v2\n"
         "https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2\n"
         "https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt\n"
-        "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub";
+        "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub\n"
+        "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt\n"
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/reality\n"
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vless\n"
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/trojan\n"
+        "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vmess\n"
+        "https://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/all.txt";
     
     CopyBuf(default_sources, github_urls_.data(), github_urls_.size());
     
@@ -940,7 +968,13 @@ void ImGuiApp::InitializeDefaultSources() {
         {"https://raw.githubusercontent.com/freefq/free/master/v2", "FreeFQ"},
         {"https://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2", "Aiboboxx Free"},
         {"https://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt", "Ermaozi Subscribe"},
-        {"https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub", "Pawdroid Free Servers"}
+        {"https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub", "Pawdroid Free Servers"},
+        {"https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt", "Mahdibland Base64 Merge"},
+        {"https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/reality", "Soroush Reality"},
+        {"https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vless", "Soroush VLESS"},
+        {"https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/trojan", "Soroush Trojan"},
+        {"https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vmess", "Soroush VMess"},
+        {"https://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/all.txt", "MrMohebi All"}
     };
     
     double now = utils::nowTimestamp();
@@ -1338,7 +1372,7 @@ void ImGuiApp::RunCommandAsync(const std::string& json) {
         AppendLog(std::string(ok ? "[CMD] #" : "[ERR] #") + std::to_string(seq) +
                   " finished in " + std::to_string(elapsed_ms) + " ms: " +
                   (msg.empty() ? "done" : msg));
-        { std::lock_guard<std::mutex> lk(result_mutex_); cmd_results_.push_back({ok, msg}); }
+        { std::lock_guard<std::mutex> lk(result_mutex_); cmd_results_.push_back({ok, msg, command}); }
     });
 }
 
@@ -1348,6 +1382,21 @@ void ImGuiApp::DrainCommandResults() {
         auto r = std::move(cmd_results_.front());
         cmd_results_.pop_front();
         if (!r.message.empty()) SetToast(r.message, r.ok ? ToastKind::Success : ToastKind::Error, 3000);
+
+        if (import_modal_in_flight_ && r.command == "import_config_file") {
+            std::shared_ptr<const Snapshot> sp;
+            { std::lock_guard<std::mutex> lk2(snap_mutex_); sp = snap_ptr_; }
+            const int db_now = sp ? sp->db_total : import_modal_db_before_;
+            import_modal_added_ = std::max(0, db_now - import_modal_db_before_);
+            import_modal_dupes_ = std::max(0, import_modal_total_detected_ - import_modal_added_);
+            import_modal_report_ =
+                std::string(r.ok ? "Import completed.\n" : "Import finished with warnings.\n") +
+                "Added: " + std::to_string(import_modal_added_) +
+                "\nDuplicate/Already existed: " + std::to_string(import_modal_dupes_) +
+                "\nTotal detected in file: " + std::to_string(import_modal_total_detected_) +
+                (r.message.empty() ? std::string() : "\nResult: " + r.message);
+            import_modal_in_flight_ = false;
+        }
     }
 }
 
@@ -1696,10 +1745,11 @@ void ImGuiApp::RunProbeAsync() {
     
     StartProgress("probe", "Probing censorship", true);
     
-    // Non-blocking thread cleanup - don't block UI thread
+    // Reclaim finished thread handle before starting a new probe.
+    // Detaching here can leak many long-lived worker threads over days of use.
     if (probe_thread_.joinable()) {
-        probe_thread_.detach();
-        AppendLog("[UI] Previous probe still running, starting new one");
+        JoinThread(probe_thread_);
+        AppendLog("[UI] Joined previous probe thread before starting a new probe");
     }
     
     AppendLog("[UI] Starting censorship probe");
@@ -1743,10 +1793,11 @@ void ImGuiApp::RunDiscoveryAsync() {
     
     StartProgress("discovery", "Discovering exit IP", true);
     
-    // Non-blocking thread cleanup - don't block UI thread
+    // Reclaim finished thread handle before starting a new discovery.
+    // Detaching here can leak many long-lived worker threads over days of use.
     if (discovery_thread_.joinable()) {
-        discovery_thread_.detach();
-        AppendLog("[UI] Previous discovery still running, starting new one");
+        JoinThread(discovery_thread_);
+        AppendLog("[UI] Joined previous discovery thread before starting a new discovery");
     }
     
     AppendDiscoveryLog("[DISCOVERY] Starting native discovery");
@@ -2474,6 +2525,32 @@ void ImGuiApp::DrawHomePage() {
         ImGui::TextColored(COL_DIM, "%s", label);
     };
 
+    // Onboarding-first landing section (import is the primary workflow).
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
+    ImGui::BeginChild("##onboarding", ImVec2(0, 122*dpi_scale_), true);
+    ImGui::TextColored(COL_ACCENT, "Quick Start (Recommended)");
+    ImGui::TextColored(COL_TEXT, "1) Import from Telegram groups/channels  2) Press Start  3) Copy working config");
+    ImGui::TextColored(COL_DIM, "Tip: For best results, import fresh configs from active Telegram sources before scanning.");
+    ImGui::Spacing();
+
+    if (ImGui::Button("Import Config File", ImVec2(160*dpi_scale_, 30*dpi_scale_))) {
+        page_ = Page::Configs;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Go to Configs page and import a .txt/.json/.conf subscription file.");
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Manage Source URLs", ImVec2(170*dpi_scale_, 30*dpi_scale_))) {
+        page_ = Page::Sources;
+    }
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Add Telegram/GitHub subscription URLs in one place.");
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Open Simple Guide", ImVec2(150*dpi_scale_, 30*dpi_scale_))) {
+        page_ = Page::About;
+    }
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+
     // ═══ HERO BAR: Status + Quick Actions ═══
     ImGui::PushStyleColor(ImGuiCol_ChildBg, COL_CARD);
     ImGui::BeginChild("##hero_bar", ImVec2(0, 56*dpi_scale_), true, ImGuiWindowFlags_NoScrollbar);
@@ -2481,7 +2558,7 @@ void ImGuiApp::DrawHomePage() {
     // Use a table for responsive layout - left side stats, right side buttons
     if (ImGui::BeginTable("##hero_layout", 2, ImGuiTableFlags_SizingStretchProp, ImVec2(-1, 0))) {
         ImGui::TableSetupColumn("##stats", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-        ImGui::TableSetupColumn("##buttons", ImGuiTableColumnFlags_WidthFixed, 280*dpi_scale_);
+        ImGui::TableSetupColumn("##buttons", ImGuiTableColumnFlags_WidthFixed, 260*dpi_scale_);
         ImGui::TableNextRow();
         
         // Left: Status indicators
@@ -2512,9 +2589,10 @@ void ImGuiApp::DrawHomePage() {
             ImGui::PopStyleColor();
         }
         ImGui::SameLine(0, 8*dpi_scale_);
-        if (ImGui::Button("Configs", ImVec2(btn_width, btn_height))) page_ = Page::Configs;
-        ImGui::SameLine(0, 8*dpi_scale_);
-        if (ImGui::Button("Censorship", ImVec2(90*dpi_scale_, btn_height))) page_ = Page::Censorship;
+        if (ImGui::Button("Import", ImVec2(90*dpi_scale_, btn_height))) {
+            import_modal_open_ = true;
+            import_modal_report_.clear();
+        }
         
         ImGui::EndTable();
     }
@@ -2694,6 +2772,17 @@ void ImGuiApp::DrawHomePage() {
         CopyTextToClipboard(JoinUniqueLinesText(uris));
         SetToast("Copied TG configs", ToastKind::Success);
     }
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::TextColored(COL_DIM, "More tools");
+    if (ImGui::Button("Configs", ImVec2(100*dpi_scale_, 0))) page_ = Page::Configs;
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Sources", ImVec2(100*dpi_scale_, 0))) page_ = Page::Sources;
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Censorship", ImVec2(110*dpi_scale_, 0))) page_ = Page::Censorship;
+    ImGui::SameLine(0, 8*dpi_scale_);
+    if (ImGui::Button("Advanced", ImVec2(100*dpi_scale_, 0))) page_ = Page::Advanced;
 }
 
 void ImGuiApp::DrawQrModal() {
@@ -2759,6 +2848,81 @@ void ImGuiApp::DrawQrModal() {
     ImGui::EndPopup();
 }
 
+void ImGuiApp::DrawImportModal() {
+    if (import_modal_open_) {
+        ImGui::OpenPopup("Import Configs (Quick)");
+        import_modal_open_ = false;
+    }
+    ImGui::SetNextWindowSize(ImVec2(620 * dpi_scale_, 0), ImGuiCond_Appearing);
+    if (!ImGui::BeginPopupModal("Import Configs (Quick)", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) return;
+
+    ImGui::TextColored(COL_ACCENT, "Import configs from file (Home)");
+    ImGui::TextColored(COL_DIM, "Supports txt/json/conf/base64. Report shows added vs duplicate.");
+    ImGui::Spacing();
+
+    if (!import_modal_in_flight_) {
+        if (ImGui::Button("Browse File", ImVec2(120 * dpi_scale_, 0))) {
+            auto p = OpenFileDialog("Text Files\0*.txt;*.json;*.conf\0All\0*.*\0");
+            if (!p.empty()) CopyBuf(p, import_path_.data(), import_path_.size());
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(430 * dpi_scale_);
+        ImGui::InputTextWithHint("##home_import_path", "Path to config file...", import_path_.data(), import_path_.size());
+
+        if (ImGui::Button("Start Import", ImVec2(130 * dpi_scale_, 0))) {
+            const std::string path = utils::trim(import_path_.data());
+            if (path.empty()) {
+                SetToast("Pick a file first", ToastKind::Warning);
+            } else {
+                std::ifstream in(path, std::ios::binary);
+                std::string body((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+                import_modal_total_detected_ = static_cast<int>(utils::tryDecodeAndExtract(body).size());
+                std::shared_ptr<const Snapshot> sp;
+                { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+                import_modal_db_before_ = sp ? sp->db_total : 0;
+                import_modal_started_ms_ = utils::nowMs();
+                import_modal_report_.clear();
+                import_modal_added_ = 0;
+                import_modal_dupes_ = 0;
+                import_modal_in_flight_ = true;
+                ImportConfigsFromFile();
+            }
+        }
+    } else {
+        const uint64_t elapsed_ms = utils::nowMs() - import_modal_started_ms_;
+        const float progress = std::min(0.98f, static_cast<float>(elapsed_ms) / 7000.0f);
+        ImGui::ProgressBar(progress, ImVec2(-1, 0), "Importing...");
+        ImGui::TextColored(COL_DIM, "Detected in file: %d", import_modal_total_detected_);
+
+        std::shared_ptr<const Snapshot> sp;
+        { std::lock_guard<std::mutex> lk(snap_mutex_); sp = snap_ptr_; }
+        const int db_now = sp ? sp->db_total : import_modal_db_before_;
+        const int added = std::max(0, db_now - import_modal_db_before_);
+
+        if (elapsed_ms > 30000) {
+            import_modal_added_ = added;
+            import_modal_dupes_ = std::max(0, import_modal_total_detected_ - import_modal_added_);
+            import_modal_report_ =
+                "Import timeout fallback report.\nAdded: " + std::to_string(import_modal_added_) +
+                "\nDuplicate/Already existed: " + std::to_string(import_modal_dupes_) +
+                "\nTotal detected in file: " + std::to_string(import_modal_total_detected_);
+            import_modal_in_flight_ = false;
+        }
+    }
+
+    if (!import_modal_report_.empty()) {
+        ImGui::Spacing();
+        ImGui::TextColored(COL_GREEN, "Report");
+        ImGui::PushTextWrapPos(580 * dpi_scale_);
+        ImGui::TextUnformatted(import_modal_report_.c_str());
+        ImGui::PopTextWrapPos();
+    }
+
+    ImGui::Spacing();
+    if (ImGui::Button("Close", ImVec2(100 * dpi_scale_, 0))) ImGui::CloseCurrentPopup();
+    ImGui::EndPopup();
+}
+
 void ImGuiApp::DrawFrame() {
     const ImVec2 disp = ImGui::GetIO().DisplaySize;
 
@@ -2802,6 +2966,7 @@ void ImGuiApp::DrawFrame() {
     }
 
     DrawQrModal();
+    DrawImportModal();
 
     ImGui::EndChild();
     ImGui::End();
