@@ -28,7 +28,13 @@ static const char* DEFAULT_SOURCES_SEED =
 "1\t0\tprimary\t0\t0\t0\t0\tFreeFQ\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/freefq/free/master/v2\n"
 "1\t0\tprimary\t0\t0\t0\t0\tAiboboxx Free\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2\n"
 "1\t0\tprimary\t0\t0\t0\t0\tErmaozi Subscribe\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt\n"
-"1\t0\tprimary\t0\t0\t0\t0\tPawdroid Free Servers\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub\n";
+"1\t0\tprimary\t0\t0\t0\t0\tPawdroid Free Servers\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub\n"
+"1\t0\tprimary\t0\t0\t0\t0\tMahdibland Base64 Merge\tAggregator base64 source\thttps://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt\n"
+"1\t0\tprimary\t0\t0\t0\t0\tSoroush Reality\tTelegram collector (reality)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/reality\n"
+"1\t0\tprimary\t0\t0\t0\t0\tSoroush VLESS\tTelegram collector (vless)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vless\n"
+"1\t0\tprimary\t0\t0\t0\t0\tSoroush Trojan\tTelegram collector (trojan)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/trojan\n"
+"1\t0\tprimary\t0\t0\t0\t0\tSoroush VMess\tTelegram collector (vmess)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vmess\n"
+"1\t0\tprimary\t0\t0\t0\t0\tMrMohebi All\tTelegram grabber full feed\thttps://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/all.txt\n";
 
 // Default seed configs for initial testing
 static const char* DEFAULT_CONFIGS_SEED = 

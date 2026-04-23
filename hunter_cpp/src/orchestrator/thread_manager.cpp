@@ -745,10 +745,14 @@ void GitHubDownloaderWorker::execute() {
             std::istringstream row(line);
             std::string col;
             while (std::getline(row, col, '\t')) cols.push_back(col);
-            if (cols.size() >= 7) {
-                bool enabled = (cols.size() > 6 && cols[6] == "1");
-                if (enabled && !cols[1].empty()) {
-                    enabled_sources.push_back(cols[1]); // URL is column 1
+            if (cols.size() >= 10) {
+                // TSV format:
+                // 0=enabled, 1=priority, 2=category, 3=added_ts, 4=last_success_ts,
+                // 5=total_configs_found, 6=success_rate, 7=name, 8=description, 9=url
+                const bool enabled = cols[0] == "1";
+                const std::string url = utils::trim(cols[9]);
+                if (enabled && (url.rfind("http://", 0) == 0 || url.rfind("https://", 0) == 0)) {
+                    enabled_sources.push_back(url);
                 }
             }
         }

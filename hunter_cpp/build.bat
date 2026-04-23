@@ -26,6 +26,24 @@ if errorlevel 1 (
     exit /b 1
 )
 
+where python >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: python not found in PATH.
+    exit /b 1
+)
+
+where go >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: go not found in PATH (required to build v2ray-core/sing-box from source).
+    exit /b 1
+)
+
+where git >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: git not found in PATH (required to fetch v2ray-core/sing-box source).
+    exit /b 1
+)
+
 echo Tools found.
 
 REM Clean previous build if requested
@@ -65,6 +83,20 @@ if errorlevel 1 (
 
 if exist build\hountersansor_cli.exe del /f /q build\hountersansor_cli.exe >nul 2>&1
 if exist ..\bin\hountersansor_cli.exe del /f /q ..\bin\hountersansor_cli.exe >nul 2>&1
+
+echo Bootstrapping core engines from upstream source repositories...
+python scripts\bootstrap_core_engines.py
+if errorlevel 1 (
+    echo ERROR: Failed to bootstrap core engines.
+    exit /b 1
+)
+
+echo Refreshing bundled configs from latest sources...
+python scripts\update_bundle_configs.py
+if errorlevel 1 (
+    echo ERROR: Failed to refresh bundled configs.
+    exit /b 1
+)
 
 REM Copy to release_package
 echo Copying executables to release_package...
