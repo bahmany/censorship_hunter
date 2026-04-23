@@ -8,6 +8,7 @@
 #include <random>
 #include <future>
 #include <chrono>
+#include <unordered_set>
 
 namespace hunter {
 namespace network {
@@ -30,6 +31,43 @@ static size_t writeCallback(void* contents, size_t size, size_t nmemb, void* use
     auto* str = static_cast<std::string*>(userp);
     str->append(static_cast<char*>(contents), size * nmemb);
     return size * nmemb;
+}
+
+static std::vector<std::string> expandSourceUrlVariants(const std::string& url) {
+    std::vector<std::string> out;
+    out.push_back(url);
+
+    // Add CDN mirrors for raw GitHub URLs to improve availability behind censorship.
+    static const std::string raw_prefix = "https://raw.githubusercontent.com/";
+    if (url.rfind(raw_prefix, 0) == 0) {
+        std::string rest = url.substr(raw_prefix.size());
+        auto p1 = rest.find('/');
+        if (p1 != std::string::npos) {
+            auto p2 = rest.find('/', p1 + 1);
+            if (p2 != std::string::npos) {
+                auto p3 = rest.find('/', p2 + 1);
+                if (p3 != std::string::npos) {
+                    const std::string owner = rest.substr(0, p1);
+                    const std::string repo = rest.substr(p1 + 1, p2 - p1 - 1);
+                    const std::string branch = rest.substr(p2 + 1, p3 - p2 - 1);
+                    const std::string path = rest.substr(p3 + 1);
+                    const std::string gh_path = owner + "/" + repo + "@" + branch + "/" + path;
+                    out.push_back("https://cdn.jsdelivr.net/gh/" + gh_path);
+                    out.push_back("https://fastly.jsdelivr.net/gh/" + gh_path);
+                    out.push_back("https://gcore.jsdelivr.net/gh/" + gh_path);
+                }
+            }
+        }
+    }
+
+    std::vector<std::string> deduped;
+    std::unordered_set<std::string> seen;
+    deduped.reserve(out.size());
+    for (const auto& u : out) {
+        if (u.empty()) continue;
+        if (seen.insert(u).second) deduped.push_back(u);
+    }
+    return deduped;
 }
 
 std::string HttpClient::get(const std::string& url, int timeout_ms, const std::string& proxy_url) {
@@ -201,48 +239,56 @@ std::set<std::string> ConfigFetcher::fetchSingleUrl(
     if (direct_works_.load() == -1) checkDirectAccess();
     bool direct_blocked = (direct_works_.load() == 0);
 
+    const auto variants = expandSourceUrlVariants(url);
+
     // Strategy A: Proxy-first when direct is blocked
     if (direct_blocked) {
         auto best = findBestProxyPort(proxy_ports);
-        if (best.has_value()) {
-            std::string proxy = "socks5h://127.0.0.1:" + std::to_string(*best);
-            std::string body = http_.get(url, timeout * 1000, proxy);
+        for (const auto& candidate : variants) {
+            if (best.has_value()) {
+                std::string proxy = "socks5h://127.0.0.1:" + std::to_string(*best);
+                std::string body = http_.get(candidate, timeout * 1000, proxy);
+                if (!body.empty()) {
+                    auto found = utils::tryDecodeAndExtract(body);
+                    if (!found.empty()) { recordSuccess(url); return found; }
+                }
+            }
+
+            // Fallback: try direct anyway
+            std::string body = http_.get(candidate, std::min(timeout, 6) * 1000);
             if (!body.empty()) {
                 auto found = utils::tryDecodeAndExtract(body);
                 if (!found.empty()) { recordSuccess(url); return found; }
             }
-        }
-        // Fallback: try direct anyway
-        std::string body = http_.get(url, std::min(timeout, 6) * 1000);
-        if (!body.empty()) {
-            auto found = utils::tryDecodeAndExtract(body);
-            if (!found.empty()) { recordSuccess(url); return found; }
         }
         recordFailure(url);
         return {};
     }
 
     // Strategy B: Direct-first
-    std::string body = http_.get(url, std::min(timeout, 5) * 1000);
-    if (!body.empty()) {
-        auto found = utils::tryDecodeAndExtract(body);
-        if (!found.empty()) {
-            direct_fail_streak_ = 0;
-            recordSuccess(url);
-            return found;
-        }
-    }
-    direct_fail_streak_++;
-    if (direct_fail_streak_ >= 2) direct_works_ = 0;
-
-    // Fallback to proxy
-    auto best = findBestProxyPort(proxy_ports);
-    if (best.has_value()) {
-        std::string proxy = "socks5h://127.0.0.1:" + std::to_string(*best);
-        body = http_.get(url, timeout * 1000, proxy);
+    for (const auto& candidate : variants) {
+        std::string body = http_.get(candidate, std::min(timeout, 5) * 1000);
         if (!body.empty()) {
             auto found = utils::tryDecodeAndExtract(body);
-            if (!found.empty()) { recordSuccess(url); return found; }
+            if (!found.empty()) {
+                direct_fail_streak_ = 0;
+                recordSuccess(url);
+                return found;
+            }
+        }
+
+        direct_fail_streak_++;
+        if (direct_fail_streak_ >= 2) direct_works_ = 0;
+
+        // Fallback to proxy
+        auto best = findBestProxyPort(proxy_ports);
+        if (best.has_value()) {
+            std::string proxy = "socks5h://127.0.0.1:" + std::to_string(*best);
+            body = http_.get(candidate, timeout * 1000, proxy);
+            if (!body.empty()) {
+                auto found = utils::tryDecodeAndExtract(body);
+                if (!found.empty()) { recordSuccess(url); return found; }
+            }
         }
     }
 
