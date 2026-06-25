@@ -501,7 +501,7 @@ std::string ParsedConfig::toMihomoConfigYaml(int socks_port) const {
        << "  - name: socks5-fb-4\n"
        << "    type: socks5\n"
        << "    server: 172.20.14.34\n"
-       << "    port: 3104\n"
+       << "    port: 3104\n";
 
     // Proxy groups and rules with SOCKS5 fallback + BLACKHOLE kill switch
     ss << "proxy-groups:\n"
