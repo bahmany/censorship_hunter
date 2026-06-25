@@ -6,7 +6,7 @@ WORKDIR /app
 
 # Copy package files and install deps (cached layer)
 COPY package*.json ./
-RUN npm ci
+RUN npm install
 
 # Source code is mounted at runtime via docker-compose volumes
 # Next.js dev server provides hot module replacement
