@@ -20,8 +20,8 @@ BIN_DIR = REPO_ROOT / "bin"
 V2RAY_REPO = "https://github.com/v2ray/v2ray-core.git"
 SINGBOX_REPO = "https://github.com/sagernet/sing-box.git"
 
-
 MIHOMO_REPO = "https://github.com/MetaCubeX/mihomo.git"
+XRAY_DOWNLOAD = "https://github.com/XTLS/Xray-core/releases/latest/download/Xray-linux-64.zip"
 
 TOR_URL = "https://dist.torproject.org/tor-0.4.8.12.tar.gz"
 
@@ -56,19 +56,41 @@ def ensure_repo(path: Path, remote: str, branch: str = "main"):
 
 
 def build_v2ray():
+    is_windows = sys.platform == "win32"
+    ext = ".exe" if is_windows else ""
+    out = BIN_DIR / f"v2ray{ext}"
+    xray_alias = BIN_DIR / f"xray{ext}"
+    BIN_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Download pre-built Xray binary (avoids qtls-go1-15 panic in old v2ray-core)
+    if not is_windows:
+        import tempfile, zipfile
+        try:
+            tmpdir = Path(tempfile.mkdtemp())
+            archive = tmpdir / "xray.zip"
+            run(["wget", "-q", "-O", str(archive), XRAY_DOWNLOAD])
+            with zipfile.ZipFile(archive, "r") as zf:
+                zf.extract("xray", tmpdir)
+                zf.extract("geoip.dat", tmpdir)
+                zf.extract("geosite.dat", tmpdir)
+            shutil.copyfile(str(tmpdir / "xray"), str(out))
+            shutil.copyfile(str(out), str(xray_alias))
+            shutil.copyfile(str(tmpdir / "geoip.dat"), str(BIN_DIR / "geoip.dat"))
+            shutil.copyfile(str(tmpdir / "geosite.dat"), str(BIN_DIR / "geosite.dat"))
+            os.chmod(str(out), 0o755)
+            os.chmod(str(xray_alias), 0o755)
+            print(f"[bootstrap] downloaded Xray binary to {out} and alias {xray_alias}")
+            return
+        except Exception as e:
+            print(f"[bootstrap] Xray download failed: {e}, falling back to source build")
+
+    # Fallback: build from source
     repo = THIRD_PARTY / "v2ray-core"
     ensure_repo(repo, V2RAY_REPO, "master")
     env = os.environ.copy()
     env["CGO_ENABLED"] = "0"
     env["GOPROXY"] = "https://goproxy.cn,direct"
-    is_windows = sys.platform == "win32"
-    ext = ".exe" if is_windows else ""
-    out = BIN_DIR / f"v2ray{ext}"
-    BIN_DIR.mkdir(parents=True, exist_ok=True)
     run(["go", "build", "-trimpath", "-ldflags", "-s -w", "-o", str(out), "./main"], cwd=repo, env=env)
-
-    # Compatibility alias for existing code path expecting xray.
-    xray_alias = BIN_DIR / f"xray{ext}"
     shutil.copyfile(out, xray_alias)
     print(f"[bootstrap] built {out} and alias {xray_alias}")
 
@@ -86,8 +108,8 @@ def build_singbox():
         import platform as _pf
         arch = "amd64" if _pf.machine() in ("x86_64", "amd64") else "arm64"
         urls = [
-            f"https://github.com/SagerNet/sing-box/releases/download/v1.8.10/sing-box-1.8.10-linux-{arch}.tar.gz",
-            f"https://hub.0z.gs/SagerNet/sing-box/releases/download/v1.8.10/sing-box-1.8.10-linux-{arch}.tar.gz",
+            f"https://github.com/SagerNet/sing-box/releases/download/v1.10.5/sing-box-1.10.5-linux-{arch}.tar.gz",
+            f"https://hub.0z.gs/SagerNet/sing-box/releases/download/v1.10.5/sing-box-1.10.5-linux-{arch}.tar.gz",
         ]
         import tempfile, tarfile
         for url in urls:
@@ -130,8 +152,8 @@ def build_mihomo():
         import platform as _pf
         arch = "amd64" if _pf.machine() in ("x86_64", "amd64") else "arm64"
         urls = [
-            f"https://github.com/MetaCubeX/mihomo/releases/download/v1.18.1/mihomo-linux-{arch}-v1.18.1.gz",
-            f"https://hub.0z.gs/MetaCubeX/mihomo/releases/download/v1.18.1/mihomo-linux-{arch}-v1.18.1.gz",
+            f"https://github.com/MetaCubeX/mihomo/releases/download/v1.19.0/mihomo-linux-{arch}-v1.19.0.gz",
+            f"https://hub.0z.gs/MetaCubeX/mihomo/releases/download/v1.19.0/mihomo-linux-{arch}-v1.19.0.gz",
         ]
         import tempfile, gzip
         for url in urls:
