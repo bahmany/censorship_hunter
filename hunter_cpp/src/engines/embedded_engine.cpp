@@ -255,7 +255,7 @@ std::string SingBoxEngine::createDnsConfig() {
     return json.str();
 }
 
-std::string SingBoxEngine::createRoutingConfig() {
+std::string SingBoxEngine::createRoutingConfig(bool useBalancer) {
     std::ostringstream json;
     json << "    \"rules\": [\n";
     json << "      {\n";
@@ -403,7 +403,7 @@ std::string XRayEngine::generateConfig(const ParsedConfig& config, int listen_po
     
     // Routing
     json << "  \"routing\": {\n";
-    json << createRoutingConfig();
+    json << createRoutingConfig(false);
     json << "  },\n";
     
     // Observatory for health checking
@@ -477,7 +477,7 @@ std::string XRayEngine::generateBalancedConfig(const std::vector<ParsedConfig>& 
     
     // Routing
     json << "  \"routing\": {\n";
-    json << createRoutingConfig();
+    json << createRoutingConfig(true);
     json << "  },\n";
     
     // Observatory
@@ -530,7 +530,7 @@ std::string XRayEngine::createDnsConfig() {
     return json.str();
 }
 
-std::string XRayEngine::createRoutingConfig() {
+std::string XRayEngine::createRoutingConfig(bool useBalancer) {
     std::ostringstream json;
     json << "    \"rules\": [\n";
     json << "      {\n";
@@ -547,7 +547,11 @@ std::string XRayEngine::createRoutingConfig() {
     json << "      {\n";
     json << "        \"type\": \"field\",\n";
     json << "        \"inboundTag\": [\"socks-in\"],\n";
-    json << "        \"outboundTag\": \"proxy\"\n";
+    if (useBalancer) {
+        json << "        \"balancerTag\": \"proxy\"\n";
+    } else {
+        json << "        \"outboundTag\": \"proxy\"\n";
+    }
     json << "      }\n";
     json << "    ],\n";
     json << "    \"final\": \"blackhole\"\n";

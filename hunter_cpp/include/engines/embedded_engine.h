@@ -62,7 +62,7 @@ private:
     std::string createInboundConfig(int listen_port);
     std::string createOutboundConfig(const ParsedConfig& config);
     std::string createDnsConfig();
-    std::string createRoutingConfig();
+    std::string createRoutingConfig(bool useBalancer = false);
     
     bool initialized_;
     std::string version_;
@@ -91,7 +91,7 @@ private:
     std::string createInboundConfig(int listen_port);
     std::string createOutboundConfig(const ParsedConfig& config);
     std::string createDnsConfig();
-    std::string createRoutingConfig();
+    std::string createRoutingConfig(bool useBalancer = false);
     std::string createObservatoryConfig();
     
     bool initialized_;

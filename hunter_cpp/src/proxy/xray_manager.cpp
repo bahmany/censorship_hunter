@@ -259,11 +259,7 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     ss <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},";
     // 4. Private/local IPs → direct
     ss <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},";
-    // 5. Iranian domains direct (optional, improves speed for local sites)
-    if (hasGeositeData()) {
-        ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"},";
-    }
-    // 6. All other client traffic → balancer (proxy + SOCKS5 fallback, before final blackhole)
+    // 5. All other client traffic → balancer (proxy + SOCKS5 fallback, before final blackhole)
     ss << ",{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"balancerTag\":\"proxy-balancer\"}";
     ss << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"strategy\":{\"type\":\"leastPing\"}}]}";
     ss << ",\"observatory\":{\"subjectSelector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}";
@@ -331,9 +327,6 @@ std::string XRayManager::generateBalancedConfig(
        <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"balancerTag\":\"proxy-balancer\"},"
        <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
        <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}";
-    if (hasGeositeData()) {
-        ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"}";
-    }
     ss << ",{\"type\":\"field\",\"network\":\"tcp,udp\",\"balancerTag\":\"proxy-balancer\"}"
        << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[";
     first = true;
