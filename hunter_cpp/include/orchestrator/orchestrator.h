@@ -24,6 +24,7 @@
 #include "security/obfuscation.h"
 #include "telegram/bot_reporter.h"
 #include "cache/smart_cache.h"
+#include "orchestrator/runtime_cleanup_manager.h"
 
 namespace hunter {
 
@@ -174,6 +175,7 @@ public:
     int clearAliveConfigs();
     int removeConfigs(const std::set<std::string>& uris);
     void addManualConfigs(const std::vector<std::string>& uris);
+    std::string triggerRuntimeCleanup();
 
     // ─── Dashboard ───
     void printStartupBanner();
@@ -239,6 +241,7 @@ private:
     std::unique_ptr<telegram::BotReporter> bot_reporter_;
     std::unique_ptr<cache::SmartCache> cache_;
     std::unique_ptr<orchestrator::ThreadManager> thread_manager_;
+    std::unique_ptr<orchestrator::RuntimeCleanupManager> cleanup_manager_;
 
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> paused_{false};
@@ -262,6 +265,7 @@ private:
     std::map<std::string, std::string> cached_engine_hints_;
     std::mutex cycle_lock_;
     mutable std::mutex state_mutex_;
+    mutable std::mutex status_mutex_;
     double start_time_ = 0.0;
 
     // Port provisioning (2901-2999)

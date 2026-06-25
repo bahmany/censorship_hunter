@@ -4,6 +4,10 @@
 #include <algorithm>
 #include <stdexcept>
 
+#ifdef __linux__
+#include <pthread.h>
+#endif
+
 namespace hunter {
 
 // ─── ThreadPool ───
@@ -11,7 +15,23 @@ namespace hunter {
 ThreadPool::ThreadPool(size_t num_threads, const std::string& name_prefix)
     : name_prefix_(name_prefix) {
     for (size_t i = 0; i < num_threads; i++) {
+#ifdef __linux__
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 8 * 1024 * 1024); // 8MB stack
+        pthread_t tid;
+        auto* pair = new std::pair<ThreadPool*, int>(this, (int)i);
+        pthread_create(&tid, &attr, [](void* arg) -> void* {
+            auto* p = static_cast<std::pair<ThreadPool*, int>*>(arg);
+            p->first->workerLoop(p->second);
+            delete p;
+            return nullptr;
+        }, pair);
+        pthread_attr_destroy(&attr);
+        workers_.emplace_back([tid](){ pthread_join(tid, nullptr); });
+#else
         workers_.emplace_back(&ThreadPool::workerLoop, this, (int)i);
+#endif
     }
 }
 
@@ -41,7 +61,23 @@ void ThreadPool::resize(size_t new_size) {
     // Only grow — shrinking is complex; threads will naturally idle
     while (workers_.size() < new_size) {
         int id = static_cast<int>(workers_.size());
+#ifdef __linux__
+        pthread_attr_t attr;
+        pthread_attr_init(&attr);
+        pthread_attr_setstacksize(&attr, 8 * 1024 * 1024);
+        pthread_t tid;
+        auto* pair = new std::pair<ThreadPool*, int>(this, id);
+        pthread_create(&tid, &attr, [](void* arg) -> void* {
+            auto* p = static_cast<std::pair<ThreadPool*, int>*>(arg);
+            p->first->workerLoop(p->second);
+            delete p;
+            return nullptr;
+        }, pair);
+        pthread_attr_destroy(&attr);
+        workers_.emplace_back([tid](){ pthread_join(tid, nullptr); });
+#else
         workers_.emplace_back(&ThreadPool::workerLoop, this, id);
+#endif
     }
 }
 

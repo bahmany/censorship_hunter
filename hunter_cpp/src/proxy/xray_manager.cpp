@@ -236,15 +236,21 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
        <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
        <<   "}],\n";
 
-    // Outbounds with DPI bypass
+    // Outbounds with DPI bypass + SOCKS5 fallback + blackhole to prevent traffic leakage
     ss << "  \"outbounds\":[" << outbound 
        << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
-       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
+       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
+       << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
+    // SOCKS5 fallback outbounds
+    for (int p = 0; p < 5; ++p) {
+        ss << ",{\"protocol\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100+p) << "}]}}";
+    }
+    ss << "],\n";
 
     // Build inbound tags for DNS routing
     std::string client_inbounds = "\"mixed-in\"";
 
-    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":[";
+    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"final\":\"blackhole\",\"rules\":[";
     // 1. Client DNS queries → dns-out (intercept and resolve via XRay DNS)
     ss <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"port\":53,\"outboundTag\":\"dns-out\"},";
     // 2. DNS module resolves through proxy (bypasses Iranian DNS censorship)
@@ -252,13 +258,16 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     // 3. Internal DNS → direct
     ss <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},";
     // 4. Private/local IPs → direct
-    ss <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}";
+    ss <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},";
     // 5. Iranian domains direct (optional, improves speed for local sites)
     if (hasGeositeData()) {
-        ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"}";
+        ss << ",{\"type\":\"field\",\"domain\":[\"geosite:ir\"],\"outboundTag\":\"direct\"},";
     }
-    ss << "]}\n";
-    ss << "}";
+    // 6. All other client traffic → balancer (proxy + SOCKS5 fallback, before final blackhole)
+    ss << ",{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"balancerTag\":\"proxy-balancer\"}";
+    ss << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"strategy\":{\"type\":\"leastPing\"}}]}";
+    ss << ",\"observatory\":{\"subjectSelector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}";
+    ss << "}\n";
     return ss.str();
 }
 
@@ -303,13 +312,21 @@ std::string XRayManager::generateBalancedConfig(
         idx++;
     }
     ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
-       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}],\n";
+       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
+       << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
+
+    // SOCKS5 fallback outbounds
+    for (int p = 0; p < 5; ++p) {
+        ss << ",{\"protocol\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100 + p) << "}]}}";
+    }
+    ss << "],\n";
 
     // Build inbound tags for DNS routing
     std::string client_inbounds = "\"mixed-in\"";
 
     // Balancer + routing with DNS rules + smart routing
-    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
+    // final=blackhole ensures no traffic leaks to direct if balancer fails
+    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"final\":\"blackhole\",\"rules\":["
        <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"port\":53,\"outboundTag\":\"dns-out\"},"
        <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"balancerTag\":\"proxy-balancer\"},"
        <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
@@ -325,6 +342,9 @@ std::string XRayManager::generateBalancedConfig(
         first = false;
         ss << "\"" << t << "\"";
     }
+    for (int p = 0; p < 5; ++p) {
+        ss << ",\"socks5-fb-" << p << "\"";
+    }
     ss << "],\"strategy\":{\"type\":\"leastPing\"}}]},\n";
 
     // Observatory
@@ -334,6 +354,10 @@ std::string XRayManager::generateBalancedConfig(
         if (!first) ss << ",";
         first = false;
         ss << "\"" << t << "\"";
+    }
+    // Add SOCKS5 fallback to observatory too
+    for (int p = 0; p < 5; ++p) {
+        ss << ",\"socks5-fb-" << p << "\"";
     }
     ss << "],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}\n";
     ss << "}";
@@ -367,9 +391,16 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
         outbound_tags.push_back(tag);
         ss << "{\"protocol\":\"socks\",\"tag\":\"" << tag << "\",\"settings\":{\"servers\":[{\"address\":\"127.0.0.1\",\"port\":" << backend_ports[i] << "}]}}";
     }
-    ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}],\n";
+    ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
+       << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
 
-    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
+    // SOCKS5 fallback outbounds
+    for (int p = 0; p < 5; ++p) {
+        ss << ",{\"protocol\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100 + p) << "}]}}";
+    }
+    ss << "],\n";
+
+    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"final\":\"blackhole\",\"rules\":["
        <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
        <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},"
        <<     "{\"type\":\"field\",\"network\":\"tcp,udp\",\"balancerTag\":\"proxy-balancer\"}"
@@ -381,6 +412,9 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
         first = false;
         ss << "\"" << tag << "\"";
     }
+    for (int p = 0; p < 5; ++p) {
+        ss << ",\"socks5-fb-" << p << "\"";
+    }
     ss << "],\"strategy\":{\"type\":\"leastPing\"}}]},\n";
 
     ss << "  \"observatory\":{\"subjectSelector\":[";
@@ -389,6 +423,9 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
         if (!first) ss << ",";
         first = false;
         ss << "\"" << tag << "\"";
+    }
+    for (int p = 0; p < 5; ++p) {
+        ss << ",\"socks5-fb-" << p << "\"";
     }
     ss << "],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}\n";
     ss << "}";

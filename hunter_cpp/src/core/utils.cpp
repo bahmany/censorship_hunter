@@ -1,7 +1,9 @@
 #include "core/utils.h"
+#include "core/win_compat.h"
 
 #include <ctime>
 #include <cstring>
+#include <cstdio>
 #include <chrono>
 #include <fstream>
 #include <sstream>
@@ -12,7 +14,18 @@
 #include <filesystem>
 #include <thread>
 #include <mutex>
+#include <map>
 #include <iostream>
+
+#ifndef _WIN32
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#include <sys/select.h>
+#include <sys/sysinfo.h>
+#endif
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -131,13 +144,32 @@ std::string urlEncode(const std::string& data) {
 // ─── URI extraction ───
 std::set<std::string> extractRawUrisFromText(const std::string& text) {
     std::set<std::string> uris;
-    static const std::regex re(
-        R"(((?:vmess|vless|trojan|ss|ssr|hysteria2|hy2|tuic)://[^\s\r\n<>"']+))",
-        std::regex::optimize);
-    auto begin=std::sregex_iterator(text.begin(),text.end(),re);
-    for(auto it=begin;it!=std::sregex_iterator();++it){
-        std::string u=trim((*it)[1].str());
-        if(u.size()>10) uris.insert(u);
+    // Limit input size to prevent excessive processing
+    const std::string& safe_text = text.size() > 1048576 ? text.substr(0, 1048576) : text;
+    // Simple string scan instead of std::regex to avoid stack overflow from deep recursion
+    static const std::vector<std::string> schemes = {"vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria2://", "hy2://", "tuic://"};
+    size_t pos = 0;
+    while (pos < safe_text.size()) {
+        size_t found = std::string::npos;
+        size_t scheme_len = 0;
+        for (const auto& scheme : schemes) {
+            size_t p = safe_text.find(scheme, pos);
+            if (p != std::string::npos && (found == std::string::npos || p < found)) {
+                found = p;
+                scheme_len = scheme.size();
+            }
+        }
+        if (found == std::string::npos) break;
+        size_t end = found + scheme_len;
+        while (end < safe_text.size() && safe_text[end] != '\r' && safe_text[end] != '\n' &&
+               safe_text[end] != ' ' && safe_text[end] != '\t' &&
+               safe_text[end] != '<' && safe_text[end] != '>' &&
+               safe_text[end] != '"' && safe_text[end] != '\'') {
+            ++end;
+        }
+        std::string u = trim(safe_text.substr(found, end - found));
+        if (u.size() > 10) uris.insert(u);
+        pos = end;
     }
     return uris;
 }
@@ -184,8 +216,14 @@ std::string loadJsonFile(const std::string& fp) {
 
 bool saveJsonFile(const std::string& fp, const std::string& json) {
     try{mkdirRecursive(dirName(fp));}catch(...){}
-    std::ofstream f(fp); if(!f) return false;
-    f<<json; return true;
+    // Write to temp file then rename for atomic update
+    std::string tmp = fp + ".tmp";
+    std::ofstream f(tmp);
+    if(!f) return false;
+    f << json;
+    f.close();
+    if(f.fail()) return false;
+    return std::rename(tmp.c_str(), fp.c_str()) == 0;
 }
 
 // ─── String helpers ───
@@ -660,12 +698,38 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     
     // CURLE_WRITE_ERROR is expected when we abort after enough data
     if (res != CURLE_OK && res != CURLE_WRITE_ERROR) {
-        // Only log curl command on error for debugging
-        { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] FAIL curl --socks5-hostname " << proxy_str 
-                  << " --max-time " << timeout_seconds << " \"" << url << "\" -> error=" << (int)res 
-                  << " (" << curl_easy_strerror(res) << ") bytes=" << prog.total_bytes
-                  << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s";
-          LogRingBuffer::instance().push(_ls.str()); }
+        // Rate-limit: only log first failure per port per 5-minute window
+        static std::mutex fail_log_mtx;
+        static std::map<int, std::pair<double, int>> last_fail_log; // port -> (timestamp, count)
+        static double window_start = 0;
+        double now_ts = std::chrono::duration<double>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        bool should_log = false;
+        {
+            std::lock_guard<std::mutex> lock(fail_log_mtx);
+            if (now_ts - window_start > 300.0) { // 5-minute window
+                last_fail_log.clear();
+                window_start = now_ts;
+            }
+            auto& entry = last_fail_log[proxy_port];
+            entry.second++;
+            if (entry.second == 1 || entry.second == 10 || (entry.second % 50) == 0) {
+                should_log = true;
+            }
+        }
+        if (should_log) {
+            int fail_count = 0;
+            {
+                std::lock_guard<std::mutex> lock(fail_log_mtx);
+                fail_count = last_fail_log[proxy_port].second;
+            }
+            { std::ostringstream _ls; _ls << "    [curl:" << proxy_port << "] FAIL curl --socks5-hostname " << proxy_str 
+                      << " --max-time " << timeout_seconds << " \"" << url << "\" -> error=" << (int)res 
+                      << " (" << curl_easy_strerror(res) << ") bytes=" << prog.total_bytes
+                      << " elapsed=" << std::fixed << std::setprecision(3) << elapsed << "s"
+                      << " (port_failures=" << fail_count << ")";
+              LogRingBuffer::instance().push(_ls.str()); }
+        }
         return -1.0f;
     }
     if (http_code >= 400) {

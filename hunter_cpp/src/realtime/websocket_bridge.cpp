@@ -7,6 +7,8 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <future>
+#include <iostream>
 #include <sstream>
 #include <thread>
 
@@ -278,7 +280,7 @@ bool WebSocketBridge::startListener(int port, intptr_t& listener_fd) {
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(static_cast<uint16_t>(port));
 
     if (bind(fd, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
@@ -306,6 +308,7 @@ bool WebSocketBridge::start() {
     control_thread_ = std::thread(&WebSocketBridge::controlLoop, this);
     monitor_accept_thread_ = std::thread(&WebSocketBridge::monitorAcceptLoop, this);
     monitor_publish_thread_ = std::thread(&WebSocketBridge::monitorPublishLoop, this);
+    heartbeat_thread_ = std::thread(&WebSocketBridge::heartbeatLoop, this);
     return true;
 }
 
@@ -327,6 +330,7 @@ void WebSocketBridge::stop() {
     if (control_thread_.joinable()) control_thread_.join();
     if (monitor_accept_thread_.joinable()) monitor_accept_thread_.join();
     if (monitor_publish_thread_.joinable()) monitor_publish_thread_.join();
+    if (heartbeat_thread_.joinable()) heartbeat_thread_.join();
 }
 
 void WebSocketBridge::closeSocketFd(intptr_t fd) const {
@@ -381,7 +385,7 @@ bool WebSocketBridge::performServerHandshake(intptr_t raw_fd) const {
     return sendAll(fd, response.data(), response.size());
 }
 
-bool WebSocketBridge::readTextFrame(intptr_t raw_fd, std::string& out) const {
+bool WebSocketBridge::readFrame(intptr_t raw_fd, std::string& out, uint8_t& opcode_out) const {
     native_socket_t fd = toNative(raw_fd);
     uint8_t header[2];
     if (!recvAll(fd, header, sizeof(header))) return false;
@@ -390,8 +394,8 @@ bool WebSocketBridge::readTextFrame(intptr_t raw_fd, std::string& out) const {
     const bool masked = (header[1] & 0x80) != 0;
     uint64_t len = static_cast<uint64_t>(header[1] & 0x7F);
     if (!fin) return false;
-    if (opcode == 0x8) return false;
-    if (opcode != 0x1) return false;
+    if (opcode == 0x8) { opcode_out = 0x8; return false; }
+    opcode_out = opcode;
     if (len == 126) {
         uint8_t ext[2];
         if (!recvAll(fd, ext, sizeof(ext))) return false;
@@ -404,17 +408,69 @@ bool WebSocketBridge::readTextFrame(intptr_t raw_fd, std::string& out) const {
             len = (len << 8) | static_cast<uint64_t>(byte);
         }
     }
-    if (!masked || len > (8ULL * 1024ULL * 1024ULL)) return false;
+    if (len > (8ULL * 1024ULL * 1024ULL)) return false;
 
-    uint8_t mask[4];
-    if (!recvAll(fd, mask, sizeof(mask))) return false;
     std::string payload;
     payload.resize(static_cast<size_t>(len));
-    if (!recvAll(fd, payload.data(), static_cast<size_t>(len))) return false;
-    for (size_t i = 0; i < payload.size(); ++i) {
-        payload[i] = static_cast<char>(static_cast<uint8_t>(payload[i]) ^ mask[i % 4]);
+    if (len > 0) {
+        if (masked) {
+            uint8_t mask[4];
+            if (!recvAll(fd, mask, sizeof(mask))) return false;
+            if (!recvAll(fd, payload.data(), static_cast<size_t>(len))) return false;
+            for (size_t i = 0; i < payload.size(); ++i) {
+                payload[i] = static_cast<char>(static_cast<uint8_t>(payload[i]) ^ mask[i % 4]);
+            }
+        } else {
+            if (!recvAll(fd, payload.data(), static_cast<size_t>(len))) return false;
+        }
     }
     out.swap(payload);
+    return true;
+}
+
+bool WebSocketBridge::readTextFrame(intptr_t raw_fd, std::string& out) const {
+    uint8_t opcode = 0;
+    if (!readFrame(raw_fd, out, opcode)) return false;
+    if (opcode != 0x1) return false;
+    return true;
+}
+
+bool WebSocketBridge::sendPingFrame(intptr_t raw_fd) const {
+    native_socket_t fd = toNative(raw_fd);
+    uint8_t frame[2] = {0x89, 0x00};
+    return sendAll(fd, frame, sizeof(frame));
+}
+
+bool WebSocketBridge::sendPongFrame(intptr_t raw_fd, const std::string& payload) const {
+    native_socket_t fd = toNative(raw_fd);
+    std::vector<uint8_t> frame;
+    frame.push_back(0x8A);
+    uint64_t len = static_cast<uint64_t>(payload.size());
+    if (len < 126) {
+        frame.push_back(static_cast<uint8_t>(len));
+    } else if (len <= 0xFFFF) {
+        frame.push_back(126);
+        frame.push_back(static_cast<uint8_t>((len >> 8) & 0xFF));
+        frame.push_back(static_cast<uint8_t>(len & 0xFF));
+    } else {
+        frame.push_back(127);
+        for (int i = 7; i >= 0; --i) {
+            frame.push_back(static_cast<uint8_t>((len >> (i * 8)) & 0xFF));
+        }
+    }
+    frame.insert(frame.end(), payload.begin(), payload.end());
+    return sendAll(fd, frame.data(), frame.size());
+}
+
+bool WebSocketBridge::sendPingFrame(const std::shared_ptr<ClientConn>& client) const {
+    if (!client || !client->alive.load()) return false;
+    std::lock_guard<std::mutex> lock(client->write_mutex);
+    if (!sendPingFrame(client->fd)) {
+        client->alive = false;
+        closeSocketFd(client->fd);
+        return false;
+    }
+    stats_.pings_sent.fetch_add(1);
     return true;
 }
 
@@ -448,6 +504,7 @@ bool WebSocketBridge::sendTextFrame(const std::shared_ptr<ClientConn>& client, c
         closeSocketFd(client->fd);
         return false;
     }
+    stats_.messages_sent.fetch_add(1);
     return true;
 }
 
@@ -458,7 +515,8 @@ std::string WebSocketBridge::makeEvent(const std::string& type, const std::strin
     return jb.build();
 }
 
-std::string WebSocketBridge::makeLogEvent(const std::vector<std::string>& lines) const {
+// Returns a JSON object string like {"lines":["line1","line2"]}
+static std::string makeLogLinesJson(const std::vector<std::string>& lines) {
     std::ostringstream arr;
     arr << "[";
     bool first = true;
@@ -466,12 +524,29 @@ std::string WebSocketBridge::makeLogEvent(const std::vector<std::string>& lines)
         if (line.empty()) continue;
         if (!first) arr << ",";
         first = false;
-        arr << '"' << jsonEscape(line) << '"';
+        // Strip ANSI escape sequences before JSON-encoding
+        std::string clean;
+        clean.reserve(line.size());
+        bool in_escape = false;
+        for (size_t i = 0; i < line.size(); ++i) {
+            unsigned char ch = static_cast<unsigned char>(line[i]);
+            if (ch == 0x1B) { in_escape = true; continue; }
+            if (in_escape) {
+                if ((ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')) in_escape = false;
+                continue;
+            }
+            clean.push_back(line[i]);
+        }
+        arr << '"' << jsonEscape(clean) << '"';
     }
     arr << "]";
     hunter::utils::JsonBuilder jb;
     jb.addRaw("lines", arr.str());
-    return makeEvent("logs", jb.build());
+    return jb.build();
+}
+
+std::string WebSocketBridge::makeLogEvent(const std::vector<std::string>& lines) const {
+    return makeEvent("logs", makeLogLinesJson(lines));
 }
 
 void WebSocketBridge::broadcastMonitorJson(const std::string& json_payload) {
@@ -491,11 +566,20 @@ void WebSocketBridge::broadcastMonitorEvent(const std::string& type, const std::
 
 void WebSocketBridge::removeDeadMonitorClients() {
     std::lock_guard<std::mutex> lock(monitor_clients_mutex_);
+    int removed = 0;
     monitor_clients_.erase(
-        std::remove_if(monitor_clients_.begin(), monitor_clients_.end(), [](const auto& client) {
-            return !client || !client->alive.load();
+        std::remove_if(monitor_clients_.begin(), monitor_clients_.end(), [&](const auto& client) {
+            if (!client || !client->alive.load()) {
+                removed++;
+                return true;
+            }
+            return false;
         }),
         monitor_clients_.end());
+    if (removed > 0) {
+        stats_.total_disconnections.fetch_add(removed);
+        stats_.active_monitor_clients.fetch_sub(removed);
+    }
 }
 
 void WebSocketBridge::handleControlClient(intptr_t client_fd) {
@@ -503,8 +587,20 @@ void WebSocketBridge::handleControlClient(intptr_t client_fd) {
         closeSocketFd(client_fd);
         return;
     }
+    stats_.active_control_clients.fetch_add(1);
     std::string message;
-    while (running_.load() && readTextFrame(client_fd, message)) {
+    while (running_.load()) {
+        uint8_t opcode = 0;
+        if (!readFrame(client_fd, message, opcode)) break;
+        if (opcode == 0x9) {
+            sendPongFrame(client_fd, message);
+            continue;
+        }
+        if (opcode == 0xA) {
+            continue;
+        }
+        if (opcode != 0x1) continue;
+        stats_.messages_received.fetch_add(1);
         const std::string request_id = extractJsonStringField(message, "request_id");
         if (!request_id.empty()) {
             std::ostringstream ack;
@@ -528,6 +624,7 @@ void WebSocketBridge::handleControlClient(intptr_t client_fd) {
             }
         }
     }
+    stats_.active_control_clients.fetch_sub(1);
     closeSocketFd(client_fd);
 }
 
@@ -572,56 +669,146 @@ void WebSocketBridge::monitorAcceptLoop() {
         }
         auto conn = std::make_shared<ClientConn>();
         conn->fd = handle;
+        conn->connected_at = std::chrono::steady_clock::now();
+        conn->last_activity = std::chrono::steady_clock::now();
         {
             std::lock_guard<std::mutex> lock(monitor_clients_mutex_);
             monitor_clients_.push_back(conn);
         }
-        if (status_provider_) {
-            const std::string status = status_provider_();
-            if (!status.empty()) {
-                sendTextFrame(conn, makeEvent("status", status));
-            }
-        }
-        if (logs_provider_) {
-            const std::vector<std::string> logs = logs_provider_();
-            if (!logs.empty()) {
-                sendTextFrame(conn, makeLogEvent(logs));
-            }
+        stats_.total_connections.fetch_add(1);
+        stats_.active_monitor_clients.fetch_add(1);
+        // Send initial data immediately — avoid calling status_provider_ here because
+        // it acquires the orchestrator mutex (which the publish loop also holds).
+        // Sending both concurrently causes multi-second serialisation delays.
+        // The publish loop will deliver a full status update within one cycle (~500ms).
+        {
+            // 1. Send the log history immediately (ring buffer, no heavy mutex)
+            try {
+                const std::vector<std::string> recent =
+                    hunter::utils::LogRingBuffer::instance().recent(200);
+                if (!recent.empty() && conn->alive.load()) {
+                    sendTextFrame(conn, makeLogEvent(recent));
+                }
+            } catch (...) {}
+            // 2. Send current WS stats as a quick "connected" signal
+            try {
+                if (conn->alive.load()) {
+                    sendTextFrame(conn, makeEvent("ws_stats", makeStatsJson()));
+                }
+            } catch (...) {}
         }
     }
 }
 
 void WebSocketBridge::monitorPublishLoop() {
     std::string last_status;
+    int stats_counter = 0;
+    int status_skip_counter = 0;
+
     while (running_.load()) {
-        if (status_provider_) {
-            std::string status = status_provider_();
-            if (!status.empty() && status != last_status) {
-                last_status = status;
-                broadcastMonitorJson(makeEvent("status", status));
+        // === LOGS: always fast — ring buffer needs no heavy mutex ===
+        try {
+            std::vector<std::string> newLines =
+                hunter::utils::LogRingBuffer::instance().fetchSince(log_since_, 200);
+            if (!newLines.empty()) {
+                broadcastMonitorJson(makeEvent("log_append", makeLogLinesJson(newLines)));
             }
+        } catch (...) {}
+
+        // === STATUS: direct call (provideStatus reads from file, no heavy mutex) ===
+        // Only fetch status every ~1s (5 * 200ms) to avoid excessive file reads
+        if (++status_skip_counter >= 5) {
+            status_skip_counter = 0;
+            try {
+                if (status_provider_) {
+                    std::string status = status_provider_();
+                    if (!status.empty() && status != last_status) {
+                        last_status = status;
+                        broadcastMonitorJson(makeEvent("status", status));
+                        auto now = std::chrono::steady_clock::now();
+                        std::lock_guard<std::mutex> lock(monitor_clients_mutex_);
+                        for (auto& c : monitor_clients_) {
+                            if (c && c->alive.load()) c->last_activity = now;
+                        }
+                    }
+                }
+            } catch (...) {}
         }
 
-        if (logs_provider_) {
-            std::vector<std::string> logs = logs_provider_();
-            bool changed = false;
-            {
-                std::lock_guard<std::mutex> lock(recent_logs_mutex_);
-                if (logs != recent_logs_cache_) {
-                    recent_logs_cache_ = logs;
-                    changed = true;
-                }
+        // === WS_STATS: every ~5 seconds (25 * 200ms) ===
+        if (++stats_counter >= 25) {
+            stats_counter = 0;
+            broadcastMonitorJson(makeEvent("ws_stats", makeStatsJson()));
+        }
+
+        removeDeadMonitorClients();
+        for (int i = 0; i < 2 && running_.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+}
+
+void WebSocketBridge::heartbeatLoop() {
+    while (running_.load()) {
+        for (int i = 0; i < 10 && running_.load(); ++i) {
+            std::this_thread::sleep_for(std::chrono::seconds(3));
+        }
+        if (!running_.load()) break;
+
+        auto now = std::chrono::steady_clock::now();
+        std::vector<std::shared_ptr<ClientConn>> clients;
+        {
+            std::lock_guard<std::mutex> lock(monitor_clients_mutex_);
+            clients = monitor_clients_;
+        }
+
+        for (const auto& client : clients) {
+            if (!client || !client->alive.load()) continue;
+
+            auto idle = std::chrono::duration_cast<std::chrono::seconds>(now - client->last_activity).count();
+            if (idle > 90) {
+                client->alive = false;
+                closeSocketFd(client->fd);
+                continue;
             }
-            if (changed && !logs.empty()) {
-                broadcastMonitorJson(makeLogEvent(logs));
+
+            if (idle > 30) {
+                sendPingFrame(client);
             }
         }
 
         removeDeadMonitorClients();
-        for (int i = 0; i < 5 && running_.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(100));
-        }
     }
+}
+
+std::string WebSocketBridge::makeStatsJson() const {
+    hunter::utils::JsonBuilder jb;
+    jb.add("active_monitor_clients", stats_.active_monitor_clients.load())
+      .add("active_control_clients", stats_.active_control_clients.load())
+      .add("total_connections", stats_.total_connections.load())
+      .add("total_disconnections", stats_.total_disconnections.load())
+      .add("messages_sent", stats_.messages_sent.load())
+      .add("messages_received", stats_.messages_received.load())
+      .add("pings_sent", stats_.pings_sent.load())
+      .add("pongs_received", stats_.pongs_received.load());
+    return jb.build();
+}
+
+std::string WebSocketBridge::getStatsJson() const {
+    hunter::utils::JsonBuilder jb;
+    jb.add("active_monitor_clients", stats_.active_monitor_clients.load())
+      .add("active_control_clients", stats_.active_control_clients.load())
+      .add("total_connections", stats_.total_connections.load())
+      .add("total_disconnections", stats_.total_disconnections.load())
+      .add("messages_sent", stats_.messages_sent.load())
+      .add("messages_received", stats_.messages_received.load())
+      .add("pings_sent", stats_.pings_sent.load())
+      .add("pongs_received", stats_.pongs_received.load());
+    return jb.build();
+}
+
+int WebSocketBridge::getActiveMonitorClientCount() const {
+    return stats_.active_monitor_clients.load();
 }
 
 bool broadcastGlobalMonitorEvent(const std::string& type, const std::string& raw_json) {

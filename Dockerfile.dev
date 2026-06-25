@@ -1,0 +1,74 @@
+# Development Dockerfile for Hunter C++ Backend
+# Uses bind mounts for source code - only needs rebuild when deps change
+FROM alpine:3.19 AS builder
+
+RUN apk add --no-cache \
+    build-base \
+    cmake \
+    ninja \
+    git \
+    wget \
+    curl-dev \
+    openssl-dev \
+    zlib-dev \
+    pkgconfig \
+    python3 \
+    go \
+    linux-headers \
+    autoconf \
+    automake \
+    libevent-dev \
+    tor
+
+WORKDIR /app
+
+# Build proxy engines once (cached layer - only rebuilds when script changes)
+COPY hunter_cpp/scripts/bootstrap_core_engines.py /app/hunter_cpp/scripts/
+RUN mkdir -p /app/bin && cd /app/hunter_cpp && python3 scripts/bootstrap_core_engines.py || echo "WARNING: some engines skipped"
+
+# Runtime stage
+FROM alpine:3.19
+
+RUN apk add --no-cache \
+    libcurl \
+    openssl \
+    zlib \
+    ca-certificates \
+    netcat-openbsd \
+    tor \
+    build-base \
+    cmake \
+    ninja \
+    curl-dev \
+    openssl-dev \
+    zlib-dev \
+    pkgconfig \
+    linux-headers \
+    openssh-client
+
+WORKDIR /app
+
+# Copy pre-built engine binaries from builder
+COPY --from=builder /app/bin/ /app/bin/
+RUN chmod +x /app/bin/* 2>/dev/null || true \
+    && cp /usr/bin/tor /app/bin/tor 2>/dev/null || true
+
+# Source code is mounted at runtime via docker-compose volumes
+# This script compiles and runs the backend
+COPY dev-entrypoint.sh /app/dev-entrypoint.sh
+RUN chmod +x /app/dev-entrypoint.sh
+
+RUN mkdir -p /app/runtime /app/config /app/logs /app/build /app/runtime/ssh
+
+ENV HUNTER_REST_API_PORT=7801
+ENV HUNTER_WS_MONITOR_PORT=7802
+ENV HUNTER_MULTIPROXY_PORT=7803
+ENV HUNTER_GEMINI_PORT=7804
+ENV HUNTER_XRAY_PATH=bin/xray
+ENV HUNTER_SINGBOX_PATH=bin/sing-box
+ENV HUNTER_MIHOMO_PATH=bin/mihomo
+ENV HUNTER_TOR_PATH=bin/tor
+
+EXPOSE 7801 7802 7803 7804 7810-7820
+
+CMD ["/app/dev-entrypoint.sh"]

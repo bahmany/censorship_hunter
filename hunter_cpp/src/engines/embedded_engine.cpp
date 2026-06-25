@@ -62,6 +62,11 @@ std::string SingBoxEngine::generateConfig(const ParsedConfig& config, int listen
     // Outbounds
     json << "  \"outbounds\": [\n";
     json << createOutboundConfig(config);
+    json << "    ,{\"type\":\"direct\",\"tag\":\"direct\"}\n";
+    json << "    ,{\"type\":\"block\",\"tag\":\"blackhole\"}\n";
+    for (int p = 0; p < 5; ++p) {
+        json << "    ,{\"type\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"server\":\"172.20.14.34\",\"server_port\":" << (3100+p) << "}\n";
+    }
     json << "  ],\n";
     
     // Routing
@@ -100,7 +105,13 @@ std::string SingBoxEngine::generateBalancedConfig(const std::vector<ParsedConfig
     
     // Add all proxy outbounds
     for (size_t i = 0; i < configs.size(); ++i) {
-        json << createOutboundConfig(configs[i]);
+        std::string ob = createOutboundConfig(configs[i]);
+        std::string tag_needle = "\"tag\": \"proxy\"";
+        size_t tag_pos = ob.find(tag_needle);
+        if (tag_pos != std::string::npos) {
+            ob.replace(tag_pos, tag_needle.size(), "\"tag\": \"proxy-" + std::to_string(i) + "\"");
+        }
+        json << ob;
         if (i < configs.size() - 1) json << ",";
         json << "\n";
     }
@@ -114,9 +125,18 @@ std::string SingBoxEngine::generateBalancedConfig(const std::vector<ParsedConfig
         json << "\"proxy-" << i << "\"";
         if (i < configs.size() - 1) json << ",";
     }
+    for (int p = 0; p < 5; ++p) {
+        json << ",\"socks5-fb-" << p << "\"";
+    }
     json << "],\n";
     json << "      \"default\": \"proxy-0\"\n";
     json << "    }\n";
+    // Add direct, blackhole, and SOCKS5 fallback outbounds
+    json << "    ,{\"type\":\"direct\",\"tag\":\"direct\"}\n";
+    json << "    ,{\"type\":\"block\",\"tag\":\"blackhole\"}\n";
+    for (int p = 0; p < 5; ++p) {
+        json << "    ,{\"type\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"server\":\"172.20.14.34\",\"server_port\":" << (3100+p) << "}\n";
+    }
     json << "  ],\n";
     
     // Routing
@@ -145,7 +165,7 @@ std::string SingBoxEngine::createOutboundConfig(const ParsedConfig& config) {
     std::ostringstream json;
     json << "    {\n";
     json << "      \"type\": \"" << config.protocol << "\",\n";
-    json << "      \"tag\": \"proxy-" << std::hash<std::string>{}(config.uri) % 10000 << "\",\n";
+    json << "      \"tag\": \"proxy\",\n";
     json << "      \"server\": \"" << config.address << "\",\n";
     json << "      \"server_port\": " << config.port << ",\n";
     
@@ -243,15 +263,15 @@ std::string SingBoxEngine::createRoutingConfig() {
     json << "        \"outbound\": \"direct\"\n";
     json << "      },\n";
     json << "      {\n";
-    json << "        \"network\": \"udp\",\n";
+    json << "        \"geoip\": [\"private\"],\n";
     json << "        \"outbound\": \"direct\"\n";
     json << "      },\n";
     json << "      {\n";
-    json << "        \"geoip\": [\"private\", \"cn\"],\n";
-    json << "        \"outbound\": \"direct\"\n";
+    json << "        \"inbound\": [\"mixed-in\"],\n";
+    json << "        \"outbound\": \"proxy\"\n";
     json << "      }\n";
     json << "    ],\n";
-    json << "    \"final\": \"proxy\",\n";
+    json << "    \"final\": \"blackhole\",\n";
     json << "    \"auto_detect_interface\": true\n";
     return json.str();
 }
@@ -372,7 +392,14 @@ std::string XRayEngine::generateConfig(const ParsedConfig& config, int listen_po
     // Outbounds
     json << "  \"outbounds\": [\n";
     json << createOutboundConfig(config);
-    json << "  ],\n";
+    json << "    ,{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}";
+    json << "    ,{\"tag\":\"dns-out\",\"protocol\":\"dns\",\"settings\":{}}";
+    json << "    ,{\"tag\":\"blackhole\",\"protocol\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
+    // SOCKS5 fallback outbounds
+    for (int p = 0; p < 5; ++p) {
+        json << "    ,{\"tag\":\"socks5-fb-" << p << "\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100+p) << "}]}}";
+    }
+    json << "\n  ],\n";
     
     // Routing
     json << "  \"routing\": {\n";
@@ -414,7 +441,13 @@ std::string XRayEngine::generateBalancedConfig(const std::vector<ParsedConfig>& 
     
     // Add all proxy outbounds
     for (size_t i = 0; i < configs.size(); ++i) {
-        json << createOutboundConfig(configs[i]);
+        std::string ob = createOutboundConfig(configs[i]);
+        std::string tag_needle = "\"tag\": \"proxy\"";
+        size_t tag_pos = ob.find(tag_needle);
+        if (tag_pos != std::string::npos) {
+            ob.replace(tag_pos, tag_needle.size(), "\"tag\": \"proxy-" + std::to_string(i) + "\"");
+        }
+        json << ob;
         if (i < configs.size() - 1) json << ",";
         json << "\n";
     }
@@ -428,9 +461,19 @@ std::string XRayEngine::generateBalancedConfig(const std::vector<ParsedConfig>& 
         json << "\"proxy-" << i << "\"";
         if (i < configs.size() - 1) json << ",";
     }
+    for (int p = 0; p < 5; ++p) {
+        json << ",\"socks5-fb-" << p << "\"";
+    }
     json << "]\n";
     json << "    }\n";
-    json << "  ],\n";
+    json << "    ,{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}";
+    json << "    ,{\"tag\":\"dns-out\",\"protocol\":\"dns\",\"settings\":{}}";
+    json << "    ,{\"tag\":\"blackhole\",\"protocol\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
+    // SOCKS5 fallback outbounds
+    for (int p = 0; p < 5; ++p) {
+        json << "    ,{\"tag\":\"socks5-fb-" << p << "\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100+p) << "}]}}";
+    }
+    json << "\n  ],\n";
     
     // Routing
     json << "  \"routing\": {\n";
@@ -464,7 +507,7 @@ std::string XRayEngine::createInboundConfig(int listen_port) {
 std::string XRayEngine::createOutboundConfig(const ParsedConfig& config) {
     std::ostringstream json;
     json << "    {\n";
-    json << "      \"tag\": \"proxy-" << std::hash<std::string>{}(config.uri) % 10000 << "\",\n";
+    json << "      \"tag\": \"proxy\",\n";
     json << "      \"protocol\": \"" << config.protocol << "\",\n";
     json << "      ";
     
@@ -494,21 +537,26 @@ std::string XRayEngine::createRoutingConfig() {
     json << "        \"type\": \"field\",\n";
     json << "        \"inboundTag\": [\"socks-in\"],\n";
     json << "        \"port\": 53,\n";
+    json << "        \"outboundTag\": \"dns-out\"\n";
+    json << "      },\n";
+    json << "      {\n";
+    json << "        \"type\": \"field\",\n";
+    json << "        \"ip\": [\"geoip:private\"],\n";
     json << "        \"outboundTag\": \"direct\"\n";
     json << "      },\n";
     json << "      {\n";
     json << "        \"type\": \"field\",\n";
-    json << "        \"ip\": [\"geoip:private\", \"geoip:cn\"],\n";
-    json << "        \"outboundTag\": \"direct\"\n";
+    json << "        \"inboundTag\": [\"socks-in\"],\n";
+    json << "        \"outboundTag\": \"proxy\"\n";
     json << "      }\n";
     json << "    ],\n";
-    json << "    \"final\": \"proxy\"\n";
+    json << "    \"final\": \"blackhole\"\n";
     return json.str();
 }
 
 std::string XRayEngine::createObservatoryConfig() {
     std::ostringstream json;
-    json << "    \"subjectSelector\": [\"proxy-*\"],\n";
+    json << "    \"subjectSelector\": [\"proxy-*\",\"socks5-fb-*\"],\n";
     json << "    \"probeUrl\": \"http://www.gstatic.com/generate_204\",\n";
     json << "    \"probeInterval\": \"30s\"\n";
     return json.str();

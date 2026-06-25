@@ -1,6 +1,7 @@
 #include "network/proxy_tester.h"
 #include "network/uri_parser.h"
 #include "core/utils.h"
+#include "core/win_compat.h"
 #include "proxy/xray_manager.h"
 
 #include <iostream>
@@ -29,6 +30,7 @@
 #define TLOG(msg) do { \
     std::ostringstream _tlog_ss; \
     _tlog_ss << msg; \
+    std::cerr << _tlog_ss.str() << std::endl; \
     utils::LogRingBuffer::instance().push(_tlog_ss.str()); \
 } while(0)
 
@@ -62,7 +64,7 @@ static int getMaxConcurrentTests() {
         } else {
             int cpus = static_cast<int>(std::thread::hardware_concurrency());
             if (cpus <= 0) cpus = 4;
-            max_tests = std::min(96, std::max(32, cpus * 4));
+            max_tests = std::min(48, std::max(16, cpus * 2));
         }
     }
     return max_tests;
@@ -185,9 +187,23 @@ static ProxyTestResult chooseBestResult(const std::vector<ProxyTestResult>& resu
 }
 
 ProxyTester::ProxyTester() {
+#ifdef _WIN32
     singbox_path_ = "bin/sing-box.exe";
     xray_path_ = "bin/xray.exe";
     mihomo_path_ = "bin/mihomo.exe";
+#else
+    // Try env vars first, then absolute path, then relative
+    const char* env_xray = std::getenv("HUNTER_XRAY_PATH");
+    const char* env_singbox = std::getenv("HUNTER_SINGBOX_PATH");
+    const char* env_mihomo = std::getenv("HUNTER_MIHOMO_PATH");
+    xray_path_ = env_xray ? env_xray : "bin/xray";
+    singbox_path_ = env_singbox ? env_singbox : "bin/sing-box";
+    mihomo_path_ = env_mihomo ? env_mihomo : "bin/mihomo";
+    // If relative path doesn't exist, try /app/bin/ prefix (Docker CWD is /app/hunter_cpp)
+    if (!utils::fileExists(xray_path_) && utils::fileExists("/app/bin/xray")) xray_path_ = "/app/bin/xray";
+    if (!utils::fileExists(singbox_path_) && utils::fileExists("/app/bin/sing-box")) singbox_path_ = "/app/bin/sing-box";
+    if (!utils::fileExists(mihomo_path_) && utils::fileExists("/app/bin/mihomo")) mihomo_path_ = "/app/bin/mihomo";
+#endif
 }
 
 ProxyTester::~ProxyTester() {}
@@ -849,10 +865,10 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
         return result;
     }
     
-    // Log the generated config for debugging (first 500 chars)
+    // Log the generated config for debugging (first 500 chars) — stderr only, not ring buffer
     std::string config_preview = config_json;
     if (config_preview.length() > 500) config_preview = config_preview.substr(0, 500) + "...";
-    TLOG("  [sing-box:" << test_port << "] Config preview: " << config_preview);
+    { std::ostringstream _ts; _ts << "  [sing-box:" << test_port << "] Config preview: " << config_preview; std::cerr << _ts.str() << std::endl; }
     
 #ifdef _WIN32
     std::string log_file = makeRuntimeArtifactPath("temp_singbox_out", test_port, ".txt");
@@ -871,8 +887,46 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
         TLOG("  [sing-box:" << test_port << "] RESULT: FAIL " << short_uri << " reason=" << result.error_message);
     }
 #else
-    result.error_message = "sing-box testing not implemented on this platform";
-    std::remove(temp_config.c_str());
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl(singbox_path_.c_str(), "sing-box", "run", "-c", temp_config.c_str(), NULL);
+        exit(1);
+    } else if (pid > 0) {
+        bool port_alive = false;
+        for (int i = 0; i < 10; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            if (utils::isPortAlive(test_port, 500)) { port_alive = true; break; }
+        }
+        
+        if (!port_alive) {
+            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+            std::remove(temp_config.c_str());
+            result.error_message = "sing-box port not listening";
+            TLOG("  [sing-box:" << test_port << "] FAIL - port not alive");
+            s_active_tests--;
+            return result;
+        }
+        
+        float speed = -1.0f;
+        for (int t = 0; t < NUM_TEST_URLS && speed <= 0.0f; t++) {
+            const int url_timeout = t == 0 ? 10 : timeout_seconds;
+            speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", test_port, url_timeout);
+        }
+        
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        std::remove(temp_config.c_str());
+        
+        if (speed > 0.0f) {
+            result.success = true;
+            result.download_speed_kbps = speed;
+            TLOG("  [sing-box:" << test_port << "] OK   - " << speed << " KB/s");
+        } else {
+            result.error_message = "Download failed";
+            TLOG("  [sing-box:" << test_port << "] FAIL - download failed");
+        }
+    } else {
+        result.error_message = "Failed to fork";
+    }
 #endif
     
     s_active_tests--;
@@ -932,8 +986,46 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     TLOG("  [mihomo:" << test_port << "] CMD: " << cmd);
     result = runEngineTest(cmd, temp_config, log_file, test_port, short_uri, "mihomo", timeout_seconds);
 #else
-    result.error_message = "mihomo testing not implemented on this platform";
-    std::remove(temp_config.c_str());
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl(mihomo_path_.c_str(), "mihomo", "-f", temp_config.c_str(), NULL);
+        exit(1);
+    } else if (pid > 0) {
+        bool port_alive = false;
+        for (int i = 0; i < 10; i++) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(300));
+            if (utils::isPortAlive(test_port, 500)) { port_alive = true; break; }
+        }
+        
+        if (!port_alive) {
+            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+            std::remove(temp_config.c_str());
+            result.error_message = "mihomo port not listening";
+            TLOG("  [mihomo:" << test_port << "] FAIL - port not alive");
+            s_active_tests--;
+            return result;
+        }
+        
+        float speed = -1.0f;
+        for (int t = 0; t < NUM_TEST_URLS && speed <= 0.0f; t++) {
+            const int url_timeout = t == 0 ? 10 : timeout_seconds;
+            speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", test_port, url_timeout);
+        }
+        
+        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+        std::remove(temp_config.c_str());
+        
+        if (speed > 0.0f) {
+            result.success = true;
+            result.download_speed_kbps = speed;
+            TLOG("  [mihomo:" << test_port << "] OK   - " << speed << " KB/s");
+        } else {
+            result.error_message = "Download failed";
+            TLOG("  [mihomo:" << test_port << "] FAIL - download failed");
+        }
+    } else {
+        result.error_message = "Failed to fork";
+    }
 #endif
     
     s_active_tests--;
@@ -946,19 +1038,72 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
     ProxyTestResult result;
     result.uri = config_uri;
     
-    // Check if xray.exe exists at standard path
-    if (!utils::fileExists(xray_path_)) {
-        result.error_message = "xray.exe not found at " + xray_path_;
-        return result;
+    std::vector<ProxyTestResult> results;
+
+    // Try xray first
+    if (utils::fileExists(xray_path_)) {
+        try {
+            auto r = testWithXray(config_uri, test_url, timeout_seconds);
+            r.uri = config_uri;
+            results.push_back(r);
+            if (r.success) return r;
+        } catch (const std::exception& ex) {
+            ProxyTestResult fail;
+            fail.uri = config_uri;
+            fail.error_message = std::string("xray exception: ") + ex.what();
+            results.push_back(fail);
+        } catch (...) {
+            ProxyTestResult fail;
+            fail.uri = config_uri;
+            fail.error_message = "xray unknown exception";
+            results.push_back(fail);
+        }
     }
-    
-    try {
-        result = testWithXray(config_uri, test_url, timeout_seconds);
-        result.uri = config_uri;
-    } catch (const std::exception& ex) {
-        result.error_message = std::string("xray exception: ") + ex.what();
-    } catch (...) {
-        result.error_message = "xray unknown exception";
+
+    // Fallback: sing-box
+    if (utils::fileExists(singbox_path_)) {
+        try {
+            auto r = testWithSingBox(config_uri, test_url, timeout_seconds);
+            r.uri = config_uri;
+            results.push_back(r);
+            if (r.success) return r;
+        } catch (const std::exception& ex) {
+            ProxyTestResult fail;
+            fail.uri = config_uri;
+            fail.error_message = std::string("sing-box exception: ") + ex.what();
+            results.push_back(fail);
+        } catch (...) {
+            ProxyTestResult fail;
+            fail.uri = config_uri;
+            fail.error_message = "sing-box unknown exception";
+            results.push_back(fail);
+        }
+    }
+
+    // Fallback: mihomo
+    if (utils::fileExists(mihomo_path_)) {
+        try {
+            auto r = testWithMihomo(config_uri, test_url, timeout_seconds);
+            r.uri = config_uri;
+            results.push_back(r);
+            if (r.success) return r;
+        } catch (const std::exception& ex) {
+            ProxyTestResult fail;
+            fail.uri = config_uri;
+            fail.error_message = std::string("mihomo exception: ") + ex.what();
+            results.push_back(fail);
+        } catch (...) {
+            ProxyTestResult fail;
+            fail.uri = config_uri;
+            fail.error_message = "mihomo unknown exception";
+            results.push_back(fail);
+        }
+    }
+
+    if (results.empty()) {
+        result.error_message = "No proxy engine binaries found";
+    } else {
+        result = chooseBestResult(results);
     }
     
     return result;

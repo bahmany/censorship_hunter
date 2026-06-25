@@ -36,11 +36,17 @@ bool MultiProxyServer::start(const std::vector<std::pair<std::string, float>>& i
         available_configs_ = initial_configs;
     }
 
-    refreshBackends();
     running_ = true;
 
     // Start health monitor thread
     health_thread_ = std::thread(&MultiProxyServer::healthMonitorLoop, this);
+
+    // Refresh backends in background so start() doesn't block
+    try {
+        HunterTaskManager::instance().submitIO([this]() { refreshBackends(); });
+    } catch (...) {
+        refreshBackends();
+    }
 
     return true;
 }

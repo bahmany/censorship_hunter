@@ -306,7 +306,7 @@ std::set<std::string> ConfigFetcher::fetchUrlsParallel(
 
     std::vector<std::future<std::set<std::string>>> futures;
     for (const auto& url : urls) {
-        futures.push_back(mgr.submitIO([this, url, &proxy_ports, timeout_per]() {
+        futures.push_back(mgr.submitIO([this, url, proxy_ports, timeout_per]() {
             return fetchSingleUrl(url, proxy_ports, timeout_per);
         }));
     }

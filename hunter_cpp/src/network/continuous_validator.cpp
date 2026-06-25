@@ -565,7 +565,6 @@ ContinuousValidator::ContinuousValidator(ConfigDatabase& db, int batch_size,
 
 bool ContinuousValidator::quickCheck(const std::string& uri) {
     ProxyTester tester;
-    tester.setSingBoxPath("bin/sing-box.exe");
 
     ProxyTestResult result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s_);
     return isUsableResult(result);
@@ -589,7 +588,6 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
             int timeout_cap = test_timeout;
             futures.push_back(mgr.submitIO([uri, timeout_cap]() -> ProxyTestResult {
                 ProxyTester local_tester;
-                local_tester.setSingBoxPath("bin/sing-box.exe");
                 return local_tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_cap);
             }));
         }

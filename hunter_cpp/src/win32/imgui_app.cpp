@@ -2952,7 +2952,7 @@ void ImGuiApp::DrawFrame() {
 
     // Content area with padding
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, {16*dpi_scale_, 12*dpi_scale_});
-    ImGui::BeginChild("##content", {0,0}, false, ImGuiWindowFlags_AlwaysUseWindowPadding);
+    ImGui::BeginChild("##content", {0,0}, false, ImGuiChildFlags_AlwaysUseWindowPadding);
     ImGui::PopStyleVar();
 
     switch (page_) {

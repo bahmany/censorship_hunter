@@ -3,6 +3,7 @@
 #include "core/utils.h"
 #include "core/constants.h"
 #include "core/task_manager.h"
+#include "core/win_compat.h"
 #include "network/proxy_tester.h"
 #include "network/sys_proxy.h"
 #include "realtime/websocket_bridge.h"
@@ -339,9 +340,13 @@ void HunterOrchestrator::initComponents() {
     std::string cache_dir = utils::dirName(config_.stateFile());
     if (cache_dir.empty()) cache_dir = "runtime";
     cache_ = std::make_unique<cache::SmartCache>(cache_dir);
+
+    // Runtime cleanup manager
+    cleanup_manager_ = std::make_unique<orchestrator::RuntimeCleanupManager>(cache_dir);
 }
 
 void HunterOrchestrator::start() {
+    std::cout << "[Orchestrator] start() called" << std::endl;
     stop_requested_ = false;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
@@ -355,6 +360,15 @@ void HunterOrchestrator::start() {
 
     // ═══ PHASE -1: Kill processes occupying required ports ═══
     killPortOccupants();
+
+    // ═══ PHASE -0.5: Runtime cleanup — remove stale temp files ═══
+    if (cleanup_manager_) {
+        std::cout << "[Startup] Running runtime cleanup..." << std::endl;
+        auto cleanup_stats = cleanup_manager_->runCleanup();
+        std::cout << "[Startup] Cleanup: deleted " << cleanup_stats.files_deleted
+                  << " files, freed " << (cleanup_stats.bytes_freed / 1024) << " KB" << std::endl;
+        cleanup_manager_->startPeriodicCleanup(3600); // hourly
+    }
 
     // ═══ PHASE 0: Load initial configs into database ═══
     std::cout << "[Startup] Loading initial configurations..." << std::endl;
@@ -541,12 +555,23 @@ void HunterOrchestrator::start() {
         }
     }
 
-    // Apply initial speed profile from hardware
+    // Apply initial speed profile from hardware (overridable via HUNTER_SPEED_PROFILE env var)
     {
         auto hw = HunterTaskManager::instance().getHardware();
-        if (hw.cpu_count <= 2) applyAutoProfile("low");
-        else if (hw.cpu_count <= 4) applyAutoProfile("medium");
-        else applyAutoProfile("high");
+        const char* env_profile = std::getenv("HUNTER_SPEED_PROFILE");
+        std::string profile;
+        if (env_profile && *env_profile) {
+            profile = std::string(env_profile);
+        } else if (hw.ram_percent >= 85.0f) {
+            profile = "low";
+        } else if (hw.cpu_count <= 2) {
+            profile = "low";
+        } else if (hw.cpu_count <= 4) {
+            profile = "medium";
+        } else {
+            profile = "high";
+        }
+        applyAutoProfile(profile);
     }
 
     // ═══ PHASE 5: Main loop with real-time status emission ═══
@@ -633,6 +658,11 @@ void HunterOrchestrator::stop() {
         } catch (...) {}
     }
     
+    // Stop cleanup manager periodic thread
+    if (cleanup_manager_) {
+        cleanup_manager_->stopPeriodicCleanup();
+    }
+
     if (thread_manager_) {
         thread_manager_->stopAll();
         thread_manager_.reset();
@@ -863,6 +893,15 @@ void HunterOrchestrator::addManualConfigs(const std::vector<std::string>& uris) 
         std::to_string(promoted) + " existing (" + std::to_string(valid_set.size()) + " submitted)");
 }
 
+std::string HunterOrchestrator::triggerRuntimeCleanup() {
+    if (!cleanup_manager_) return "{\"ok\":false,\"error\":\"cleanup_manager_not_initialized\"}";
+    auto stats = cleanup_manager_->runCleanup();
+    utils::LogRingBuffer::instance().push(
+        "[Cmd] Runtime cleanup: deleted " + std::to_string(stats.files_deleted) +
+        " files, freed " + std::to_string(stats.bytes_freed / 1024) + " KB");
+    return cleanup_manager_->buildStatsJson();
+}
+
 // ─── Real-time UI Communication ───
 
 std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_line) {
@@ -1001,6 +1040,7 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
         else if (json_line.find("\"stop\"") != std::string::npos) command = "stop";
         else if (json_line.find("\"get_status\"") != std::string::npos) command = "get_status";
         else if (json_line.find("\"ping\"") != std::string::npos) command = "ping";
+        else if (json_line.find("\"gateway_status\"") != std::string::npos) command = "gateway_status";
     }
 
     bool ok = true;
@@ -1008,7 +1048,10 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
     std::string data_json;
 
     try {
-        if (command == "pause") {
+        if (command == "start") {
+            resume();
+            message = "started";
+        } else if (command == "pause") {
             pause();
             message = "paused";
         } else if (command == "resume") {
@@ -1464,6 +1507,29 @@ std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_l
             message = "status";
         } else if (command == "ping") {
             message = "pong";
+        } else if (command == "gateway_status") {
+            int balancer_backends = 0;
+            int balancer_healthy = 0;
+            if (balancer_) {
+                auto backends = balancer_->getAllBackends();
+                balancer_backends = static_cast<int>(backends.size());
+                balancer_healthy = static_cast<int>(
+                    std::count_if(backends.begin(), backends.end(),
+                        [](const auto& b) {
+                            return b.state == BackendState::HEALTHY;
+                        }));
+            }
+            std::ostringstream gd;
+            gd << "{\"balancer_port\":" << (balancer_ ? balancer_->port() : 0)
+               << ",\"balancer_backends\":" << balancer_backends
+               << ",\"balancer_healthy\":" << balancer_healthy
+               << ",\"gemini_port\":" << (gemini_balancer_ ? gemini_balancer_->port() : 0)
+               << "}";
+            data_json = gd.str();
+            message = "gateway_status";
+        } else if (command == "runtime_cleanup") {
+            data_json = triggerRuntimeCleanup();
+            message = "cleanup_done";
         } else if (command == "download_configs") {
             // Extract sources array and proxy setting
             std::vector<std::string> sources;
@@ -1618,6 +1684,11 @@ bool HunterOrchestrator::runCycle() {
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
   try {
+
+    // Pre-cycle cleanup: remove stale temp files before validation/export
+    if (cleanup_manager_) {
+        cleanup_manager_->runCleanup();
+    }
 
     // Memory status
     auto hw = HunterTaskManager::instance().getHardware();
@@ -2022,7 +2093,6 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
                 br.uri = uri;
                 try {
                     network::ProxyTester tester;
-                    tester.setSingBoxPath("bin/sing-box.exe");
                     auto result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s);
 
                     br.success = result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
@@ -2242,6 +2312,7 @@ void HunterOrchestrator::provisionPorts() {
     };
     if (balancer_) {
         auto pool = balancer_->getAvailableConfigsList();
+        std::cout << "[Provision] Balancer pool: " << pool.size() << " configs" << std::endl;
         for (auto& e : pool) {
             best.emplace_back(e.uri, e.latency);
             if (!e.engine_used.empty()) {
@@ -2252,11 +2323,13 @@ void HunterOrchestrator::provisionPorts() {
     }
     if (best.empty() && config_db_) {
         best = config_db_->getHealthyConfigs(PROVISION_PORT_COUNT);
+        std::cout << "[Provision] DB healthy configs: " << best.size() << std::endl;
     }
     if (best.empty()) {
         std::lock_guard<std::mutex> lock(state_mutex_);
         auto it = cached_configs_.find("HUNTER_balancer_cache.json");
         if (it != cached_configs_.end()) best = it->second;
+        std::cout << "[Provision] Fallback cached configs: " << best.size() << std::endl;
     }
 
     // Sort by latency (best first) — quality-based priority
@@ -2281,6 +2354,10 @@ void HunterOrchestrator::provisionPorts() {
     // Limit to available port range
     int max_slots = PROVISION_PORT_MAX - PROVISION_PORT_BASE + 1;
     int count = std::min((int)best.size(), std::min(PROVISION_PORT_COUNT, max_slots));
+    std::cout << "[Provision] Provisioning " << count << " ports from " << best.size() << " configs" << std::endl;
+    if (!best.empty()) {
+        std::cout << "[Provision] First config: " << best[0].first.substr(0, 60) << " latency=" << best[0].second << std::endl;
+    }
 
     std::lock_guard<std::mutex> lock(provision_mutex_);
 
@@ -2300,11 +2377,17 @@ void HunterOrchestrator::provisionPorts() {
         auto& [uri, latency] = best[i];
 
         auto parsed = network::UriParser::parse(uri);
-        if (!parsed.has_value() || !parsed->isValid()) continue;
+        if (!parsed.has_value() || !parsed->isValid()) {
+            std::cout << "[Provision] Skip port " << socks_port << ": parse failed for " << uri.substr(0, 50) << std::endl;
+            continue;
+        }
 
         const std::string preferred_engine = resolve_engine_hint(uri);
         const std::string engine_used = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
-        if (engine_used.empty()) continue;
+        if (engine_used.empty()) {
+            std::cout << "[Provision] Skip port " << socks_port << ": no engine for " << uri.substr(0, 50) << " (preferred=" << preferred_engine << ")" << std::endl;
+            continue;
+        }
         std::string config_text = runtime_engine_manager_.generateConfig(*parsed, socks_port, engine_used);
         std::string config_path = runtime_engine_manager_.writeConfigFile(engine_used, config_text);
         int pid = runtime_engine_manager_.startProcess(engine_used, config_path);
@@ -2582,13 +2665,18 @@ std::string HunterOrchestrator::recheckLiveProvisionedPorts() {
         }
     }
 
+    // Restore original pause state — don't permanently pause the system
+    if (!was_paused) {
+        paused_.store(false);
+    }
+
     std::ostringstream data;
     data << "{"
          << "\"tested\":" << (int)results.size()
          << ",\"passed\":" << (int)passed_uris.size()
          << ",\"failed\":" << (int)failed_uris.size()
          << ",\"was_paused_before\":" << (was_paused ? "true" : "false")
-         << ",\"kept_paused\":true"
+         << ",\"kept_paused\":" << (was_paused ? "true" : "false")
          << ",\"passed_uris\":" << jsonStringArray(passed_uris)
          << ",\"failed_uris\":" << jsonStringArray(failed_uris)
          << ",\"tested_uris\":" << jsonStringArray([&]() {
@@ -2687,12 +2775,18 @@ void HunterOrchestrator::replaceProvisionedPortsLocked(const std::vector<int>& d
 
             if (!ready) {
                 if (config_db_) config_db_->updateHealth(uri, false, 0.0f, engine_used, true);
-                utils::LogRingBuffer::instance().push(
-                    "[Provision] Failed to replace MIXED:" + std::to_string(socks_port) +
-                    " engine=" + engine_used +
-                    " using new config tcp=" + std::string(probe.tcp_alive ? "1" : "0") +
-                    " socks=" + std::string(probe.socks_ready ? "1" : "0") +
-                    " http=" + std::string(probe.http_ready ? "1" : "0"));
+                slot.consecutive_failures++;
+                // Rate-limit: only log 1st, 5th, 10th, then every 20th failure
+                int cf = slot.consecutive_failures;
+                if (cf == 1 || cf == 5 || cf == 10 || (cf % 20) == 0) {
+                    utils::LogRingBuffer::instance().push(
+                        "[Provision] Failed to replace MIXED:" + std::to_string(socks_port) +
+                        " engine=" + engine_used +
+                        " using new config tcp=" + std::string(probe.tcp_alive ? "1" : "0") +
+                        " socks=" + std::string(probe.socks_ready ? "1" : "0") +
+                        " http=" + std::string(probe.http_ready ? "1" : "0") +
+                        " (failures=" + std::to_string(cf) + ")");
+                }
                 continue;
             }
 
@@ -3383,6 +3477,7 @@ bool HunterOrchestrator::emergencyBootstrap() {
 }
 
 std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int last_tested, int last_passed) {
+    std::lock_guard<std::mutex> status_lock(status_mutex_);
     int db_total = 0, db_alive = 0, db_tested = 0, db_untested = 0;
     float db_avg_lat = 0.0f;
     int db_total_tests = 0, db_total_passes = 0;
@@ -3784,6 +3879,11 @@ std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int la
         .addRaw("history", history_json)
         .addRaw("provisioned_ports", ports_json.str())
         .addRaw("balancers", bal_json.str());
+
+    // Runtime cleanup stats
+    if (cleanup_manager_) {
+        root.addRaw("runtime_cleanup", cleanup_manager_->buildStatsJson());
+    }
 
     return root.build();
 }

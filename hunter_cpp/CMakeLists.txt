@@ -13,13 +13,14 @@ endif()
 
 find_package(Threads REQUIRED)
 
-# Find static zlib
-set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+# Find zlib
+if(WIN32)
+    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+endif()
 find_package(ZLIB REQUIRED)
 
 # Find libcurl
 if(NOT WIN32)
-    set(CURL_USE_STATIC_LIBS ON)
     find_package(CURL REQUIRED)
 endif()
 
@@ -50,9 +51,16 @@ set(NETWORK_SOURCES
 
 # ─── Proxy Library Sources ───
 set(PROXY_SOURCES
+    src/proxy/load_balancer.cpp
     src/proxy/load_balancer_impl.cpp
     src/proxy/runtime_engine_manager.cpp
     src/proxy/xray_manager.cpp
+    src/proxy/proxy_gateway.cpp
+    src/proxy/proxy_hosting_manager.cpp
+    src/proxy/session_router.cpp
+    src/proxy/traffic_observer.cpp
+    src/proxy/upstream_tunnel_manager.cpp
+    src/proxy/generated_config_manager.cpp
 )
 
 # ─── Testing Library Sources ───
@@ -82,6 +90,7 @@ set(CACHE_SOURCES
 set(ORCHESTRATOR_SOURCES
     src/orchestrator/thread_manager.cpp
     src/orchestrator/orchestrator.cpp
+    src/orchestrator/runtime_cleanup_manager.cpp
 )
 
 # ─── Realtime Bridge Sources ───
@@ -153,8 +162,10 @@ endif()
 # Static link C++ runtime
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
 
-# Unicode support
-add_definitions(-DUNICODE -D_UNICODE)
+# Unicode support (Windows only)
+if(WIN32)
+    add_definitions(-DUNICODE -D_UNICODE)
+endif()
 
 # Windows GUI executable (Windows only)
 if(WIN32)
@@ -199,13 +210,27 @@ if(WIN32)
     install(TARGETS huntercensor
         RUNTIME DESTINATION bin
     )
+else()
+    # Linux CLI executable with WebSocket support
+    add_executable(hunter_backend
+        src/linux/main.cpp
+    )
+    target_link_libraries(hunter_backend PRIVATE hunter_core)
+    target_link_options(hunter_backend PRIVATE -static-libgcc -static-libstdc++)
+    
+    set(_hunter_deploy_dir "${CMAKE_SOURCE_DIR}/../bin")
+    
+    add_custom_command(TARGET hunter_backend POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${_hunter_deploy_dir}"
+        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:hunter_backend>" "${_hunter_deploy_dir}/hunter_backend"
+    )
 endif()
 
 # Test executable
 add_executable(hunter_tests
     tests/test_core.cpp
 )
-target_link_options(hunter_tests PRIVATE -static)
+target_link_options(hunter_tests PRIVATE -static-libgcc -static-libstdc++)
 target_link_libraries(hunter_tests PRIVATE hunter_core)
 
 # Install targets

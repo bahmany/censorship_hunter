@@ -2,6 +2,7 @@
 #include "security/switch_bypass.h"
 #include "security/packet_bypass.h"
 #include "core/utils.h"
+#include "core/win_compat.h"
 #include "core/task_manager.h"
 #include "network/uri_parser.h"
 #include "network/http_client.h"
@@ -50,6 +51,7 @@ static bool isUserAdmin() {
 #include <net/if.h>
 #include <sys/ioctl.h>
 #include <linux/if_packet.h>
+#include <linux/if_ether.h>
 #endif
 
 namespace hunter {
@@ -358,6 +360,80 @@ static bool icmpEchoHost(const std::string& ip, int timeout_ms, int& latency_ms)
     }
     IcmpCloseHandle(handle);
     return false;
+}
+#endif
+
+#ifndef _WIN32
+// Linux stub implementations for Windows-only helpers
+static std::string plainIpv4Token(const std::string& value) {
+    const size_t pos = value.find(' ');
+    return pos == std::string::npos ? value : value.substr(0, pos);
+}
+
+static DWORD ipv4ToDword(const std::string& value, bool* ok = nullptr) {
+    in_addr addr{};
+    const std::string token = plainIpv4Token(value);
+    const bool good = inet_pton(AF_INET, token.c_str(), &addr) == 1;
+    if (ok) *ok = good;
+    return good ? addr.s_addr : 0;
+}
+
+static std::string dwordToIpv4(DWORD addr) {
+    in_addr in{};
+    in.s_addr = addr;
+    char buf[64] = {};
+    return inet_ntop(AF_INET, &in, buf, sizeof(buf)) ? std::string(buf) : std::string();
+}
+
+static std::string normalizeMac(const std::string& mac) {
+    std::string out;
+    out.reserve(mac.size());
+    for (char ch : mac) {
+        if (ch == '-') out.push_back(':');
+        else out.push_back((char)std::toupper((unsigned char)ch));
+    }
+    return out;
+}
+
+static bool resolveAdapterByName(const std::string& iface, DWORD& if_index, DWORD& local_addr, std::string& resolved_name) {
+    return false;
+}
+
+static bool resolveGatewayForInterface(DWORD if_index, std::string& gateway_ip) {
+    return false;
+}
+
+static bool getBestRouteForIp(const std::string& dest_ip, DWORD local_addr, MIB_IPFORWARDROW& row) {
+    return false;
+}
+
+static bool lookupRoute(DWORD dest, DWORD mask, DWORD gateway, DWORD if_index, MIB_IPFORWARDROW* out_row = nullptr) {
+    return false;
+}
+
+static DWORD deleteRoutesForDestination(DWORD dest, DWORD mask) {
+    return NO_ERROR;
+}
+
+static std::string errorCodeToString(DWORD code) {
+    return "code=" + std::to_string(code);
+}
+
+static DWORD createHostRoute(DWORD dest, DWORD gateway, DWORD if_index, DWORD metric) {
+    return NO_ERROR;
+}
+
+static bool arpResolveMac(const std::string& ip, std::string& mac_out) {
+    return false;
+}
+
+static bool icmpEchoHost(const std::string& ip, int timeout_ms, int& latency_ms) {
+    latency_ms = -1;
+    return false;
+}
+
+static bool isUserAdmin() {
+    return getuid() == 0;
 }
 #endif
 
@@ -1881,10 +1957,10 @@ bool EdgeRouterBypass::verifyRouteInjection() {
     log("[*] ================================================");
     log("[*] Verification scope: host-side probes after payload delivery");
     log("[*] Note: user-mode checks cannot inspect remote router memory directly");
-#ifdef _WIN32
     bool local_route_confirmed = false;
     bool end_to_end_confirmed = false;
     bool gateway_mac_confirmed = false;
+#ifdef _WIN32
     const std::vector<std::string> route_targets = {
         config_.exit_ip, "1.1.1.1", "8.8.8.8", "9.9.9.9", "149.154.175.50"
     };

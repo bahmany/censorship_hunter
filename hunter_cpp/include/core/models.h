@@ -76,6 +76,7 @@ struct ParsedConfig {
         if (hasBadChars_(address) || hasBadChars_(uuid) || hasBadChars_(sni) ||
             hasBadChars_(host) || hasBadChars_(encryption)) return false;
         if (address.size() > 253 || uuid.size() > 512) return false;
+        if ((protocol == "vmess" || protocol == "vless") && uuid.empty()) return false;
         return true;
     }
     bool isReality() const { return security == "reality"; }
@@ -86,6 +87,9 @@ struct ParsedConfig {
 
     // Generate XRay-compatible JSON outbound
     std::string toXrayOutboundJson(int socks_port) const;
+    
+    // Generate full Xray config JSON with SOCKS inbound
+    std::string toXrayConfigJson(int socks_port) const;
     
     // Generate full sing-box config JSON with SOCKS inbound
     std::string toSingBoxConfigJson(int socks_port) const;

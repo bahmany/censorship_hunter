@@ -1,5 +1,6 @@
 #include "security/packet_bypass.h"
 #include "core/utils.h"
+#include "core/win_compat.h"
 #include <sstream>
 #include <chrono>
 #include <thread>

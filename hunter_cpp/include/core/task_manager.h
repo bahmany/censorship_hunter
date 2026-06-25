@@ -9,6 +9,10 @@
 #include <vector>
 #include <condition_variable>
 
+#ifdef __linux__
+#include <pthread.h>
+#endif
+
 #include "core/models.h"
 
 namespace hunter {

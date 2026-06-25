@@ -135,7 +135,7 @@ private:
         bool alive = false;
     };
     std::vector<XRayProcess> xray_processes_;
-    std::string xray_path_ = "bin/xray.exe";
+    std::string xray_path_;
     RuntimeEngineManager runtime_engine_manager_;
     bool tcp_alive_ = false;
     bool socks_ready_ = false;

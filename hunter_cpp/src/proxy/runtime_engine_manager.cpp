@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -24,9 +25,18 @@ namespace hunter {
 namespace proxy {
 
 RuntimeEngineManager::RuntimeEngineManager() {
+#ifdef _WIN32
     xray_path_ = "bin/xray.exe";
     singbox_path_ = "bin/sing-box.exe";
     mihomo_path_ = "bin/mihomo-windows-amd64-compatible.exe";
+#else
+    const char* env_xray = std::getenv("HUNTER_XRAY_PATH");
+    const char* env_singbox = std::getenv("HUNTER_SINGBOX_PATH");
+    const char* env_mihomo = std::getenv("HUNTER_MIHOMO_PATH");
+    xray_path_ = env_xray ? env_xray : "/app/bin/xray";
+    singbox_path_ = env_singbox ? env_singbox : "/app/bin/sing-box";
+    mihomo_path_ = env_mihomo ? env_mihomo : "/app/bin/mihomo";
+#endif
     temp_dir_ = "runtime/engine_tmp";
 }
 
@@ -69,20 +79,35 @@ std::string RuntimeEngineManager::generateConfig(const ParsedConfig& parsed, int
     if (normalized == "sing-box") {
         return parsed.toSingBoxConfigJson(listen_port);
     }
+    if (normalized == "mihomo") {
+        return parsed.toMihomoConfigYaml(listen_port);
+    }
+    if (normalized == "xray" || normalized == "v2ray") {
+        return parsed.toXrayConfigJson(listen_port);
+    }
     return "";
 }
 
 std::string RuntimeEngineManager::resolveEngine(const ParsedConfig& parsed, const std::string& preferred) const {
     const std::string normalized_preferred = normalizedEngine(preferred);
-    if (normalized_preferred == "sing-box" && isEngineAvailable(normalized_preferred)) {
+
+    // Try preferred engine first
+    if (!normalized_preferred.empty() && isEngineAvailable(normalized_preferred)) {
         if (!generateConfig(parsed, 10808, normalized_preferred).empty()) {
             return normalized_preferred;
         }
     }
 
+    // Fallback: try sing-box
     if (isEngineAvailable("sing-box") && !generateConfig(parsed, 10808, "sing-box").empty()) {
         return "sing-box";
     }
+
+    // Fallback: try mihomo
+    if (isEngineAvailable("mihomo") && !generateConfig(parsed, 10808, "mihomo").empty()) {
+        return "mihomo";
+    }
+
     return "";
 }
 
@@ -146,6 +171,10 @@ int RuntimeEngineManager::startProcess(const std::string& engine, const std::str
     if (pid == 0) {
         if (normalized == "sing-box") {
             execl(binary.c_str(), "sing-box", "run", "-c", config_path.c_str(), nullptr);
+        } else if (normalized == "mihomo") {
+            execl(binary.c_str(), "mihomo", "-f", config_path.c_str(), nullptr);
+        } else if (normalized == "xray" || normalized == "v2ray") {
+            execl(binary.c_str(), "xray", "run", "-c", config_path.c_str(), nullptr);
         }
         _exit(1);
     }

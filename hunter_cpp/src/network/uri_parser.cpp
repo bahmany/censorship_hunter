@@ -183,7 +183,7 @@ std::optional<ParsedConfig> UriParser::parseVless(const std::string& uri) {
     cfg.short_id = params.count("sid") ? params["sid"] : "";
     cfg.flow = params.count("flow") ? params["flow"] : "";
 
-    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
+    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535 || cfg.uuid.empty()) return std::nullopt;
     return cfg;
 }
 

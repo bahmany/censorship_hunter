@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -40,6 +41,20 @@ private:
         intptr_t fd = -1;
         std::atomic<bool> alive{true};
         std::mutex write_mutex;
+        std::chrono::steady_clock::time_point last_activity;
+        std::chrono::steady_clock::time_point connected_at;
+    };
+
+    struct ConnectionStats {
+        std::atomic<int> active_monitor_clients{0};
+        std::atomic<int> active_control_clients{0};
+        std::atomic<int> total_connections{0};
+        std::atomic<int> total_disconnections{0};
+        std::atomic<int> total_reconnects{0};
+        std::atomic<int> messages_sent{0};
+        std::atomic<int> messages_received{0};
+        std::atomic<int> pings_sent{0};
+        std::atomic<int> pongs_received{0};
     };
 
     int control_port_ = 0;
@@ -52,6 +67,9 @@ private:
     std::thread control_thread_;
     std::thread monitor_accept_thread_;
     std::thread monitor_publish_thread_;
+    std::thread heartbeat_thread_;
+
+    mutable ConnectionStats stats_;
 
     mutable std::mutex monitor_clients_mutex_;
     std::vector<std::shared_ptr<ClientConn>> monitor_clients_;
@@ -60,25 +78,34 @@ private:
     StatusProvider status_provider_;
     LogsProvider logs_provider_;
 
-    std::mutex recent_logs_mutex_;
-    std::vector<std::string> recent_logs_cache_;
+    size_t log_since_ = 0; // tracks last-sent ring-buffer generation for incremental log streaming
 
     bool startListener(int port, intptr_t& listener_fd);
     void controlLoop();
     void monitorAcceptLoop();
     void monitorPublishLoop();
+    void heartbeatLoop();
     void handleControlClient(intptr_t client_fd);
     void removeDeadMonitorClients();
 
     bool performServerHandshake(intptr_t fd) const;
+    bool readFrame(intptr_t fd, std::string& out, uint8_t& opcode) const;
     bool readTextFrame(intptr_t fd, std::string& out) const;
     bool sendTextFrame(intptr_t fd, const std::string& payload) const;
+    bool sendPingFrame(intptr_t fd) const;
+    bool sendPongFrame(intptr_t fd, const std::string& payload) const;
     bool sendTextFrame(const std::shared_ptr<ClientConn>& client, const std::string& payload) const;
+    bool sendPingFrame(const std::shared_ptr<ClientConn>& client) const;
     void closeSocketFd(intptr_t fd) const;
 
     std::string makeEvent(const std::string& type, const std::string& raw_json) const;
     std::string makeLogEvent(const std::vector<std::string>& lines) const;
+    std::string makeStatsJson() const;
     static std::string httpWebSocketAcceptValue(const std::string& key);
+
+public:
+    std::string getStatsJson() const;
+    int getActiveMonitorClientCount() const;
 };
 
 bool broadcastGlobalMonitorEvent(const std::string& type, const std::string& raw_json);

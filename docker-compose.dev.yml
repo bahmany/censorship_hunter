@@ -1,0 +1,111 @@
+# Development docker-compose with bind mounts and hot reload
+# Usage: docker-compose -f docker-compose.dev.yml up
+#
+# Source code changes are reflected instantly:
+#   - C++ backend: entrypoint recompiles only changed files (ninja incremental)
+#   - Next.js UI: Fast Refresh hot reloads without page refresh
+#
+# Only rebuild images when Dockerfile.dev or dependencies change:
+#   docker-compose -f docker-compose.dev.yml build
+
+version: '3.8'
+
+services:
+  hunter-backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    container_name: hunter-backend-dev
+    ports:
+      - "7801:7801"
+      - "7802:7802"
+      - "7803:7803"
+      - "7804:7804"
+      - "7805:7805"
+      - "7810-7820:7810-7820"
+      - "3100-3120:3100-3120"
+    volumes:
+      # Mount source code - changes are visible inside container
+      - ./hunter_cpp:/app/hunter_cpp
+      # Persistent build cache for incremental compilation
+      - hunter-build-cache:/app/build
+      # Persistent runtime data
+      - hunter-runtime:/app/runtime
+      - hunter-config:/app/config
+      - hunter-logs:/app/logs
+    dns:
+      - 8.8.8.8
+      - 1.1.1.1
+      - 8.8.4.4
+    environment:
+      - HUNTER_REST_API_PORT=7801
+      - HUNTER_WS_MONITOR_PORT=7802
+      - HUNTER_MULTIPROXY_PORT=7803
+      - HUNTER_GEMINI_PORT=7804
+      - HUNTER_GATEWAY_PORT=7805
+      - HUNTER_SPEED_PROFILE=low
+      - HUNTER_MAX_CONCURRENT_TEST_PROCESSES=8
+      - HUNTER_XRAY_PATH=/app/bin/xray
+      - HUNTER_SINGBOX_PATH=/app/bin/sing-box
+      - HUNTER_MIHOMO_PATH=/app/bin/mihomo
+      - HUNTER_TOR_PATH=/app/bin/tor
+    restart: unless-stopped
+    ulimits:
+      stack: 67108864
+    networks:
+      - hunter-network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "7801"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  hunter-web-ui:
+    build:
+      context: ./web-ui
+      dockerfile: Dockerfile.dev
+    container_name: hunter-web-ui-dev
+    ports:
+      - "7800:3000"
+    volumes:
+      # Mount source code - Next.js Fast Refresh hot reloads
+      - ./web-ui:/app
+      # Don't overwrite node_modules from image
+      - /app/node_modules
+      - /app/.next
+      # Share backend runtime data for API routes (config DB, exports)
+      - hunter-runtime:/app/backend-runtime:ro
+    environment:
+      - NODE_ENV=development
+      - NEXT_PUBLIC_BACKEND_HOST=hunter-backend
+      - NEXT_PUBLIC_WS_STATUS_PORT=7802
+      - NEXT_PUBLIC_WS_COMMAND_PORT=7801
+      - NEXT_PUBLIC_API_PORT=7801
+      - NEXT_PUBLIC_PROXY_PATH=/myaddresses/mon
+    depends_on:
+      hunter-backend:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - hunter-network
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/myaddresses/mon"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  hunter-build-cache:
+  hunter-runtime:
+  hunter-config:
+  hunter-logs:
+
+networks:
+  hunter-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 10.101.0.0/24
+          gateway: 10.101.0.1

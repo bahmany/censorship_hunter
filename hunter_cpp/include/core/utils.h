@@ -336,7 +336,7 @@ public:
 
 private:
     LogRingBuffer() : write_pos_(0) {}
-    static constexpr size_t CAPACITY = 2000;
+    static constexpr size_t CAPACITY = 200;
     std::string buf_[CAPACITY];
     size_t write_pos_;
     mutable std::mutex mu_;

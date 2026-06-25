@@ -1,4 +1,5 @@
 #include "security/switch_bypass.h"
+#include "core/win_compat.h"
 #include <iostream>
 #include <cstring>
 #include <vector>
@@ -101,7 +102,7 @@ bool SwitchBypassMethods::bypassZTEHyperConverged(const std::string& ip) {
     
     char large_payload[1472] = {0};
     for (int i = 0; i < 3; ++i) {
-        IcmpSendEcho(hIcmp, dest.sin_addr.S_un.S_addr, large_payload, sizeof(large_payload), nullptr, reply_buffer.data(), reply_size, 500);
+        IcmpSendEcho(hIcmp, dest.sin_addr.s_addr, large_payload, sizeof(large_payload), nullptr, reply_buffer.data(), reply_size, 500);
         Sleep(100);
     }
     
@@ -228,7 +229,7 @@ bool SwitchBypassMethods::bypassNokiaLSP(const std::string& ip) {
     IP_OPTION_INFORMATION ip_opts{};
     for (int ttl = 1; ttl <= 5; ++ttl) {
         ip_opts.Ttl = ttl;
-        IcmpSendEcho(hIcmp, dest.sin_addr.S_un.S_addr, nullptr, 0, &ip_opts, reply_buffer.data(), reply_size, 300);
+        IcmpSendEcho(hIcmp, dest.sin_addr.s_addr, nullptr, 0, &ip_opts, reply_buffer.data(), reply_size, 300);
         Sleep(50);
     }
     
@@ -253,7 +254,7 @@ bool SwitchBypassMethods::bypassNokiaSR(const std::string& ip) {
     
     bool success = false;
     for (int i = 0; i < 3; ++i) {
-        DWORD ret = IcmpSendEcho(hIcmp, dest.sin_addr.S_un.S_addr, nullptr, 0, nullptr, reply_buffer.data(), reply_size, 600);
+        DWORD ret = IcmpSendEcho(hIcmp, dest.sin_addr.s_addr, nullptr, 0, nullptr, reply_buffer.data(), reply_size, 600);
         if (ret > 0) {
             success = true;
             break;
@@ -340,7 +341,7 @@ bool SwitchBypassMethods::bypassYaftaarStarlink(const std::string& ip) {
     
     int success_count = 0;
     for (int i = 0; i < 10; ++i) {
-        DWORD ret = IcmpSendEcho(hIcmp, dest.sin_addr.S_un.S_addr, nullptr, 0, nullptr, reply_buffer.data(), reply_size, 300);
+        DWORD ret = IcmpSendEcho(hIcmp, dest.sin_addr.s_addr, nullptr, 0, nullptr, reply_buffer.data(), reply_size, 300);
         if (ret > 0) success_count++;
         Sleep(150);  // Consistent timing
     }
@@ -441,7 +442,7 @@ bool SwitchBypassMethods::bypassIranianDNSPoison(const std::string& ip) {
     timeval tv{};
     tv.tv_usec = 100000;
     
-    bool connected = select(0, nullptr, &fdset, nullptr, &tv) > 0;
+    bool connected = select(sock + 1, nullptr, &fdset, nullptr, &tv) > 0;
     closesocket(sock);
     
     std::cout << (connected ? "[OK] DNS poisoning bypass successful" : "[!] Direct connection failed") << std::endl;
@@ -470,7 +471,7 @@ bool SwitchBypassMethods::bypassTieredInternet(const std::string& ip) {
         IP_OPTION_INFORMATION opts{};
         opts.Tos = 0x10;  // Low delay priority
         
-        DWORD ret = IcmpSendEcho(hIcmp, dest.sin_addr.S_un.S_addr, nullptr, 0, &opts, reply_buffer.data(), reply_size, 500);
+        DWORD ret = IcmpSendEcho(hIcmp, dest.sin_addr.s_addr, nullptr, 0, &opts, reply_buffer.data(), reply_size, 500);
         if (ret > 0) {
             success = true;
             break;
@@ -544,7 +545,7 @@ bool SwitchBypassMethods::bypassStealthBlackout(const std::string& ip) {
         timeval tv{};
         tv.tv_usec = 400000;
         
-        if (select(0, &fdset, nullptr, nullptr, &tv) > 0) {
+        if (select(sock + 1, &fdset, nullptr, nullptr, &tv) > 0) {
             char recv_buf[512];
             recvfrom(sock, recv_buf, sizeof(recv_buf), 0, nullptr, nullptr);
             success = true;

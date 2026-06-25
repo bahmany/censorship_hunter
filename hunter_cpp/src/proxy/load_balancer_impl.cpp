@@ -259,9 +259,7 @@ void MultiProxyServer::refreshBackends_unlocked() {
     }
     xray_processes_.clear();
 
-    int selected_index = -1;
-    ParsedConfig selected_parsed;
-    std::string selected_engine;
+    int valid_count = 0;
     for (int i = 0; i < (int)backends_.size(); ++i) {
         auto parsed = network::UriParser::parse(backends_[i].uri);
         if (!parsed.has_value() || !parsed->isValid()) {
@@ -275,14 +273,10 @@ void MultiProxyServer::refreshBackends_unlocked() {
         }
         backends_[i].engine_used = resolved_engine;
         backends_[i].state = BackendState::UNKNOWN;
-        if (selected_index < 0) {
-            selected_index = i;
-            selected_parsed = *parsed;
-            selected_engine = resolved_engine;
-        }
+        valid_count++;
     }
 
-    if (selected_index < 0) {
+    if (valid_count == 0) {
         utils::LogRingBuffer::instance().push(
             "[Balancer] No valid backends available for port " + std::to_string(port_));
         for (auto& b : backends_) b.state = BackendState::DEAD;
@@ -292,26 +286,67 @@ void MultiProxyServer::refreshBackends_unlocked() {
         return;
     }
 
-    const std::string config_text = runtime_engine_manager_.generateConfig(selected_parsed, port_, selected_engine);
-    const std::string config_path = runtime_engine_manager_.writeConfigFile(selected_engine, config_text);
-    const int pid = runtime_engine_manager_.startProcess(selected_engine, config_path);
+    // Try configs in order until one successfully starts a listener
+    int successful_index = -1;
+    int successful_pid = 0;
+    std::string successful_engine;
     utils::LocalProxyProbeResult probe;
-    bool ready = false;
-    if (pid > 0 && utils::waitForPortAlive(port_, 5000, 100)) {
-        probe = utils::probeLocalMixedPort(port_, 2000);
-        ready = probe.mixed_ready();
+
+    for (int attempt = 0; attempt < (int)backends_.size(); ++attempt) {
+        if (backends_[attempt].state == BackendState::DEAD) continue;
+
+        auto parsed = network::UriParser::parse(backends_[attempt].uri);
+        if (!parsed.has_value() || !parsed->isValid()) {
+            backends_[attempt].state = BackendState::DEAD;
+            continue;
+        }
+        std::string engine = backends_[attempt].engine_used;
+        if (engine.empty()) {
+            engine = runtime_engine_manager_.resolveEngine(*parsed, "");
+            if (engine.empty()) {
+                backends_[attempt].state = BackendState::DEAD;
+                continue;
+            }
+        }
+
+        const std::string config_text = runtime_engine_manager_.generateConfig(*parsed, port_, engine);
+        if (config_text.empty()) {
+            backends_[attempt].state = BackendState::DEAD;
+            continue;
+        }
+        const std::string config_path = runtime_engine_manager_.writeConfigFile(engine, config_text);
+        const int pid = runtime_engine_manager_.startProcess(engine, config_path);
+        if (pid <= 0) {
+            backends_[attempt].state = BackendState::DEAD;
+            continue;
+        }
+
+        bool ready = false;
+        if (utils::waitForPortAlive(port_, 5000, 100)) {
+            probe = utils::probeLocalMixedPort(port_, 2000);
+            ready = probe.mixed_ready();
+        }
+        if (!ready) {
+            runtime_engine_manager_.stopProcess(pid);
+            backends_[attempt].state = BackendState::DEAD;
+            continue;
+        }
+
+        successful_index = attempt;
+        successful_pid = pid;
+        successful_engine = engine;
+        break;
     }
+
     tcp_alive_ = probe.tcp_alive;
     socks_ready_ = probe.socks_ready;
     http_ready_ = probe.http_ready;
     last_probe_ts_ = utils::nowTimestamp();
-    if (pid > 0 && !ready) {
-        runtime_engine_manager_.stopProcess(pid);
-    }
-    if (!ready) {
+
+    if (successful_index < 0) {
         utils::LogRingBuffer::instance().push(
             "[Balancer] Failed to spawn mixed listener on port " + std::to_string(port_) +
-            " using sing-box" +
+            " after trying all " + std::to_string((int)backends_.size()) + " backends" +
             " tcp=" + std::string(tcp_alive_ ? "1" : "0") +
             " socks=" + std::string(socks_ready_ ? "1" : "0") +
             " http=" + std::string(http_ready_ ? "1" : "0"));
@@ -321,17 +356,17 @@ void MultiProxyServer::refreshBackends_unlocked() {
 
     for (int i = 0; i < (int)backends_.size(); ++i) {
         backends_[i].last_check = utils::nowTimestamp();
-        if (i == selected_index) {
+        if (i == successful_index) {
             backends_[i].state = BackendState::HEALTHY;
             backends_[i].local_port = port_;
         }
     }
 
     XRayProcess xp;
-    xp.uri = backends_[selected_index].uri;
-    xp.engine_used = selected_engine;
+    xp.uri = backends_[successful_index].uri;
+    xp.engine_used = successful_engine;
     xp.socks_port = port_;
-    xp.pid = pid;
+    xp.pid = successful_pid;
     xp.alive = true;
     xray_processes_.push_back(xp);
 }

@@ -1,0 +1,237 @@
+{
+  "log": {
+    "loglevel": "warning"
+  },
+  "inbounds": [
+    {
+      "tag": "vmess-ws",
+      "port": 17460,
+      "listen": "127.0.0.1",
+      "protocol": "vmess",
+      "settings": {
+        "clients": [
+          {
+            "id": "d6011bfa-0de3-4169-91b5-7816d2f6dd0b",
+            "alterId": 0
+          },
+          {
+            "id": "96e10d77-9c0c-473c-9e70-4c3fb1baa7dc",
+            "alterId": 0
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/xray/vmess/"
+        }
+      }
+    },
+    {
+      "tag": "trojan-ws",
+      "port": 17461,
+      "listen": "127.0.0.1",
+      "protocol": "trojan",
+      "settings": {
+        "clients": [
+          {
+            "password": "3f8a2c1b9e4d4a7f8b6c2d5e9f1a3b7c"
+          },
+          {
+            "password": "7a9d5e2f1b8c4d3e9a6f2b7c8e5d1f9a"
+          }
+        ]
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/xray/trojan/"
+        }
+      }
+    },
+    {
+      "tag": "shadowsocks-ws",
+      "port": 17462,
+      "listen": "127.0.0.1",
+      "protocol": "shadowsocks",
+      "settings": {
+        "method": "chacha20-ietf-poly1305",
+        "password": "AbharCable2024Secure!"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "wsSettings": {
+          "path": "/xray/ss/"
+        }
+      }
+    },
+    {
+      "tag": "vless-ws-1",
+      "port": 17463,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "d6011bfa-0de3-4169-91b5-7816d2f6dd0b",
+            "level": 0
+          },
+          {
+            "id": "96e10d77-9c0c-473c-9e70-4c3fb1baa7dc",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/ws/proxy/tunnel_v2/"
+        }
+      }
+    },
+    {
+      "tag": "vless-ws-2",
+      "port": 17464,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "d6011bfa-0de3-4169-91b5-7816d2f6dd0b",
+            "level": 0
+          },
+          {
+            "id": "96e10d77-9c0c-473c-9e70-4c3fb1baa7dc",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/ws/proxy/tunnel_v2_1/"
+        }
+      }
+    },
+    {
+      "tag": "vless-ws-3",
+      "port": 17465,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "d6011bfa-0de3-4169-91b5-7816d2f6dd0b",
+            "level": 0
+          },
+          {
+            "id": "96e10d77-9c0c-473c-9e70-4c3fb1baa7dc",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/ws/proxy/tunnel_v2_2/"
+        }
+      }
+    },
+    {
+      "tag": "vless-ws-4",
+      "port": 17466,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "d6011bfa-0de3-4169-91b5-7816d2f6dd0b",
+            "level": 0
+          },
+          {
+            "id": "96e10d77-9c0c-473c-9e70-4c3fb1baa7dc",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/ws/proxy/tunnel_v2_3/"
+        }
+      }
+    },
+    {
+      "tag": "vless-ws-5",
+      "port": 17467,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "d6011bfa-0de3-4169-91b5-7816d2f6dd0b",
+            "level": 0
+          },
+          {
+            "id": "96e10d77-9c0c-473c-9e70-4c3fb1baa7dc",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/ws/proxy/tunnel_v2_4/"
+        }
+      }
+    },
+    {
+      "tag": "vless-ws-6",
+      "port": 17468,
+      "listen": "127.0.0.1",
+      "protocol": "vless",
+      "settings": {
+        "clients": [
+          {
+            "id": "d6011bfa-0de3-4169-91b5-7816d2f6dd0b",
+            "level": 0
+          },
+          {
+            "id": "96e10d77-9c0c-473c-9e70-4c3fb1baa7dc",
+            "level": 0
+          }
+        ],
+        "decryption": "none"
+      },
+      "streamSettings": {
+        "network": "ws",
+        "security": "none",
+        "wsSettings": {
+          "path": "/ws/proxy/tunnel_v2_p/"
+        }
+      }
+    }
+  ],
+  "outbounds": [
+    {
+      "tag": "direct",
+      "protocol": "freedom",
+      "settings": {}
+    },
+    {
+      "tag": "block",
+      "protocol": "blackhole",
+      "settings": {}
+    }
+  ]
+}
