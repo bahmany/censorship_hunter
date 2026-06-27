@@ -274,14 +274,16 @@ docker-compose up -d
 - **Project path (server):** `/home/abharcable/censorship_hunter`
 - **Nginx config:** `/etc/nginx/sites-available/beta.abharcable.conf` (symlinked from `sites-enabled/`)
 
-### Legacy Domains (Do Not Use)
+### Rahsoon Platform Domains (Separate Project)
 
-The following domains are legacy and redirect to `beta.abharcable.com`. Do not use them for Hunter:
+The following domains belong to the **Rahsoon platform** (a separate project from Hunter). Do not confuse them with Hunter domains:
 
-- **`my.abharcable.com`** — Redirects to `beta.abharcable.com`
-- **`apimy.abharcable.com`** — Redirects to `beta.abharcable.com`
+- **`my.abharcable.com`** — Rahsoon frontend (Next.js on port 3090)
+- **`apimy.abharcable.com`** — Rahsoon API backend (port 621)
 
-These domains were used for a separate Rahsoon platform project (port 3090) that is no longer maintained. Use `api.abharcable.com/myaddresses/mon` instead.
+Nginx config: `/etc/nginx/sites-available/my.abharcable.conf` (symlinked from `sites-enabled/`)
+
+These are independent projects and should not be touched when working on Hunter.
 
 ---
 
