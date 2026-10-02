@@ -49,7 +49,7 @@ int main() {
         {"ss chacha", "ss://" + b64("chacha20-ietf-poly1305:pw") + "@1.2.3.4:8388#n"},
         {"hy2 basic", "hysteria2://pw@a.example.com:443?sni=a.example.com"},
         {"hy2 obfs", "hysteria2://pw@a.example.com:443?sni=a.example.com&obfs=salamander&obfs-password=op"},
-        {"hy2 pin alpn", "hysteria2://pw@a.example.com:443?sni=a.example.com&pinSHA256=AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99&alpn=h3&insecure=1"},
+        {"hy2 alpn insecure", "hysteria2://pw@a.example.com:443?sni=a.example.com&alpn=h3&insecure=1"},
         {"hy2 insecure", "hysteria2://pw@a.example.com:443?sni=a.example.com&insecure=1"},
         {"hy2 ipv6", "hysteria2://pw@[2001:db8::2]:443?sni=a.example.com"},
         {"tuic basic", "tuic://" + U + ":pw@a.example.com:443?sni=a.example.com&alpn=h3"},

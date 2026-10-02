@@ -176,6 +176,21 @@ int main() {
     T_CASE("#2 results carry the live baseline generation");
     { Rig r; r.bl->bumpGeneration(); r.bl->bumpGeneration(); auto res = r.t.testBatch({trojan("dead.example.com")});
       CHECK(res[0].probe.generation == 2, "generation propagated"); CHECK(res[0].probe.attributable, "fresh evidence under same generation"); } T_END();
+    T_CASE("round3: reviewer XHTTP fixture (insecure) => Unsupported non-attributable, nothing launched");
+    { Rig r; auto res = r.t.testBatch({"vless://11111111-2222-3333-4444-555555555555@127.0.0.1:34990?security=tls&type=xhttp&path=%2Freview&sni=localhost&allowInsecure=1"});
+      CHECK(res[0].probe.outcome == ProbeOutcome::Unsupported && !res[0].probe.attributable, "unsupported");
+      CHECK(res[0].error_message.find("xhttp") != std::string::npos, "reason names the transport: " + res[0].error_message); CHECK(r.ml->calls.empty(), "no engine launched");
+      Rig x; auto rx = x.t.testBatch({"vless://11111111-2222-3333-4444-555555555555@127.0.0.1:34990?security=tls&type=madeup&sni=localhost"});
+      CHECK(rx[0].probe.outcome == ProbeOutcome::Unsupported && x.ml->calls.empty(), "unknown transport unsupported"); } T_END();
+
+    T_CASE("round3: reviewer hy2 pin fixture (insecure + zero pin) is never a Pass");
+    { Rig r; auto res = r.t.testBatch({"hysteria2://pw@127.0.0.1:34990?sni=localhost&insecure=1&pinSHA256=00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00:00"});
+      CHECK(res[0].probe.outcome == ProbeOutcome::Unsupported && !res[0].probe.attributable && !res[0].success, "unsupported, not Pass");
+      CHECK(r.ml->calls.empty(), "nothing launched with an ignored identity constraint"); } T_END();
+
+    T_CASE("round3: xhttp (non-insecure) still runs on xray");
+    { Rig r; auto res = r.t.testBatch({"vless://11111111-2222-3333-4444-555555555555@127.0.0.1:34990?security=tls&type=xhttp&path=%2Fx&sni=localhost"});
+      CHECK(res[0].engine_used == "xray", "xray handles xhttp natively"); } T_END();
     close(lsock);
     return T_SUMMARY();
 }

@@ -122,6 +122,10 @@ struct ParsedConfig {
     }
 
     // Generate XRay-compatible JSON outbound
+    /// Engine capability gate ("xray" | "sing-box" | "mihomo"). Returns "" when this engine can
+    /// represent EVERY requested policy of the link (transport, plugin, pin, obfs, ...), otherwise a
+    /// human reason. Generators return "" for unrepresentable links: no silent substitution.
+    std::string unsupportedReason(const std::string& engine) const;
     std::string toXrayOutboundJson(int socks_port) const;
     
     // Generate full Xray config JSON with SOCKS inbound

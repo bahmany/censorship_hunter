@@ -307,13 +307,22 @@ struct ProxyTester::Impl {
         const bool xray_ok = !quic && !needs_insecure && !it.cfg.toXrayOutboundJson(0).empty();
         const bool sb_ok = !it.cfg.toSingBoxConfigJson(0).empty();
         const bool mh_ok = !it.cfg.toMihomoConfigYaml(0).empty();
+        auto reasonFor = [&]() {
+            std::string r = it.cfg.unsupportedReason(quic ? "sing-box" : needs_insecure ? "sing-box" : "xray");
+            if (r.empty() && !quic && !needs_insecure) r = it.cfg.unsupportedReason("sing-box");
+            return r;
+        };
         if (needs_insecure) {
             if (sb_ok && avail("sing-box")) return "sing-box";
             *why = sb_ok ? "insecure TLS (allowInsecure) requires sing-box, which is not installed"
-                         : "insecure TLS (allowInsecure) is not expressible by an available engine";
+                         : "insecure TLS needs sing-box but " + (reasonFor().empty() ? std::string("config is not expressible") : reasonFor());
             return "";
         }
-        if (!xray_ok && !sb_ok && !mh_ok) { *why = "config not expressible by any engine"; return ""; }
+        if (!xray_ok && !sb_ok && !mh_ok) {
+            std::string r = reasonFor();
+            *why = r.empty() ? "config not expressible by any engine" : "unsupported: " + r;
+            return "";
+        }
         if (xray_ok && avail("xray")) return "xray";
         if (sb_ok && avail("sing-box")) return "sing-box";
         if (mh_ok && avail("mihomo") && !needs_insecure) return "mihomo";

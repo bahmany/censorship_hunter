@@ -54,11 +54,29 @@ int main() {
       CHECK(d && d->insecureTls(), "insecure honored when asked"); if (d) { auto j = d->toSingBoxConfigJson(1080);
         CHECK(j.find("cubic") != std::string::npos && j.find("native") != std::string::npos, "tuic opts"); CHECK(j.find("\"insecure\":true") != std::string::npos, "insecure emitted"); } } T_END();
 
-    T_CASE("hy2 certificate pin cannot be expressed by sing-box: refused unless insecure");
-    { auto c = P("hysteria2://pw@h.example.com:443?sni=h.example.com&pinSHA256=AA:BB"); CHECK(c && c->toSingBoxConfigJson(1080).empty(), "pin => unsupported (no silent policy change)");
-      auto d = P("hysteria2://pw@h.example.com:443?sni=h.example.com&pinSHA256=AA:BB&insecure=1"); CHECK(d && !d->toSingBoxConfigJson(1080).empty(), "pin + insecure => insecure test"); } T_END();
+    T_CASE("hy2 certificate pin is never dropped: Unsupported regardless of insecure");
+    { auto c = P("hysteria2://pw@h.example.com:443?sni=h.example.com&pinSHA256=AA:BB"); CHECK(c && c->toSingBoxConfigJson(1080).empty(), "pin => unsupported");
+      auto d = P("hysteria2://pw@h.example.com:443?sni=h.example.com&pinSHA256=AA:BB&insecure=1"); CHECK(d && d->toSingBoxConfigJson(1080).empty(), "pin + insecure => still unsupported");
+      CHECK(d && d->unsupportedReason("sing-box").find("pin") != std::string::npos, "reason names the pin"); } T_END();
 
-    T_CASE("no direct egress in sing-box test config");
+    T_CASE("per-engine allowlist: unrepresentable options are Unsupported, never silently substituted");
+    { const std::string base = "vless://" + U + "@a.example.com:443?security=tls&sni=a.example.com&type=";
+      struct Row { std::string uri; bool xray, sb; };
+      std::vector<Row> rows = {
+          {base + "tcp", true, true}, {base + "ws&path=%2Fw", true, true}, {base + "grpc&serviceName=s", true, true}, {base + "httpupgrade&path=%2Fh", true, true},
+          {base + "h2&path=%2Fh", true, true}, {base + "xhttp&path=%2Fx", true, false}, {base + "splithttp&path=%2Fx", true, false}, {base + "kcp", true, false},
+          {base + "quic", true, false}, {base + "madeup", false, false}, {base + "tcp&headerType=http", false, false},
+          {"ss://" + b64("aes-256-gcm:pw") + "@a.example.com:8388/?plugin=v2ray-plugin%3Bhost%3Dx", false, false},
+          {"hysteria2://pw@h.example.com:443?sni=h.example.com&obfs=weird&obfs-password=x", false, false},
+          {"tuic://" + U + ":pw@h.example.com:443?sni=h.example.com&congestion_control=odd", false, false},
+      };
+      for (auto& r : rows) { auto c = P(r.uri); CHECK(c.has_value(), "parsed " + r.uri);
+          if (!c) continue;
+          bool qc = c->protocol == "hysteria2" || c->protocol == "tuic";
+          CHECK(c->toXrayOutboundJson(0).empty() == !r.xray, "xray gate " + r.uri);
+          CHECK(c->toSingBoxConfigJson(0).empty() == !r.sb && (qc ? true : true), "sing-box gate " + r.uri); } } T_END();
+
+        T_CASE("no direct egress in sing-box test config");
     { auto c = P("hysteria2://pw@h.example.com:443?sni=h.example.com"); auto j = c->toSingBoxConfigJson(1080);
       CHECK(j.find("\"outbound\":\"direct\"") == std::string::npos, "no rule to direct"); } T_END();
 

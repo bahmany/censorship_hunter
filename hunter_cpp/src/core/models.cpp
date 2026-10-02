@@ -156,7 +156,43 @@ std::string alpnJsonArray(const std::string& csv) {
 }
 } // namespace
 
+std::string ParsedConfig::unsupportedReason(const std::string& engine) const {
+    static const std::set<std::string> xray_nets = {"tcp", "raw", "ws", "grpc", "h2", "httpupgrade", "splithttp", "xhttp", "kcp", "quic"};
+    static const std::set<std::string> sb_nets = {"tcp", "raw", "ws", "grpc", "h2", "http", "httpupgrade"};
+    static const std::set<std::string> mh_nets = {"tcp", "raw", "ws", "grpc", "h2", "http"};
+    static const std::set<std::string> secs = {"", "none", "tls", "reality"};
+    const bool quic = protocol == "hysteria2" || protocol == "tuic";
+    if (engine == "xray" && quic) return protocol + " is not supported by xray";
+    if (engine == "mihomo" && quic) return protocol + " is not generated for mihomo";
+    if (!secs.count(security)) return "security '" + security + "' is not supported";
+    if (!quic) {
+        const std::string net = network.empty() ? "tcp" : network;
+        const auto& allow = engine == "xray" ? xray_nets : engine == "sing-box" ? sb_nets : mh_nets;
+        if (!allow.count(net)) return "transport '" + net + "' is not supported by " + engine;
+        if (net == "tcp" || net == "raw") {
+            if (type == "http") return "tcp HTTP header obfuscation is not supported by " + engine;
+        }
+    }
+    if (protocol == "shadowsocks" && extra.count("plugin") && !extra.at("plugin").empty())
+        return "shadowsocks plugin '" + extra.at("plugin") + "' is not supported by " + engine;
+    if (protocol == "hysteria2") {
+        // pinSHA256 is a certificate fingerprint; sing-box can only pin public keys, so the pin can
+        // never be honored exactly. Insecure mode does not make it moot (identity constraint).
+        if (!option("pinSHA256").empty()) return "hysteria2 pinSHA256 certificate pin cannot be honored by " + engine;
+        const std::string ob = option("obfs");
+        if (!ob.empty() && ob != "salamander") return "hysteria2 obfs '" + ob + "' is not supported";
+    }
+    if (protocol == "tuic") {
+        const std::string cc = option("congestion_control", option("congestion-controller", "bbr"));
+        if (cc != "bbr" && cc != "cubic" && cc != "new_reno") return "tuic congestion control '" + cc + "' is not supported";
+        const std::string urm = option("udp_relay_mode");
+        if (!urm.empty() && urm != "native" && urm != "quic") return "tuic udp_relay_mode '" + urm + "' is not supported";
+    }
+    return "";
+}
+
 std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
+    if (!unsupportedReason("xray").empty()) return "";
     // Reject protocols XRay doesn't support
     if (protocol == "hysteria2" || protocol == "tuic") return "";
     
@@ -306,6 +342,7 @@ std::string ParsedConfig::toXrayConfigJson(int socks_port) const {
 // ─── ParsedConfig::toSingBoxConfigJson ───
 
 std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
+    if (!unsupportedReason("sing-box").empty()) return "";
     // sing-box outbound JSON format
     // Supports: vmess, vless, trojan, shadowsocks, hysteria2, tuic
     
@@ -363,11 +400,6 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
         else ob << ",\"server_name\":\"" << address << "\"";
         const std::string alpn = alpnJsonArray(option("alpn"));
         if (!alpn.empty()) ob << ",\"alpn\":" << alpn;
-        const std::string pin = option("pinSHA256");
-        // hysteria2 pinSHA256 is a CERTIFICATE fingerprint; sing-box can only pin the PUBLIC KEY hash,
-        // so it cannot be expressed faithfully. With insecure TLS the pin is moot (verification is off);
-        // otherwise refuse (Unsupported, non-attributable) instead of testing with a different policy.
-        if (!pin.empty() && proto == "hysteria2" && !insecureTls()) return "";
 
         if (security == "reality") {
             ob << ",\"reality\":{\"enabled\":true";
@@ -424,6 +456,7 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
 // ─── ParsedConfig::toMihomoConfigYaml ───
 
 std::string ParsedConfig::toMihomoConfigYaml(int socks_port) const {
+    if (!unsupportedReason("mihomo").empty()) return "";
     // mihomo (Clash Meta) YAML format
     // Supports: vmess, vless, trojan, ss, hysteria2, tuic
     
