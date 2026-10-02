@@ -1,0 +1,26 @@
+name: android
+on:
+  push:
+    paths: ['hunter_android/**', 'hunter_cpp/**', '.github/workflows/android.yml']
+  pull_request:
+    paths: ['hunter_android/**', 'hunter_cpp/**', '.github/workflows/android.yml']
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: recursive }
+      - uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: '17' }
+      - uses: android-actions/setup-android@v3
+      - name: Install NDK/CMake
+        run: sdkmanager "ndk;26.1.10909125" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
+      - uses: actions/cache@v4
+        with:
+          path: hunter_android/.deps
+          key: android-deps-${{ hashFiles('hunter_android/scripts/*.sh') }}
+      - name: Unit tests + debug APK
+        working-directory: hunter_android
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug
+      - uses: actions/upload-artifact@v4
+        with: { name: hunter-debug-apk, path: hunter_android/app/build/outputs/apk/debug/*.apk }
