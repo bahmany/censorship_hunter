@@ -227,28 +227,37 @@ bool XRayManager::isProcessAlive(int pid) const {
 #endif
 }
 
-std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_port, int http_port) {
-    std::string outbound = parsed.toXrayOutboundJson(socks_port);
-    if (outbound.empty()) return "";  // Unsupported protocol/cipher/transport
+std::string XRayManager::fragmentOutboundJson() {
+    return "{\"protocol\":\"freedom\",\"tag\":\"fragment-out\",\"settings\":{\"domainStrategy\":\"AsIs\""
+           ",\"fragment\":{\"packets\":\"tlshello\",\"length\":\"50-100\",\"interval\":\"30-50\"}}}";
+}
 
-    // Apply TLS fragmentation for Iranian DPI bypass
-    // This splits ClientHello into small chunks to evade SNI-based filtering
-    const bool is_tls = (parsed.security == "tls");
-    [[maybe_unused]] const bool is_reality = (parsed.security == "reality");
-    
-    // Inject fragment settings into the outbound's streamSettings
-    if (is_tls && outbound.find("\"streamSettings\"") != std::string::npos) {
-        // Find tlsSettings and inject fragment
-        size_t tls_pos = outbound.find("\"tlsSettings\"");
-        if (tls_pos != std::string::npos) {
-            size_t brace_pos = outbound.find("{", tls_pos);
-            if (brace_pos != std::string::npos) {
-                std::string fragment_json = 
-                "\"fragment\":{\"packets\":\"tlshello\",\"length\":\"50-100\",\"interval\":\"30-50\"},";
-                outbound.insert(brace_pos + 1, fragment_json);
-            }
+bool XRayManager::needsFragmentOutbound(const ParsedConfig& parsed) {
+    return parsed.security == "tls";
+}
+
+std::string XRayManager::buildProxyOutbound(const ParsedConfig& parsed, const std::string& tag) {
+    std::string ob = parsed.toXrayOutboundJson(0);
+    if (ob.empty()) return "";
+    const std::string tag_needle = "\"tag\":\"proxy\"";
+    size_t tag_pos = ob.find(tag_needle);
+    if (tag_pos != std::string::npos && tag != "proxy") {
+        ob.replace(tag_pos, tag_needle.size(), "\"tag\":\"" + tag + "\"");
+    }
+    if (needsFragmentOutbound(parsed)) {
+        // xray has no tlsSettings.fragment; the working mechanism is a freedom dialer.
+        const std::string stream_needle = "\"streamSettings\":{";
+        size_t sp = ob.find(stream_needle);
+        if (sp != std::string::npos) {
+            ob.insert(sp + stream_needle.size(), "\"sockopt\":{\"dialerProxy\":\"fragment-out\"},");
         }
     }
+    return ob;
+}
+
+std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_port, int http_port) {
+    std::string outbound = buildProxyOutbound(parsed, "proxy");
+    if (outbound.empty()) return "";  // Unsupported protocol/cipher/transport
 
     std::ostringstream ss;
     const bool use_mixed_inbound = (http_port > 0 && http_port == socks_port);
@@ -271,6 +280,7 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
 
     // Outbounds with DPI bypass + blackhole to prevent traffic leakage
     ss << "  \"outbounds\":[" << outbound 
+       << (needsFragmentOutbound(parsed) ? "," + fragmentOutboundJson() : std::string())
        << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
        << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
        << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
@@ -297,31 +307,11 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
 }
 
 std::string XRayManager::generateTestConfig(const ParsedConfig& parsed, int socks_port) {
-    // ─── Lean test config ───
-    // Used by ProxyTester for liveness checks. Unlike generateConfig
-    // (which targets the live proxy), this strips out:
-    //   - The leastPing balancer + observatory
-    // The balancer/observatory was the #1 cause of false "dead" verdicts:
-    // the observatory probes on a 30s interval, so during a 5-10s test
-    // window it often hadn't classified the proxy outbound as healthy,
-    // and leastPing routed the test download to a dead SOCKS5-fallback
-    // instead of the actual proxy under test.
-    //
-    // Result: a direct inbound → proxy outbound path with no indirection.
-    std::string outbound = parsed.toXrayOutboundJson(socks_port);
+    // Lean test config (see header). Uses the SAME outbound construction as the live
+    // config (buildProxyOutbound, incl. TLS-fragment policy). Test traffic can never
+    // leave through a direct/private egress: everything not proxied is blackholed.
+    std::string outbound = buildProxyOutbound(parsed, "proxy");
     if (outbound.empty()) return "";
-
-    // Apply TLS fragmentation (same DPI bypass as live config)
-    if (parsed.security == "tls" && outbound.find("\"streamSettings\"") != std::string::npos) {
-        size_t tls_pos = outbound.find("\"tlsSettings\"");
-        if (tls_pos != std::string::npos) {
-            size_t brace_pos = outbound.find("{", tls_pos);
-            if (brace_pos != std::string::npos) {
-                outbound.insert(brace_pos + 1,
-                    "\"fragment\":{\"packets\":\"tlshello\",\"length\":\"50-100\",\"interval\":\"30-50\"},");
-            }
-        }
-    }
 
     std::ostringstream ss;
     ss << "{\n"
@@ -336,14 +326,12 @@ std::string XRayManager::generateTestConfig(const ParsedConfig& parsed, int sock
        <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
        <<   "}],\n"
        << "  \"outbounds\":[" << outbound
-       << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
-       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
+       << (needsFragmentOutbound(parsed) ? "," + fragmentOutboundJson() : std::string())
        << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}"
        << "],\n"
-       << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"final\":\"proxy\",\"rules\":["
-       <<     "{\"type\":\"field\",\"inboundTag\":[\"test-in\"],\"port\":53,\"outboundTag\":\"dns-out\"},"
-       <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
-       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}"
+       << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
+       <<     "{\"type\":\"field\",\"inboundTag\":[\"test-in\"],\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"blackhole\"},"
+       <<     "{\"type\":\"field\",\"inboundTag\":[\"test-in\"],\"outboundTag\":\"proxy\"}"
        <<   "]}\n"
        << "}\n";
     return ss.str();
@@ -374,21 +362,18 @@ std::string XRayManager::generateBalancedConfig(
     std::vector<std::string> outbound_tags;
     bool first = true;
     int idx = 0;
+    bool balanced_need_fragment = false;
     for (auto& [parsed, port] : configs) {
         if (!first) ss << ",";
         first = false;
         std::string tag = "proxy-" + std::to_string(idx);
         outbound_tags.push_back(tag);
-        std::string ob = parsed.toXrayOutboundJson(port);
-        // Replace existing "tag":"proxy" with indexed tag
-        std::string tag_needle = "\"tag\":\"proxy\"";
-        size_t tag_pos = ob.find(tag_needle);
-        if (tag_pos != std::string::npos) {
-            ob.replace(tag_pos, tag_needle.size(), "\"tag\":\"" + tag + "\"");
-        }
+        std::string ob = buildProxyOutbound(parsed, tag);
+        if (needsFragmentOutbound(parsed)) balanced_need_fragment = true;
         ss << ob;
         idx++;
     }
+    if (balanced_need_fragment) ss << "," << fragmentOutboundJson();
     ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
        << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
        << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
@@ -487,8 +472,12 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
 }
 
 std::string XRayManager::generateBatchSpeedtestConfig(
-    const std::vector<std::pair<ParsedConfig, int>>& configs) {
+    const std::vector<std::pair<ParsedConfig, int>>& all_configs) {
 
+    // Only configs xray can express get an inbound/outbound/rule triple.
+    std::vector<std::pair<ParsedConfig, int>> configs;
+    for (const auto& c : all_configs)
+        if (!buildProxyOutbound(c.first, "proxy-" + std::to_string(c.second)).empty()) configs.push_back(c);
     if (configs.empty()) return "";
 
     std::ostringstream ss;
@@ -523,45 +512,22 @@ std::string XRayManager::generateBatchSpeedtestConfig(
     ss << "  \"outbounds\":[";
     first = true;
     std::vector<std::string> outbound_tags;
+    bool need_fragment = false;
     for (auto& [parsed, port] : configs) {
-        std::string ob = parsed.toXrayOutboundJson(port);
-        if (ob.empty()) continue;
-
         std::string ob_tag = "proxy-" + std::to_string(port);
+        std::string ob = buildProxyOutbound(parsed, ob_tag);
+        if (ob.empty()) continue;
         outbound_tags.push_back(ob_tag);
-
-        // Replace default "proxy" tag with port-specific tag
-        std::string tag_needle = "\"tag\":\"proxy\"";
-        size_t tag_pos = ob.find(tag_needle);
-        if (tag_pos != std::string::npos) {
-            ob.replace(tag_pos, tag_needle.size(), "\"tag\":\"" + ob_tag + "\"");
-        }
-
-        // Apply TLS fragment for anti-DPI (Iranian censorship)
-        if (parsed.security == "tls") {
-            // Inject sockopt fragment into streamSettings if present
-            std::string stream_needle = "\"streamSettings\":{";
-            size_t stream_pos = ob.find(stream_needle);
-            if (stream_pos != std::string::npos) {
-                size_t insert_at = stream_pos + stream_needle.size();
-                ob.insert(insert_at,
-                    "\"sockopt\":{\"dialerProxy\":\"fragment-out\"},");
-            }
-        }
+        if (needsFragmentOutbound(parsed)) need_fragment = true;
 
         if (!first) ss << ",";
         first = false;
         ss << ob;
     }
 
-    // Direct outbound
-    ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}";
-    // Fragment outbound for anti-DPI - AGGRESSIVE settings for Iranian DPI
-    ss << ",{\"protocol\":\"freedom\",\"tag\":\"fragment-out\",\"settings\":{\"domainStrategy\":\"AsIs\""
-       <<     ",\"fragment\":{\"packets\":\"tlshello\",\"length\":\"50-100\",\"interval\":\"30-50\"}"
-       <<   "}}";
-    // DNS outbound
-    ss << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}";
+    // Fragment dialer (anti-DPI) only when some outbound needs it; no direct egress at all.
+    if (need_fragment) ss << "," << fragmentOutboundJson();
+    ss << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
     ss << "],\n";
 
     // ═══ Routing: each inbound tag → its own outbound tag ═══
@@ -577,10 +543,8 @@ std::string XRayManager::generateBatchSpeedtestConfig(
         ss << "{\"type\":\"field\",\"inboundTag\":[\"" << in_tag << "\"],\"outboundTag\":\"" << out_tag << "\"}";
     }
 
-    // DNS module → direct (for internal XRay DNS resolution)
-    ss << ",{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"}";
-    // Private IPs → direct
-    ss << ",{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}";
+    // Anything else (private ranges, unrouted inbounds) is blackholed: never direct.
+    ss << ",{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"blackhole\"}";
     ss << "]}\n";
     ss << "}";
     return ss.str();

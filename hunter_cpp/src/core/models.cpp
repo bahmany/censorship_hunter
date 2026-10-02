@@ -1,3 +1,4 @@
+#include <vector>
 #include "core/models.h"
 #include "core/utils.h"
 #include "core/constants.h"
@@ -139,9 +140,59 @@ bool isLiteralIpAddress(const std::string& address) {
     }
     return has_dot;
 }
+std::string alpnJsonArray(const std::string& csv) {
+    std::string out;
+    size_t pos = 0;
+    while (pos <= csv.size()) {
+        size_t e = csv.find(',', pos);
+        std::string tok = csv.substr(pos, e == std::string::npos ? std::string::npos : e - pos);
+        while (!tok.empty() && std::isspace((unsigned char)tok.front())) tok.erase(tok.begin());
+        while (!tok.empty() && std::isspace((unsigned char)tok.back())) tok.pop_back();
+        if (!tok.empty()) { if (!out.empty()) out += ","; out += "\"" + tok + "\""; }
+        if (e == std::string::npos) break;
+        pos = e + 1;
+    }
+    return out.empty() ? "" : "[" + out + "]";
+}
 } // namespace
 
+std::string ParsedConfig::unsupportedReason(const std::string& engine) const {
+    static const std::set<std::string> xray_nets = {"tcp", "raw", "ws", "grpc", "h2", "httpupgrade", "splithttp", "xhttp", "kcp", "quic"};
+    static const std::set<std::string> sb_nets = {"tcp", "raw", "ws", "grpc", "h2", "http", "httpupgrade"};
+    static const std::set<std::string> mh_nets = {"tcp", "raw", "ws", "grpc", "h2", "http"};
+    static const std::set<std::string> secs = {"", "none", "tls", "reality"};
+    const bool quic = protocol == "hysteria2" || protocol == "tuic";
+    if (engine == "xray" && quic) return protocol + " is not supported by xray";
+    if (engine == "mihomo" && quic) return protocol + " is not generated for mihomo";
+    if (!secs.count(security)) return "security '" + security + "' is not supported";
+    if (!quic) {
+        const std::string net = network.empty() ? "tcp" : network;
+        const auto& allow = engine == "xray" ? xray_nets : engine == "sing-box" ? sb_nets : mh_nets;
+        if (!allow.count(net)) return "transport '" + net + "' is not supported by " + engine;
+        if (net == "tcp" || net == "raw") {
+            if (type == "http") return "tcp HTTP header obfuscation is not supported by " + engine;
+        }
+    }
+    if (protocol == "shadowsocks" && extra.count("plugin") && !extra.at("plugin").empty())
+        return "shadowsocks plugin '" + extra.at("plugin") + "' is not supported by " + engine;
+    if (protocol == "hysteria2") {
+        // pinSHA256 is a certificate fingerprint; sing-box can only pin public keys, so the pin can
+        // never be honored exactly. Insecure mode does not make it moot (identity constraint).
+        if (!option("pinSHA256").empty()) return "hysteria2 pinSHA256 certificate pin cannot be honored by " + engine;
+        const std::string ob = option("obfs");
+        if (!ob.empty() && ob != "salamander") return "hysteria2 obfs '" + ob + "' is not supported";
+    }
+    if (protocol == "tuic") {
+        const std::string cc = option("congestion_control", option("congestion-controller", "bbr"));
+        if (cc != "bbr" && cc != "cubic" && cc != "new_reno") return "tuic congestion control '" + cc + "' is not supported";
+        const std::string urm = option("udp_relay_mode");
+        if (!urm.empty() && urm != "native" && urm != "quic") return "tuic udp_relay_mode '" + urm + "' is not supported";
+    }
+    return "";
+}
+
 std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
+    if (!unsupportedReason("xray").empty()) return "";
     // Reject protocols XRay doesn't support
     if (protocol == "hysteria2" || protocol == "tuic") return "";
     
@@ -215,7 +266,8 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
         stream += ",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"" +
                   (sni.empty() ? address : sni) + "\""
                   + (fingerprint.empty() ? "" : ",\"fingerprint\":\"" + fingerprint + "\"")
-                  + (net == "h2" ? ",\"alpn\":[\"h2\",\"http/1.1\"]" : "")
+                  + (!alpnJsonArray(option("alpn")).empty() ? ",\"alpn\":" + alpnJsonArray(option("alpn"))
+                     : (net == "h2" ? std::string(",\"alpn\":[\"h2\",\"http/1.1\"]") : std::string()))
                   + "}";
     } else if (sec == "reality") {
         stream += ",\"security\":\"reality\",\"realitySettings\":{"
@@ -240,7 +292,7 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
         // Skip gRPC+TLS configs where the server is a raw IP with no SNI domain.
         // Xray 1.8.x has a bug: allowInsecure does not bypass IP SAN validation for gRPC transport.
         if (sec == "tls" && sni.empty() && isLiteralIpAddress(address)) return "";
-        std::string sn = !path.empty() ? path : (extra.count("serviceName") ? extra.at("serviceName") : "");
+        std::string sn = grpcServiceName();
         stream += ",\"grpcSettings\":{\"serviceName\":\"" + sn + "\"}";
     } else if (net == "h2") {
         stream += ",\"httpSettings\":{\"path\":\"" + (path.empty() ? "/" : path) + "\""
@@ -290,6 +342,7 @@ std::string ParsedConfig::toXrayConfigJson(int socks_port) const {
 // ─── ParsedConfig::toSingBoxConfigJson ───
 
 std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
+    if (!unsupportedReason("sing-box").empty()) return "";
     // sing-box outbound JSON format
     // Supports: vmess, vless, trojan, shadowsocks, hysteria2, tuic
     
@@ -324,31 +377,41 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
         ob << ",\"password\":\"" << uuid << "\"";
         if (extra.count("up_mbps")) ob << ",\"up_mbps\":" << extra.at("up_mbps");
         if (extra.count("down_mbps")) ob << ",\"down_mbps\":" << extra.at("down_mbps");
+        const std::string obfs = option("obfs");
+        if (obfs == "salamander") {
+            ob << ",\"obfs\":{\"type\":\"salamander\",\"password\":\"" << option("obfs-password") << "\"}";
+        }
     } else if (proto == "tuic") {
         ob << ",\"uuid\":\"" << uuid << "\"";
         if (extra.count("password")) ob << ",\"password\":\"" << extra.at("password") << "\"";
-        ob << ",\"congestion_control\":\"bbr\"";
+        std::string cc = option("congestion_control", option("congestion-controller", "bbr"));
+        ob << ",\"congestion_control\":\"" << cc << "\"";
+        const std::string urm = option("udp_relay_mode");
+        if (!urm.empty()) ob << ",\"udp_relay_mode\":\"" << urm << "\"";
     }
     
-    // TLS settings
+    // TLS settings. Upstream certificate verification is ON unless the link explicitly asks
+    // for insecure mode (allowInsecure/insecure/...), which is honored but visible via insecureTls().
     if (security == "tls" || security == "reality") {
+        const bool quic = (proto == "hysteria2" || proto == "tuic");
         ob << ",\"tls\":{\"enabled\":true";
         if (!sni.empty()) ob << ",\"server_name\":\"" << sni << "\"";
         else if (!host.empty()) ob << ",\"server_name\":\"" << host << "\"";
         else ob << ",\"server_name\":\"" << address << "\"";
-        
+        const std::string alpn = alpnJsonArray(option("alpn"));
+        if (!alpn.empty()) ob << ",\"alpn\":" << alpn;
+
         if (security == "reality") {
             ob << ",\"reality\":{\"enabled\":true";
             if (!public_key.empty()) ob << ",\"public_key\":\"" << public_key << "\"";
             if (!short_id.empty()) ob << ",\"short_id\":\"" << short_id << "\"";
             ob << "}";
         }
-        if (!fingerprint.empty()) {
-            ob << ",\"utls\":{\"enabled\":true,\"fingerprint\":\"" << fingerprint << "\"}";
-        } else {
-            ob << ",\"utls\":{\"enabled\":true,\"fingerprint\":\"chrome\"}";
+        if (!quic) {   // uTLS does not exist for QUIC transports
+            ob << ",\"utls\":{\"enabled\":true,\"fingerprint\":\"" << (fingerprint.empty() ? "chrome" : fingerprint) << "\"}";
         }
-        ob << ",\"insecure\":true}";
+        if (insecureTls()) ob << ",\"insecure\":true";
+        ob << "}";
     }
     
     // Transport settings
@@ -358,7 +421,7 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
         if (!host.empty()) ob << ",\"headers\":{\"Host\":\"" << host << "\"}";
         ob << "}";
     } else if (net == "grpc") {
-        std::string sn = path.empty() ? (extra.count("serviceName") ? extra.at("serviceName") : "") : path;
+        std::string sn = grpcServiceName();
         ob << ",\"transport\":{\"type\":\"grpc\",\"service_name\":\"" << sn << "\"}";
     } else if (net == "h2" || net == "http") {
         ob << ",\"transport\":{\"type\":\"http\"";
@@ -374,22 +437,18 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
     
     ob << "}";
     
-    // Full sing-box config with blackhole kill switch
+    // Full sing-box 1.14 config (new DNS server format, route actions; no legacy block/dns outbounds,
+    // no inbound sniff fields). Private destinations are rejected; everything else goes to "proxy".
     std::ostringstream ss;
     ss << "{"
        << "\"log\":{\"level\":\"warn\"},"
-       << "\"dns\":{\"servers\":[{\"tag\":\"dns-direct\",\"address\":\"1.1.1.1\"},{\"tag\":\"dns-google\",\"address\":\"8.8.8.8\"}]},"
-       << "\"inbounds\":[{\"type\":\"mixed\",\"tag\":\"mixed-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << ",\"sniff\":true,\"sniff_override_destination\":true}],"
-       << "\"outbounds\":["
-       << ob.str()
-       << ",{\"type\":\"direct\",\"tag\":\"direct\"}"
-       << ",{\"type\":\"block\",\"tag\":\"blackhole\"}"
-       << "],"
+       << "\"dns\":{\"servers\":[{\"type\":\"udp\",\"tag\":\"dns-direct\",\"server\":\"1.1.1.1\"}],\"final\":\"dns-direct\"},"
+       << "\"inbounds\":[{\"type\":\"mixed\",\"tag\":\"mixed-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << "}],"
+       << "\"outbounds\":[" << ob.str() << "],"
        << "\"route\":{\"rules\":["
-       << "{\"protocol\":\"dns\",\"outbound\":\"direct\"},"
-       << "{\"ip_is_private\":true,\"outbound\":\"direct\"},"
-       << "{\"inbound\":[\"mixed-in\"],\"outbound\":\"proxy\"}"
-       << "],\"final\":\"blackhole\"}"
+       << "{\"ip_is_private\":true,\"action\":\"reject\"},"
+       << "{\"inbound\":[\"mixed-in\"],\"action\":\"route\",\"outbound\":\"proxy\"}"
+       << "],\"final\":\"proxy\",\"default_domain_resolver\":\"dns-direct\"}"
        << "}";
     return ss.str();
 }
@@ -397,6 +456,7 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
 // ─── ParsedConfig::toMihomoConfigYaml ───
 
 std::string ParsedConfig::toMihomoConfigYaml(int socks_port) const {
+    if (!unsupportedReason("mihomo").empty()) return "";
     // mihomo (Clash Meta) YAML format
     // Supports: vmess, vless, trojan, ss, hysteria2, tuic
     
@@ -461,14 +521,14 @@ std::string ParsedConfig::toMihomoConfigYaml(int socks_port) const {
     // TLS
     if (security == "tls") {
         ss << "    tls: true\n"
-           << "    skip-cert-verify: true\n";
+           << "    skip-cert-verify: " << (insecureTls() ? "true" : "false") << "\n";
         if (!sni.empty()) ss << "    servername: " << sni << "\n";
         else if (!host.empty()) ss << "    servername: " << host << "\n";
         if (!fingerprint.empty()) ss << "    client-fingerprint: " << fingerprint << "\n";
         else ss << "    client-fingerprint: chrome\n";
     } else if (security == "reality") {
         ss << "    tls: true\n"
-           << "    skip-cert-verify: true\n";
+           << "    skip-cert-verify: " << (insecureTls() ? "true" : "false") << "\n";
         if (!sni.empty()) ss << "    servername: " << sni << "\n";
         ss << "    reality-opts:\n";
         if (!public_key.empty()) ss << "      public-key: " << public_key << "\n";
@@ -484,7 +544,7 @@ std::string ParsedConfig::toMihomoConfigYaml(int socks_port) const {
         if (!host.empty()) ss << "      headers:\n        Host: " << host << "\n";
     } else if (net == "grpc") {
         ss << "    grpc-opts:\n";
-        std::string sn = path.empty() ? (extra.count("serviceName") ? extra.at("serviceName") : "") : path;
+        std::string sn = grpcServiceName();
         if (!sn.empty()) ss << "      grpc-service-name: " << sn << "\n";
     } else if (net == "h2" || net == "http") {
         ss << "    h2-opts:\n";

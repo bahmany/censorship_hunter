@@ -198,6 +198,10 @@ set(NETWORK_SOURCES
     src/network/continuous_validator.cpp
     src/network/config_db_store.cpp
     src/network/proxy_tester.cpp
+    src/network/traffic_probe.cpp
+    src/network/connectivity_baseline.cpp
+    src/network/port_lease.cpp
+    src/network/engine_launcher.cpp
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp
     src/network/sys_proxy.cpp
