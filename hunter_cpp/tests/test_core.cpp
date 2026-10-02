@@ -20,7 +20,13 @@
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #endif
 
 using namespace hunter;
@@ -208,7 +214,16 @@ void test_parsedConfig_isValid() {
     pc.protocol = "vless";
     pc.address = "example.com";
     pc.port = 443;
+    CHECK(!pc.isValid(), "vless without uuid should be invalid");
+
+    pc.uuid = "11111111-2222-3333-4444-555555555555";
     CHECK(pc.isValid(), "valid config rejected");
+
+    ParsedConfig trojan;
+    trojan.protocol = "trojan";
+    trojan.address = "example.com";
+    trojan.port = 443;
+    CHECK(trojan.isValid(), "trojan without uuid (password-based) should be valid");
 
     pc.port = 0;
     CHECK(!pc.isValid(), "port 0 should be invalid");
@@ -220,6 +235,28 @@ void test_parsedConfig_isValid() {
     pc.address = "example.com";
     pc.port = 70000;
     CHECK(!pc.isValid(), "port > 65535 should be invalid");
+    PASS();
+}
+
+void test_isPortAlive() {
+    TEST("utils::isPortAlive");
+    // Listening port -> true
+    int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(lfd >= 0, "socket() failed");
+    sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = 0;
+    CHECK(bind(lfd, (sockaddr*)&a, sizeof(a)) == 0, "bind failed");
+    CHECK(listen(lfd, 4) == 0, "listen failed");
+    socklen_t al = sizeof(a);
+    getsockname(lfd, (sockaddr*)&a, &al);
+    int port = ntohs(a.sin_port);
+    CHECK(isPortAlive(port, 1000), "listening port should be alive");
+    // Closed port -> false (connection refused must not count as alive)
+#ifdef _WIN32
+    closesocket(lfd);
+#else
+    close(lfd);
+#endif
+    CHECK(!isPortAlive(port, 1000), "closed port should not be alive");
     PASS();
 }
 
@@ -425,6 +462,7 @@ int main() {
     test_extractUris();
     test_jsonBuilder();
     test_logRingBuffer();
+    test_isPortAlive();
 
     // Models
     std::cout << "\n--- Models ---" << std::endl;
