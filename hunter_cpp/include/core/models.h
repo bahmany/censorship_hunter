@@ -9,6 +9,8 @@
 #include <mutex>
 #include <atomic>
 
+#include "core/health_score.h"
+
 namespace hunter {
 
 /**
@@ -125,7 +127,9 @@ struct BenchResult {
  */
 struct ConfigHealthRecord {
     std::string uri;
-    std::string uri_hash;         // SHA1 of URI
+    std::string uri_hash;         // == endpoint_key (kept for source compatibility)
+    std::string endpoint_key;     // EndpointKeyV1 ("ek1:<sha256>")
+    int key_version = 1;
     std::string tag;              // Source tag (scrape, github_bg, harvest)
     std::string engine_used;
     double first_seen = 0.0;
@@ -143,6 +147,26 @@ struct ConfigHealthRecord {
     // -1 = unknown/not checked, 0 = blocked, 1 = accessible
     int gemini_status = -1;
     double gemini_checked_at = 0.0;  // Timestamp of last Gemini check
+
+    // ── Stage 4 / D2: typed health evidence (source of truth). The legacy fields above
+    // (alive, latency_ms, consecutive_fails, last_alive_time, ...) are derived from it
+    // by ConfigDatabase and are hints only for records without evidence.
+    HealthEvidence ev;
+    // Session-only scheduling state (not persisted)
+    double next_retry_at = 0.0;   // backoff after excluded (infrastructure/local) rounds
+    int excluded_streak = 0;
+    int legacy_fails = 0;         // consecutive failures reported through the legacy adapter
+    // Country (D4 columns; written by later batches via applyCountryResult)
+    std::vector<std::string> server_ips;
+    std::string server_country;
+    std::string server_country_source;
+    double server_country_at = 0.0;
+    std::string geo_db_version;
+    std::string exit_ip;
+    std::string exit_country;
+    std::string exit_country_source;
+    double exit_country_at = 0.0;
+    uint64_t network_generation = 0;
 };
 
 /**

@@ -2,6 +2,8 @@
 #include "network/uri_parser.h"
 #include "network/proxy_tester.h"
 #include "core/utils.h"
+#include "core/endpoint_key.h"
+#include "core/db_format.h"
 #include "core/task_manager.h"
 
 #include <algorithm>
@@ -49,39 +51,6 @@ std::optional<T> getBefore(std::future<T>& fut,
 // chunk: process spawn, queueing behind other pool work, and teardown.
 constexpr int kChunkSlackSeconds = 60;
 
- bool looksLikeLiteralIp(const std::string& address) {
-     if (address.empty()) return false;
-     if (address.find(':') != std::string::npos) {
-         for (unsigned char c : address) {
-             if (!(std::isxdigit(c) || c == ':' || c == '.' || c == '[' || c == ']')) return false;
-         }
-         return true;
-     }
-     bool has_dot = false;
-     for (unsigned char c : address) {
-         if (c == '.') {
-             has_dot = true;
-             continue;
-         }
-         if (!std::isdigit(c)) return false;
-     }
-     return has_dot;
- }
-
- std::string endpointKeyForUri(const std::string& uri) {
-     auto parsed = UriParser::parse(uri);
-     if (parsed.has_value() && parsed->isValid()) {
-         std::string address = utils::trim(parsed->address);
-         std::transform(address.begin(), address.end(), address.begin(),
-                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-         if (looksLikeLiteralIp(address)) return address;
-     }
-     std::string fallback = utils::trim(uri);
-     std::transform(fallback.begin(), fallback.end(), fallback.begin(),
-                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-     return fallback;
- }
-
  bool isUsableResult(const ProxyTestResult& result) {
      return result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
  }
@@ -102,11 +71,27 @@ constexpr int kChunkSlackSeconds = 60;
 // ConfigDatabase
 // ═══════════════════════════════════════════════════════════════════
 
-ConfigDatabase::ConfigDatabase(int max_size) : max_size_(max_size) {}
+ConfigDatabase::ConfigDatabase(int max_size) : max_size_(max_size), clock_(systemClock()) {}
 
-std::string ConfigDatabase::hashUri(const std::string& uri) const {
-    return utils::sha1Hex(endpointKeyForUri(uri)).substr(0, 16);
+std::string ConfigDatabase::keyFor(const std::string& uri) {
+    return endpointKeyForUri(uri);
 }
+
+void ConfigDatabase::setClock(ClockFn clock) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    clock_ = clock ? std::move(clock) : systemClock();
+}
+
+void ConfigDatabase::setThresholds(const HealthThresholds& th) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    th_ = th;
+}
+
+HealthThresholds ConfigDatabase::thresholds() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return th_;
+}
+
 
 int ConfigDatabase::addConfigs(const std::set<std::string>& uris, const std::string& tag) {
     return addConfigsWithPriority(uris, tag, nullptr);
@@ -117,12 +102,12 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
     std::lock_guard<std::mutex> lock(mutex_);
     int added = 0;
     int promoted = 0;
-    double now = utils::nowTimestamp();
+    double now = clock_();
     const bool high_priority = (tag == "manual" || tag == "import" || tag == "user_import");
     const double boost_until = high_priority ? (now + 1800.0) : 0.0;
     for (const auto& uri : uris) {
         if (uri.empty()) continue;
-        std::string hash = hashUri(uri);
+        std::string hash = keyFor(uri);
         auto existing = db_.find(hash);
         if (existing != db_.end()) {
             if (high_priority) {
@@ -139,8 +124,8 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
 
         ConfigHealthRecord rec;
         rec.uri = uri;
-        rec.uri_hash = hash;
-        rec.tag = tag;
+        initRecordIdentity(&rec);
+        rec.tag = tag.substr(0, 128);
         rec.first_seen = now;
         rec.priority_boost_until = boost_until;
         rec.needs_retest = true;
@@ -166,57 +151,149 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
     return added;
 }
 
+namespace {
+void touchLegacyCounters(ConfigHealthRecord& rec, double t, const std::string& engine) {
+    rec.last_tested = t;
+    rec.needs_retest = false;
+    rec.priority_boost_until = 0.0;
+    if (!engine.empty()) rec.engine_used = engine;
+}
+}  // namespace
+
+ApplyEffect ConfigDatabase::applyProbeResult(const ProbeResult& r) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = db_.find(r.endpoint_key);
+    if (it == db_.end()) return ApplyEffect::UnknownEndpoint;
+    return applyLocked(it->second, r);
+}
+
+ApplyEffect ConfigDatabase::applyLocked(ConfigHealthRecord& rec, const ProbeResult& r) {
+    const ApplyEffect eff = applyProbe(rec.ev, r, th_);
+    if (eff == ApplyEffect::Excluded) {
+        // Infrastructure/local/unclassified round: no evidence, stays schedulable with bounded backoff.
+        rec.excluded_streak++;
+        double back = th_.excluded_retry_base_s;
+        for (int i = 1; i < rec.excluded_streak && back < th_.excluded_retry_max_s; i++) back *= 2.0;
+        rec.next_retry_at = r.finished_at + std::min(back, th_.excluded_retry_max_s);
+        return eff;
+    }
+    if (eff != ApplyEffect::Applied) return eff;
+    touchLegacyCounters(rec, r.finished_at, r.engine);
+    if (r.generation > rec.network_generation) rec.network_generation = r.generation;
+    rec.excluded_streak = 0;
+    rec.next_retry_at = 0.0;
+    rec.legacy_fails = 0;
+    rec.total_tests++;
+    if (r.outcome == ProbeOutcome::Pass) {
+        rec.total_passes++;
+        rec.telegram_only = false;
+        if (!r.exit_country.empty() && r.finished_at >= rec.exit_country_at) {
+            rec.exit_country = r.exit_country;
+            rec.exit_ip = r.exit_ip;
+            rec.exit_country_source = "cloudflare_trace";
+            rec.exit_country_at = r.finished_at;
+        }
+    }
+    syncLegacyFromEvidence(&rec);
+    return eff;
+}
+
+bool ConfigDatabase::applyCountryResult(const std::string& endpoint_key, const CountryUpdate& u) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = db_.find(endpoint_key);
+    if (it == db_.end()) return false;
+    auto& rec = it->second;
+    if (u.is_exit) {
+        if (u.at < rec.exit_country_at) return false;
+        if (u.network_generation < rec.network_generation) return false;
+        rec.exit_country = u.country;
+        rec.exit_ip = u.ip;
+        rec.exit_country_source = u.source;
+        rec.exit_country_at = u.at;
+        rec.network_generation = u.network_generation;
+    } else {
+        if (u.at < rec.server_country_at) return false;
+        rec.server_country = u.country;
+        rec.server_country_source = u.source;
+        rec.server_country_at = u.at;
+        rec.geo_db_version = u.geo_db_version;
+        rec.server_ips = u.server_ips;
+    }
+    return true;
+}
+
+void ConfigDatabase::markTestingRound(const std::string& endpoint_key) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = db_.find(endpoint_key);
+    if (it != db_.end()) markTesting(it->second.ev);
+}
+
+// Legacy adapter (until A2 rewires callers): alive -> full Pass. A failure from a legacy
+// caller carries no baseline attribution, so it is recorded as an unclassified (non-penalizing)
+// round for the typed evidence; only the legacy counters/alive hint react to it.
 void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float latency_ms,
                                   const std::string& engine_used, bool force_dead,
                                   bool telegram_only) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string hash = hashUri(uri);
-    auto it = db_.find(hash);
+    auto it = db_.find(keyFor(uri));
     if (it == db_.end()) return;
-
     auto& rec = it->second;
-    rec.last_tested = utils::nowTimestamp();
-    rec.total_tests++;
-    rec.needs_retest = false;
-    rec.priority_boost_until = 0.0;
-    if (!engine_used.empty()) {
-        rec.engine_used = engine_used;
-    }
-
-    if (alive) {
-        rec.alive = true;
-        rec.telegram_only = telegram_only;
-        rec.latency_ms = latency_ms;
-        rec.consecutive_fails = 0;
+    const double t = std::max(clock_(), rec.ev.last_attempt_at);
+    if (alive && telegram_only) {
+        touchLegacyCounters(rec, t, engine_used);
+        rec.total_tests++;
         rec.total_passes++;
-        rec.last_alive_time = rec.last_tested;
-    } else {
-        if (force_dead) rec.consecutive_fails = 3;
-        else rec.consecutive_fails++;
-        // Mark dead after 2 consecutive fails (was 3) — gets dead configs
-        // into the eviction pipeline faster, keeping the 1M-entry DB lean.
-        if (rec.consecutive_fails >= 2) {
-            rec.alive = false;
-            rec.telegram_only = false;
-            rec.latency_ms = 0.0f;
-        }
+        rec.alive = true;
+        rec.telegram_only = true;
+        rec.ev.telegram_only = true;
+        rec.latency_ms = latency_ms;
+        rec.last_alive_time = t;
+        rec.legacy_fails = 0;
+        return;
     }
+    rec.ev.telegram_only = false;
+    ProbeResult r;
+    r.endpoint_key = it->first;
+    r.engine = engine_used;
+    r.started_at = r.finished_at = t;
+    if (alive) {
+        r.outcome = ProbeOutcome::Pass;
+        r.attributable = true;
+        r.latency_ms = std::isfinite(latency_ms) && latency_ms >= 0.0f ? latency_ms : 0.0;
+        applyLocked(rec, r);
+        rec.latency_ms = latency_ms;
+        return;
+    }
+    r.outcome = ProbeOutcome::RemoteFailure;
+    r.attributable = false;  // no baseline: never penalizes the typed evidence
+    applyProbe(rec.ev, r, th_);
+    touchLegacyCounters(rec, t, engine_used);
+    rec.total_tests++;
+    rec.legacy_fails = force_dead ? std::max(rec.legacy_fails, 3) : rec.legacy_fails + 1;
+    rec.excluded_streak = 0;
+    rec.next_retry_at = 0.0;
+    if (rec.ev.last_full_success <= 0.0 || rec.legacy_fails >= 2) {
+        rec.alive = false;
+        rec.telegram_only = false;
+        rec.latency_ms = 0.0f;
+    }
+    rec.consecutive_fails = rec.legacy_fails;
 }
 
 void ConfigDatabase::updateGeminiStatus(const std::string& uri, int gemini_status) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string hash = hashUri(uri);
+    std::string hash = keyFor(uri);
     auto it = db_.find(hash);
     if (it == db_.end()) return;
     it->second.gemini_status = gemini_status;
-    it->second.gemini_checked_at = utils::nowTimestamp();
+    it->second.gemini_checked_at = clock_();
 }
 
 std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForGeminiCheck(
         int gemini_interval_s, int max_count) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ConfigHealthRecord> result;
-    double now = utils::nowTimestamp();
+    double now = clock_();
     for (auto& [hash, rec] : db_) {
         if (!rec.alive) continue;
         // Need check if: never checked (gemini_checked_at == 0) OR
@@ -232,7 +309,7 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForGeminiCheck(
 std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ConfigHealthRecord> batch;
-    double now = utils::nowTimestamp();
+    double now = clock_();
 
     // Collect candidates with priority score (lower = higher priority)
     struct Candidate {
@@ -244,6 +321,7 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
     std::vector<Candidate> candidates;
 
     for (auto& [hash, rec] : db_) {
+        if (rec.next_retry_at > now) continue;  // bounded backoff after excluded rounds
         const bool boosted = rec.priority_boost_until > now;
         // Priority 0: never tested (brand new configs)
         if (rec.total_tests == 0) {
@@ -292,17 +370,42 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
     return batch;
 }
 
+RankKey ConfigDatabase::rankKeyLocked(const ConfigHealthRecord& rec, double now) const {
+    HealthEvaluation e = evaluateHealth(rec.ev, now, th_);
+    RankKey k;
+    k.tier = e.tier;
+    k.score = e.score;
+    k.last_full_success = rec.ev.last_full_success;
+    k.key = rec.endpoint_key;
+    return k;
+}
+
+// Shared ranking: health tier first (Stable, Healthy, Degraded, hint-only ...), then score,
+// latest full success, canonical key. Records without evidence fall back to the legacy latency
+// hint so pre-V4 data still sorts sanely.
+void ConfigDatabase::sortRankedLocked(std::vector<ConfigHealthRecord>& v, double now) const {
+    struct Item { RankKey k; double hint; size_t idx; };
+    std::vector<Item> items;
+    items.reserve(v.size());
+    for (size_t i = 0; i < v.size(); i++)
+        items.push_back({rankKeyLocked(v[i], now), v[i].telegram_only ? 1e18 : (double)v[i].latency_ms, i});
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        if (a.k.tier != b.k.tier) return a.k.tier < b.k.tier;
+        if (a.k.score != b.k.score) return a.k.score > b.k.score;
+        if (a.k.tier == 3 && a.hint != b.hint) return a.hint < b.hint;
+        return rankedBefore(a.k, b.k);
+    });
+    std::vector<ConfigHealthRecord> out;
+    out.reserve(v.size());
+    for (auto& it : items) out.push_back(std::move(v[it.idx]));
+    v.swap(out);
+}
+
 std::vector<std::pair<std::string, float>> ConfigDatabase::getHealthyConfigs(int max_count) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    auto recs = getHealthyRecords(max_count);
     std::vector<std::pair<std::string, float>> healthy;
-    for (auto& [hash, rec] : db_) {
-        if (rec.alive && !rec.telegram_only && rec.latency_ms > 0) {
-            healthy.emplace_back(rec.uri, rec.latency_ms);
-        }
-    }
-    std::sort(healthy.begin(), healthy.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-    if ((int)healthy.size() > max_count) healthy.resize(max_count);
+    healthy.reserve(recs.size());
+    for (auto& r : recs) healthy.emplace_back(r.uri, r.latency_ms);
     return healthy;
 }
 
@@ -310,27 +413,47 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getHealthyRecords(int max_count)
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ConfigHealthRecord> healthy;
     for (auto& [hash, rec] : db_) {
-        if (rec.alive && !rec.telegram_only && rec.latency_ms > 0) {
-            healthy.push_back(rec);
-        }
+        if (rec.alive && !rec.telegram_only && rec.latency_ms > 0) healthy.push_back(rec);
     }
-    std::sort(healthy.begin(), healthy.end(),
-              [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) { return a.latency_ms < b.latency_ms; });
+    sortRankedLocked(healthy, clock_());
     if ((int)healthy.size() > max_count) healthy.resize(max_count);
     return healthy;
+}
+
+std::vector<ConfigHealthRecord> ConfigDatabase::getRecommendedRecords(int max_count) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const double t = clock_();
+    std::vector<ConfigHealthRecord> out;
+    for (auto& [hash, rec] : db_)
+        if (evaluateHealth(rec.ev, t, th_).stability == Stability::Stable) out.push_back(rec);
+    sortRankedLocked(out, t);
+    if ((int)out.size() > max_count) out.resize(max_count);
+    return out;
+}
+
+HealthEvaluation ConfigDatabase::evaluate(const ConfigHealthRecord& rec) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return evaluateHealth(rec.ev, clock_(), th_);
+}
+
+bool ConfigDatabase::getRecord(const std::string& uri_or_key, ConfigHealthRecord* out) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = db_.find(uri_or_key.compare(0, 4, "ek1:") == 0 ? uri_or_key : keyFor(uri_or_key));
+    if (it == db_.end()) return false;
+    *out = it->second;
+    return true;
 }
 
 std::vector<ConfigHealthRecord> ConfigDatabase::getTelegramOnlyRecords(int max_count) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ConfigHealthRecord> healthy;
     for (auto& [hash, rec] : db_) {
-        if (rec.alive && rec.telegram_only) {
-            healthy.push_back(rec);
-        }
+        if (rec.alive && rec.telegram_only) healthy.push_back(rec);
     }
     std::sort(healthy.begin(), healthy.end(),
               [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
-                  return a.last_alive_time > b.last_alive_time;
+                  if (a.last_alive_time != b.last_alive_time) return a.last_alive_time > b.last_alive_time;
+                  return a.endpoint_key < b.endpoint_key;
               });
     if ((int)healthy.size() > max_count) healthy.resize(max_count);
     return healthy;
@@ -345,45 +468,38 @@ std::set<std::string> ConfigDatabase::getAllUris() {
 
 std::vector<ConfigHealthRecord> ConfigDatabase::getAllRecords(int max_count) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<ConfigHealthRecord> all;
-    all.reserve(db_.size());
-    for (auto& [hash, rec] : db_) {
-        all.push_back(rec);
-    }
-    std::sort(all.begin(), all.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
-        if (a.alive != b.alive) return a.alive > b.alive;
-        if (a.alive && b.alive) {
-            if (a.telegram_only != b.telegram_only) return a.telegram_only < b.telegram_only;
-            if (!a.telegram_only && !b.telegram_only) return a.latency_ms < b.latency_ms;
-            return a.last_alive_time > b.last_alive_time;
-        }
-        return a.last_tested > b.last_tested;
+    std::vector<ConfigHealthRecord> alive, dead;
+    for (auto& [hash, rec] : db_) (rec.alive ? alive : dead).push_back(rec);
+    // Usable first through the shared evaluator, then non-alive by most recent test.
+    sortRankedLocked(alive, clock_());
+    std::sort(dead.begin(), dead.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
+        if (a.last_tested != b.last_tested) return a.last_tested > b.last_tested;
+        return a.endpoint_key < b.endpoint_key;
     });
-    if ((int)all.size() > max_count) all.resize(max_count);
-    return all;
+    alive.insert(alive.end(), std::make_move_iterator(dead.begin()), std::make_move_iterator(dead.end()));
+    if ((int)alive.size() > max_count) alive.resize(max_count);
+    return alive;
 }
 
 std::vector<ConfigHealthRecord> ConfigDatabase::getAliveRecords(int max_count) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<ConfigHealthRecord> alive;
+    std::vector<ConfigHealthRecord> alive, tg;
     for (auto& [hash, rec] : db_) {
-        if (rec.alive) alive.push_back(rec);
+        if (rec.alive) (rec.telegram_only ? tg : alive).push_back(rec);
     }
-    std::sort(alive.begin(), alive.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
-        // Non-telegram first, then telegram-only; within each group, by latency.
-        if (a.telegram_only != b.telegram_only) return a.telegram_only < b.telegram_only;
-        if (!a.telegram_only && !b.telegram_only) {
-            if (a.latency_ms != b.latency_ms) return a.latency_ms < b.latency_ms;
-        }
-        return a.last_alive_time > b.last_alive_time;
+    sortRankedLocked(alive, clock_());
+    std::sort(tg.begin(), tg.end(), [](const ConfigHealthRecord& a, const ConfigHealthRecord& b) {
+        if (a.last_alive_time != b.last_alive_time) return a.last_alive_time > b.last_alive_time;
+        return a.endpoint_key < b.endpoint_key;
     });
+    alive.insert(alive.end(), tg.begin(), tg.end());
     if ((int)alive.size() > max_count) alive.resize(max_count);
     return alive;
 }
 
 std::string ConfigDatabase::getPreferredEngine(const std::string& uri) {
     std::lock_guard<std::mutex> lock(mutex_);
-    std::string hash = hashUri(uri);
+    std::string hash = keyFor(uri);
     auto it = db_.find(hash);
     if (it == db_.end()) return "";
     return it->second.engine_used;
@@ -419,7 +535,7 @@ ConfigDatabase::Stats ConfigDatabase::getStats() {
     Stats s;
     s.total = (int)db_.size();
     std::vector<float> latencies;
-    double now = utils::nowTimestamp();
+    double now = clock_();
     double stale_threshold = 300.0; // 5 min
     for (auto& [hash, rec] : db_) {
         if (rec.alive) {
@@ -452,66 +568,47 @@ int ConfigDatabase::size() const {
 int ConfigDatabase::evictDead() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (db_.empty()) return 0;
-    double now = utils::nowTimestamp();
     int before = (int)db_.size();
     evictStale();
-    // Also drop configs that were never alive and are older than 10 min
-    constexpr double NEVER_ALIVE_TTL = 0.167 * 3600.0;  // 10 minutes
-    std::vector<std::string> stale;
-    for (auto& [hash, rec] : db_) {
-        if (!rec.alive && rec.last_alive_time == 0.0 &&
-            rec.total_tests >= 2 && rec.consecutive_fails >= 2 &&
-            (now - rec.first_seen) > NEVER_ALIVE_TTL) {
-            stale.push_back(hash);
-        }
-    }
-    for (auto& h : stale) db_.erase(h);
     return before - (int)db_.size();
 }
 
+// Age basis for eviction of never-working records. Dead (attributed) records are measured
+// from dead_since, never from an old success. Local outages create no failure evidence.
 void ConfigDatabase::evictStale() {
     if (db_.empty()) return;
-    double now = utils::nowTimestamp();
-    // Aggressive eviction thresholds — tuned for low-RAM systems.
-    // Dead configs are evicted after 15 min (was 1 hour) to keep RAM lean.
-    constexpr double DEAD_TTL = 0.25 * 3600.0;  // 15 minutes
-    constexpr int FAIL_THRESHOLD = 3;
-
-    // Phase 1: Remove configs that have been continuously offline for 15+ min
+    const double now = clock_();
+    // Phase 1: ONLY attributed Dead records, measured from entering Dead. Unattributed/legacy
+    // failures, old first_seen, or lost success timestamps are never death evidence.
     std::vector<std::string> dead_hashes;
-    for (auto& [hash, rec] : db_) {
-        if (!rec.alive && rec.total_tests > 0 && rec.last_alive_time > 0.0 &&
-            (now - rec.last_alive_time) > DEAD_TTL) {
+    for (auto& [hash, rec] : db_)
+        if (rec.ev.state == HealthState::Dead && deadCertified(rec.ev, th_) &&
+            (now - rec.ev.dead_since) > th_.dead_retention_s)
             dead_hashes.push_back(hash);
-        }
-        // Also remove configs that were NEVER alive and tested 3+ times
-        if (!rec.alive && rec.total_tests >= FAIL_THRESHOLD && rec.last_alive_time == 0.0 &&
-            rec.consecutive_fails >= FAIL_THRESHOLD) {
-            dead_hashes.push_back(hash);
-        }
-    }
     for (auto& h : dead_hashes) db_.erase(h);
 
-    // Phase 2: If still over capacity, remove oldest high-failure entries
+    // Phase 2 (capacity only): oldest inactive records that never had a full success, no alive
+    // hint, and are older than the retention window. Anything else is never evicted.
     if ((int)db_.size() < max_size_) return;
     std::vector<std::pair<std::string, double>> candidates;
     for (auto& [hash, rec] : db_) {
-        if (rec.consecutive_fails >= FAIL_THRESHOLD || (!rec.alive && rec.total_tests > 2)) {
-            candidates.emplace_back(hash, rec.first_seen);
-        }
+        if (rec.alive || rec.ev.last_full_success > 0.0 || rec.last_alive_time > 0.0) continue;
+        if (rec.ev.state == HealthState::Healthy || rec.ev.state == HealthState::Degraded) continue;
+        const double age_anchor = std::max(rec.first_seen, rec.ev.last_attempt_at);
+        if (age_anchor <= 0.0 || now - age_anchor <= th_.dead_retention_s) continue;
+        candidates.emplace_back(hash, age_anchor);
     }
-    std::sort(candidates.begin(), candidates.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-    // Evict up to 25% of dead candidates to free memory quickly
+    std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
+        if (a.second != b.second) return a.second < b.second;
+        return a.first < b.first;
+    });
     int to_remove = std::max(1, (int)candidates.size() / 4);
-    for (int i = 0; i < to_remove && i < (int)candidates.size(); i++) {
-        db_.erase(candidates[i].first);
-    }
+    for (int i = 0; i < to_remove && i < (int)candidates.size(); i++) db_.erase(candidates[i].first);
 }
 
 int ConfigDatabase::clearOlderThan(int max_age_hours) {
     std::lock_guard<std::mutex> lock(mutex_);
-    double now = utils::nowTimestamp();
+    double now = clock_();
     double cutoff = (double)max_age_hours * 3600.0;
     int removed = 0;
     for (auto it = db_.begin(); it != db_.end(); ) {
@@ -552,7 +649,7 @@ int ConfigDatabase::removeUris(const std::set<std::string>& uris) {
     std::lock_guard<std::mutex> lock(mutex_);
     int removed = 0;
     for (const auto& uri : uris) {
-        const std::string hash = hashUri(uri);
+        const std::string hash = keyFor(uri);
         auto it = db_.find(hash);
         if (it != db_.end()) {
             db_.erase(it);
@@ -562,222 +659,11 @@ int ConfigDatabase::removeUris(const std::set<std::string>& uris) {
     return removed;
 }
 
-int ConfigDatabase::saveToDisk(const std::string& filepath) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    try { utils::mkdirRecursive(utils::dirName(filepath)); } catch (...) {}
-    std::ofstream ofs(filepath, std::ios::binary);
-    if (!ofs) return 0;
-    ofs << "#HUNTER_CONFIG_DB_V3\n";
-    int saved = 0;
-    for (const auto& [hash, rec] : db_) {
-        if (rec.uri.empty()) continue;
-        ofs << rec.uri << '\t'
-            << rec.tag << '\t'
-            << rec.engine_used << '\t'
-            << std::fixed << rec.first_seen << '\t'
-            << rec.last_tested << '\t'
-            << rec.last_alive_time << '\t'
-            << (rec.alive ? 1 : 0) << '\t'
-            << (rec.telegram_only ? 1 : 0) << '\t'
-            << rec.latency_ms << '\t'
-            << rec.consecutive_fails << '\t'
-            << rec.total_tests << '\t'
-            << rec.total_passes << '\t'
-            << rec.gemini_status << '\t'
-            << std::fixed << rec.gemini_checked_at << '\n';
-        saved++;
-    }
-    return saved;
-}
-
-int ConfigDatabase::loadFromDisk(const std::string& filepath) {
-    std::ifstream ifs(filepath, std::ios::binary);
-    if (!ifs) return 0;
-
-    std::string line;
-    if (!std::getline(ifs, line)) return 0;
-    const bool is_v3 = line.find("#HUNTER_CONFIG_DB_V3") != std::string::npos;
-    const bool is_v2 = line.find("#HUNTER_CONFIG_DB_V2") != std::string::npos;
-    const bool is_v1 = line.find("#HUNTER_CONFIG_DB_V1") != std::string::npos;
-    if (!is_v3 && !is_v2 && !is_v1) {
-        return 0;
-    }
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    int loaded = 0;
-    while (std::getline(ifs, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        std::vector<std::string> fields;
-        std::istringstream ss(line);
-        std::string field;
-        while (std::getline(ss, field, '\t')) {
-            fields.push_back(field);
-        }
-        if ((is_v3 && fields.size() < 14) || (is_v2 && fields.size() < 12) || (is_v1 && fields.size() < 11)) continue;
-
-        std::string uri = fields[0];
-        if (uri.empty() || uri.find("://") == std::string::npos) continue;
-
-        std::string hash = hashUri(uri);
-        if (db_.find(hash) != db_.end()) continue;
-        if ((int)db_.size() >= max_size_) break;
-
-        ConfigHealthRecord rec;
-        rec.uri = uri;
-        rec.uri_hash = hash;
-        rec.tag = fields[1];
-        rec.engine_used = fields[2];
-        try {
-            rec.first_seen = std::stod(fields[3]);
-            rec.last_tested = std::stod(fields[4]);
-            rec.last_alive_time = std::stod(fields[5]);
-            rec.alive = (std::stoi(fields[6]) != 0);
-            int shift = 0;
-            if (is_v3 || is_v2) {
-                rec.telegram_only = (std::stoi(fields[7]) != 0);
-                shift = 1;
-            }
-            rec.latency_ms = std::stof(fields[7 + shift]);
-            rec.consecutive_fails = std::stoi(fields[8 + shift]);
-            rec.total_tests = std::stoi(fields[9 + shift]);
-            rec.total_passes = std::stoi(fields[10 + shift]);
-            if (is_v3 && fields.size() >= 14) {
-                rec.gemini_status = std::stoi(fields[11 + shift]);
-                rec.gemini_checked_at = std::stod(fields[12 + shift]);
-            }
-        } catch (...) {
-            continue;
-        }
-        rec.needs_retest = true;
-        db_[hash] = rec;
-        loaded++;
-    }
-    return loaded;
-}
-
-// ─── Live connections cache ───
-// A separate file (HUNTER_live_cache.tsv) stores only alive configs.
-// This survives restarts — on startup, alive configs are re-merged
-// into the DB and given priority for revalidation.
-
-int ConfigDatabase::saveLiveToDisk(const std::string& filepath) const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    try { utils::mkdirRecursive(utils::dirName(filepath)); } catch (...) {}
-    std::ofstream ofs(filepath, std::ios::binary);
-    if (!ofs) return 0;
-    ofs << "#HUNTER_LIVE_CACHE_V2\n";
-    int saved = 0;
-    for (const auto& [hash, rec] : db_) {
-        // Save configs that are currently alive OR were alive recently
-        // (within 3 days). This preserves live connections across restarts
-        // even if they're temporarily down.
-        if (rec.uri.empty()) continue;
-        if (!rec.alive && rec.last_alive_time > 0.0) {
-            // Was alive but currently dead — keep only if within 3-day TTL
-            double age = utils::nowTimestamp() - rec.last_alive_time;
-            if (age > 259200.0) continue;  // 3 days
-        } else if (!rec.alive) {
-            continue;  // Never alive — don't cache
-        }
-        ofs << rec.uri << '\t'
-            << rec.tag << '\t'
-            << rec.engine_used << '\t'
-            << std::fixed << rec.first_seen << '\t'
-            << rec.last_tested << '\t'
-            << rec.last_alive_time << '\t'
-            << (rec.alive ? 1 : 0) << '\t'
-            << (rec.telegram_only ? 1 : 0) << '\t'
-            << rec.latency_ms << '\t'
-            << rec.consecutive_fails << '\t'
-            << rec.total_tests << '\t'
-            << rec.total_passes << '\t'
-            << rec.gemini_status << '\t'
-            << std::fixed << rec.gemini_checked_at << '\n';
-        saved++;
-    }
-    return saved;
-}
-
-int ConfigDatabase::loadLiveFromDisk(const std::string& filepath) {
-    std::ifstream ifs(filepath, std::ios::binary);
-    if (!ifs) return 0;
-    std::string line;
-    if (!std::getline(ifs, line)) return 0;
-    const bool is_v2 = line.find("#HUNTER_LIVE_CACHE_V2") != std::string::npos;
-    const bool is_v1 = line.find("#HUNTER_LIVE_CACHE_V1") != std::string::npos;
-    if (!is_v2 && !is_v1) return 0;
-
-    std::lock_guard<std::mutex> lock(mutex_);
-    int loaded = 0;
-    while (std::getline(ifs, line)) {
-        if (line.empty() || line[0] == '#') continue;
-        std::vector<std::string> fields;
-        std::istringstream ss(line);
-        std::string field;
-        while (std::getline(ss, field, '\t')) fields.push_back(field);
-        if ((is_v2 && fields.size() < 14) || (is_v1 && fields.size() < 12)) continue;
-
-        std::string uri = fields[0];
-        if (uri.empty() || uri.find("://") == std::string::npos) continue;
-        std::string hash = hashUri(uri);
-
-        auto existing = db_.find(hash);
-        if (existing != db_.end()) {
-            // Merge: if the cached record says alive, mark it alive in DB
-            // and set needs_retest so it gets revalidated soon.
-            try {
-                bool was_alive = (std::stoi(fields[6]) != 0);
-                double last_alive = std::stod(fields[5]);
-                if (was_alive) {
-                    existing->second.alive = true;
-                    existing->second.last_alive_time = last_alive;
-                    existing->second.consecutive_fails = 0;
-                    existing->second.needs_retest = true;
-                    // Restore gemini status from cache
-                    if (is_v2 && fields.size() >= 14) {
-                        existing->second.gemini_status = std::stoi(fields[12]);
-                        existing->second.gemini_checked_at = std::stod(fields[13]);
-                    }
-                    loaded++;
-                }
-            } catch (...) {}
-            continue;
-        }
-
-        // New record — add to DB
-        if ((int)db_.size() >= max_size_) break;
-        ConfigHealthRecord rec;
-        rec.uri = uri;
-        rec.uri_hash = hash;
-        rec.tag = fields[1];
-        rec.engine_used = fields[2];
-        try {
-            rec.first_seen = std::stod(fields[3]);
-            rec.last_tested = std::stod(fields[4]);
-            rec.last_alive_time = std::stod(fields[5]);
-            rec.alive = (std::stoi(fields[6]) != 0);
-            rec.telegram_only = (std::stoi(fields[7]) != 0);
-            rec.latency_ms = std::stof(fields[8]);
-            rec.consecutive_fails = std::stoi(fields[9]);
-            rec.total_tests = std::stoi(fields[10]);
-            rec.total_passes = std::stoi(fields[11]);
-            if (is_v2 && fields.size() >= 14) {
-                rec.gemini_status = std::stoi(fields[12]);
-                rec.gemini_checked_at = std::stod(fields[13]);
-            }
-        } catch (...) { continue; }
-        rec.needs_retest = true;
-        db_[hash] = rec;
-        loaded++;
-    }
-    return loaded;
-}
-
 std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForRevalidation(
         int revalidate_interval_s, int max_count) {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ConfigHealthRecord> result;
-    double now = utils::nowTimestamp();
+    double now = clock_();
     for (auto& [hash, rec] : db_) {
         if (!rec.alive) continue;
         double age = now - rec.last_tested;
@@ -791,22 +677,16 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForRevalidation(
 
 int ConfigDatabase::removeDeadLive(int dead_ttl_s) {
     std::lock_guard<std::mutex> lock(mutex_);
-    double now = utils::nowTimestamp();
+    const double now = clock_();
+    const double ttl = std::max<double>(dead_ttl_s, th_.dead_retention_s);
     int removed = 0;
-    std::vector<std::string> to_remove;
-    for (auto& [hash, rec] : db_) {
-        // Remove configs that were once alive but have been dead for
-        // longer than dead_ttl_s (3 days by default).
-        if (!rec.alive && rec.last_alive_time > 0.0) {
-            double dead_age = now - rec.last_alive_time;
-            if (dead_age > dead_ttl_s) {
-                to_remove.push_back(hash);
-            }
-        }
-    }
-    for (auto& h : to_remove) {
-        db_.erase(h);
-        removed++;
+    for (auto it = db_.begin(); it != db_.end();) {
+        const auto& ev = it->second.ev;
+        // Only attributed Dead records, measured from entry into Dead.
+        if (ev.state == HealthState::Dead && deadCertified(ev, th_) && (now - ev.dead_since) > ttl) {
+            it = db_.erase(it);
+            removed++;
+        } else ++it;
     }
     return removed;
 }

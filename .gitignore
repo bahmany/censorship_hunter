@@ -97,3 +97,10 @@ imgui.ini
 
 # Out-of-tree build/deps output (scripts/build_windows.sh)
 /build/
+
+# ─── Geo Database Artifacts ────────────────────────────────
+*.bin.zst
+*.hcgeo
+country.bin
+country.zst
+dbip-country-lite-*.csv.gz

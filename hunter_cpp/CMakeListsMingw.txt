@@ -186,6 +186,9 @@ set(ZSTD_SOURCES ${ZSTD_DIR}/zstddeclib.c)
 set(CORE_SOURCES
     src/core/config.cpp
     src/core/models.cpp
+    src/core/endpoint_key.cpp
+    src/core/health_score.cpp
+    src/core/db_format.cpp
     src/core/utils.cpp
     src/core/task_manager.cpp
     src/core/seed_data.cpp
@@ -201,6 +204,7 @@ set(NETWORK_SOURCES
     src/network/uri_parser.cpp
     src/network/config_fetcher.cpp
     src/network/continuous_validator.cpp
+    src/network/config_db_store.cpp
     src/network/proxy_tester.cpp
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp

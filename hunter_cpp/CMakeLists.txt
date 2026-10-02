@@ -179,6 +179,9 @@ set(ZSTD_SOURCES ${ZSTD_DIR}/zstddeclib.c)
 set(CORE_SOURCES
     src/core/config.cpp
     src/core/models.cpp
+    src/core/endpoint_key.cpp
+    src/core/health_score.cpp
+    src/core/db_format.cpp
     src/core/utils.cpp
     src/core/task_manager.cpp
     src/core/seed_data.cpp
@@ -193,6 +196,7 @@ set(NETWORK_SOURCES
     src/network/uri_parser.cpp
     src/network/config_fetcher.cpp
     src/network/continuous_validator.cpp
+    src/network/config_db_store.cpp
     src/network/proxy_tester.cpp
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp
@@ -252,6 +256,9 @@ target_include_directories(hunter_core PUBLIC ${HUNTER_EMBED_INCLUDE_DIR})
 
 # Add embedded config header include dir (always — stub or real, config_embed.cpp needs it).
 target_include_directories(hunter_core PUBLIC ${HUNTER_CONFIG_EMBED_INCLUDE_DIR})
+
+# ─── Country Database Support (Stage 4 Batch C) ───
+include(cmake/country.cmake)
 
 # Static link C++ runtime
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
@@ -337,9 +344,19 @@ add_executable(test_embed
 target_link_options(test_embed PRIVATE -static-libgcc -static-libstdc++)
 target_link_libraries(test_embed PRIVATE hunter_core)
 
+# Stage 4 A1 unit suites (pure logic, no network)
+foreach(_t test_endpoint_key test_health_score test_config_db_v4)
+    add_executable(${_t} tests/${_t}.cpp)
+    target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(${_t} PRIVATE hunter_core)
+endforeach()
+
 # CTest registration
 enable_testing()
 add_test(NAME hunter_tests COMMAND hunter_tests)
+add_test(NAME test_endpoint_key COMMAND test_endpoint_key)
+add_test(NAME test_health_score COMMAND test_health_score)
+add_test(NAME test_config_db_v4 COMMAND test_config_db_v4)
 add_test(NAME test_embed COMMAND test_embed)
 
 # Install targets
