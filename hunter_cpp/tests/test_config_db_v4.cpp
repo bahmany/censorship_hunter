@@ -2,6 +2,8 @@
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
+#include <atomic>
+#include <thread>
 #include <unistd.h>
 
 #include "core/db_format.h"
@@ -171,7 +173,12 @@ int main() {
         db.updateHealth(u, false, 0.0f, "", true);
         ConfigHealthRecord r;
         db.getRecord(u, &r);
-        CHECK(!r.alive && r.ev.state == HealthState::Dead, "force_dead");
+        CHECK(!r.alive && r.ev.state != HealthState::Dead && r.legacy_fails >= 3, "force_dead: legacy hint only, no fabricated evidence");
+        std::string why;
+        CHECK(evidenceConsistent(r.ev, db.thresholds(), &why), why);
+        db.saveToDisk(P("fd.tsv"));
+        ConfigDatabase fd; setup(fd);
+        CHECK(fd.loadFromDisk(P("fd.tsv")) == db.size(), "forced-dead record survives save/reload");
         std::string tg = "vless://tg@host:444";
         db.addConfigs({tg});
         db.updateHealth(tg, true, 300.0f, "", false, true);
@@ -245,16 +252,20 @@ int main() {
         db2.getRecord(a, &y);
         CHECK(y.tag == x.tag && y.tag.find('\t') != std::string::npos, "tag escaping roundtrip");
         CHECK(y.ev.state == x.ev.state && y.ev.eligible_count == x.ev.eligible_count &&
-              y.ev.success_streak == x.ev.success_streak && y.ev.ring.size() == x.ev.ring.size(), "evidence");
+              y.ev.ring.size() == x.ev.ring.size() && y.needs_retest, "evidence + retest required after restart");
+        CHECK(y.ev.success_streak == 0 && y.ev.last_bulk_success == 0.0 && !y.ev.session_confirmed, "session confirmation dropped on load");
+        CHECK(db2.evaluate(y).stability != Stability::Stable && !db2.evaluate(y).switch_eligible, "loaded Stable is not certified");
         CHECK(y.ev.ring.size() == 8 && y.ev.ring.front().id == x.ev.ring.front().id && y.ev.ring.front().id.find('"') != std::string::npos, "ring ids with quotes");
         CHECK(y.ev.ring.back().latency_ms == x.ev.ring.back().latency_ms && y.ev.last_full_success == x.ev.last_full_success, "ring latencies");
         CHECK(y.server_country == "NL" && y.server_ips.size() == 2 && y.exit_country == "DE" && y.network_generation == 3 &&
               y.geo_db_version == "2026-09" && y.exit_ip == "5.6.7.8", "country columns");
-        CHECK(db2.evaluate(y).score == db.evaluate(x).score, "derived score recomputed identically");
+        CHECK(db2.evaluate(y).ewma == db.evaluate(x).ewma && db2.evaluate(y).p90_ms == db.evaluate(x).p90_ms, "S and p90 recomputed identically");
         db2.getRecord(b, &y);
         CHECK(y.ev.insecure_tls && y.ev.state == HealthState::Degraded, "static attrs from URI + state");
         // save again -> byte-identical (deterministic)
-        CHECK(db2.saveToDisk(P("rt2.tsv")) == 2 && slurp(P("rt2.tsv")) == text, "deterministic re-save");
+        CHECK(db2.saveToDisk(P("rt2.tsv")) == 2, "re-save");
+        ConfigDatabase db2b; setup(db2b);
+        CHECK(db2b.loadFromDisk(P("rt2.tsv")) == 2 && db2b.saveToDisk(P("rt3.tsv")) == 2 && slurp(P("rt3.tsv")) == slurp(P("rt2.tsv")), "load/save is a fixed point");
         ConfigDatabase::CountryUpdate bad;
         CHECK(!db.applyCountryResult("ek1:nope", bad), "unknown key");
     }
@@ -267,15 +278,13 @@ int main() {
         v3 += v3Row(vless(1), "scrape", 1000.0, 1, 150.0, 7, 5);
         v3 += v3Row(vless(2), "harvest", 2000.0, 0, 0.0, 3, 0, 3);
         v3 += v3Row("vless://" + uuid(1) + "@1.2.3.4:443?type=ws&path=/p#dup", "later", 500.0, 0, 0.0, 9, 2);
-        v3 += "garbage line without tabs\n";
-        v3 += "not-a-uri\tx\ty\t1\t1\t1\t1\t0\t1\t0\t1\t1\t-1\t0\n";
         v3 += "#comment\n\n";
         spit(P("m.tsv"), v3);
         ConfigDatabase db;
         setup(db);
         CHECK(db.loadFromDisk(P("m.tsv")) == 2, "2 canonical endpoints survive (dup merged)");
         auto rep = db.lastLoadReport();
-        CHECK(rep.ok && rep.migrated && rep.source_version == 3 && rep.rejected == 2, "report: migrated, 2 junk rows rejected");
+        CHECK(rep.ok && rep.migrated && rep.source_version == 3 && rep.rejected == 0, "report: migrated, nothing rejected");
         CHECK(rep.error.empty(), rep.error);
         CHECK(slurp(P("m.tsv.v3.bak")) == v3, ".v3.bak is the byte-exact original");
         std::string nowv4 = slurp(P("m.tsv"));
@@ -305,7 +314,9 @@ int main() {
         ConfigDatabase db3;
         setup(db3);
         db3.loadFromDisk(P("m2.tsv"));
-        CHECK(slurp(P("m2.tsv.v3.bak")) == "OLDER BACKUP", "existing backup preserved");
+        CHECK(slurp(P("m2.tsv.v3.bak")) == "OLDER BACKUP", "unrelated existing backup preserved");
+        CHECK(slurp(P("m2.tsv.v3.bak.1")) == v3 && db3.lastLoadReport().backup_path == P("m2.tsv.v3.bak.1"), "current original gets its own exclusive backup");
+        CHECK(slurp(P("m2.tsv")).compare(0, 20, "#HUNTER_CONFIG_DB_V4") == 0, "migrated after safe backup");
     }
     T_END();
 
@@ -499,6 +510,171 @@ int main() {
         char buf[16] = {0};
         if (f) { if (!fgets(buf, sizeof buf, f)) buf[0] = 0; pclose(f); }
         CHECK(std::string(buf).compare(0, 3, "600") == 0, std::string("restrictive permissions, got ") + buf);
+    }
+    T_END();
+
+    T_CASE("migration with rejected rows never replaces the only original");
+    {
+        std::string bad = "#HUNTER_CONFIG_DB_V3\n" + v3Row(vless(1), "t", 1.0, 1, 5.0, 1, 1) +
+                          vless(2) + "\tt\txray\tinvalid\t2\t2\t1\t0\t100\t0\t1\t1\t-1\t0\n";
+        spit(P("rj.tsv"), bad);
+        spit(P("rj.tsv.v3.bak"), "unrelated prior backup\n");
+        ConfigDatabase db; setup(db);
+        CHECK(db.loadFromDisk(P("rj.tsv")) == 1, "valid row still usable in memory");
+        auto rep = db.lastLoadReport();
+        CHECK(rep.ok && !rep.migrated && rep.rejected == 1 && !rep.error.empty(), "migration refused visibly");
+        CHECK(slurp(P("rj.tsv")) == bad && slurp(P("rj.tsv.v3.bak")) == "unrelated prior backup\n", "original and stale backup untouched");
+        CHECK(db.saveToDisk(P("rj.tsv")) == 1, "explicit save later");
+        CHECK(slurp(P("rj.tsv.v3.bak.1")) == bad, "explicit save backs the original up first (no clobbered stale backup)");
+        // V4 file with a rejected row: bytes preserved before any later save drops it
+        ConfigDatabase a; setup(a); a.addConfigs({vless(1), vless(2)});
+        a.saveToDisk(P("v4rej.tsv"));
+        std::string t = slurp(P("v4rej.tsv"));
+        spit(P("v4rej.tsv"), t + "garbage\trow\n");
+        ConfigDatabase b; setup(b);
+        CHECK(b.loadFromDisk(P("v4rej.tsv")) == 2 && b.lastLoadReport().rejected == 1, "rejection counted");
+        CHECK(slurp(b.lastLoadReport().backup_path) == t + "garbage\trow\n", "rejected rows backed up byte-exact");
+    }
+    T_END();
+
+    T_CASE("every saved row reloads; oversized text is capped, never lost");
+    {
+        ConfigDatabase db; setup(db);
+        db.addConfigs({vless(1)}, std::string(kMaxRowBytes + 10, 'x'));
+        db.updateHealth(vless(1), true, 100.0f);
+        NOW += 10;
+        db.updateHealth(vless(1), false, 0.0f, "", true);
+        CHECK(db.saveToDisk(P("long.tsv")) == 1, "save ok");
+        ConfigDatabase x; setup(x);
+        CHECK(x.loadFromDisk(P("long.tsv")) == 1 && x.lastLoadReport().rejected == 0, "reload ok");
+        // a row the format cannot represent makes the save refuse instead of publishing it
+        ConfigDatabase y; setup(y);
+        y.addConfigs({vless(1)});
+        ConfigHealthRecord r; y.getRecord(vless(1), &r);
+        ProbeResult pr = passFor(vless(1), NOW - 1);
+        pr.engine = std::string(kMaxRowBytes + 10, 'e');  // engine name is stored in the row
+        y.applyProbeResult(pr);
+        int sv = y.saveToDisk(P("long2.tsv"));
+        ConfigDatabase z; setup(z);
+        CHECK(sv == -1 || z.loadFromDisk(P("long2.tsv")) == 1, "unloadable content is refused or round-trips");
+        NOW = 1.7e9;
+    }
+    T_END();
+
+    T_CASE("restart requires fresh confirmation; generation cannot bridge");
+    {
+        ConfigDatabase d; setup(d);
+        std::string u = vless(1);
+        d.addConfigs({u});
+        for (int i = 0; i < 6; i++) d.applyProbeResult(passFor(u, NOW - 300 + 60 * i));
+        ConfigHealthRecord r; d.getRecord(u, &r);
+        CHECK(d.evaluate(r).stable && d.evaluate(r).switch_eligible, "stable before restart");
+        d.saveToDisk(P("st.tsv"));
+        ConfigDatabase x; setup(x);
+        x.loadFromDisk(P("st.tsv"));
+        x.getRecord(u, &r);
+        CHECK(r.needs_retest && !x.evaluate(r).switch_eligible && !x.evaluate(r).stable, "loaded record needs a fresh probe");
+        CHECK(x.getRecommendedRecords().empty(), "not recommended until re-confirmed");
+        x.applyProbeResult(passFor(u, NOW));
+        x.getRecord(u, &r);
+        CHECK(x.evaluate(r).switch_eligible && !x.evaluate(r).stable, "one fresh pass: switchable, not Stable");
+        ProbeResult g = passFor(u, NOW + 15);
+        g.generation = 1;
+        d.applyProbeResult(passFor(u, NOW));  // keep d current
+        d.applyProbeResult(g);
+        g.finished_at = NOW + 30; g.started_at = NOW + 30; g.generation = 2;
+        NOW += 30;
+        d.applyProbeResult(g);
+        d.getRecord(u, &r);
+        CHECK(r.ev.success_streak == 1 && !d.evaluate(r).stable, "new generation cannot bridge a previous streak");
+        NOW = 1.7e9;
+    }
+    T_END();
+
+    T_CASE("excluded rounds keep configs schedulable (bounded backoff), unclassified legacy failures do not strand");
+    {
+        spit(P("retry.tsv"), "#HUNTER_CONFIG_DB_V3\n" + vless(1) + "\tt\txray\t1\t2\t0\t0\t0\t0\t3\t4\t0\t-1\t0\n");
+        ConfigDatabase d; setup(d);
+        d.loadFromDisk(P("retry.tsv"));
+        ProbeResult ex = passFor(vless(1), NOW);
+        ex.outcome = ProbeOutcome::Indeterminate;
+        d.applyProbeResult(ex);
+        CHECK(d.getUntestedBatch(10).empty(), "backoff: not hot-looping immediately");
+        NOW += 6;
+        auto b = d.getUntestedBatch(10);
+        CHECK(b.size() == 1 && b[0].needs_retest, "retryable again after the backoff; retest flag kept");
+        ex.finished_at = ex.started_at = NOW;
+        d.applyProbeResult(ex);
+        NOW += 6;
+        CHECK(d.getUntestedBatch(10).empty(), "backoff doubles (10 s)");
+        NOW += 5;
+        CHECK(d.getUntestedBatch(10).size() == 1, "still schedulable");
+        NOW = 1.7e9;
+    }
+    T_END();
+
+    T_CASE("legacy adapter: never-working configs are not alive; failures do not penalize evidence");
+    {
+        ConfigDatabase d; setup(d);
+        std::string u = vless(1);
+        d.addConfigs({u});
+        d.updateHealth(u, false, 0);
+        ConfigHealthRecord r; d.getRecord(u, &r);
+        CHECK(!r.alive && d.getAliveRecords().empty(), "first failure of a never-passing config: not alive");
+        CHECK(r.ev.eligible_count == 0 && r.ev.state == HealthState::Unknown, "no typed penalty from an unclassified failure");
+        NOW += 60;
+        d.updateHealth(u, true, 100);
+        d.getRecord(u, &r);
+        CHECK(r.alive && !d.getHealthyRecords().empty(), "working recovery visible");
+        for (int i = 0; i < 3; i++) { NOW += 1; d.updateHealth(u, false, 0); }
+        d.getRecord(u, &r);
+        CHECK(!r.alive && r.ev.state == HealthState::Healthy, "legacy alive hint drops, typed state untouched");
+        NOW = 1.7e9;
+    }
+    T_END();
+
+    T_CASE("Dead retention counts from entering Dead, only attributed Dead is removed");
+    {
+        ConfigDatabase d; setup(d);
+        std::string u = vless(1), w = vless(2);
+        d.addConfigs({u, w});
+        d.applyProbeResult(passFor(u, NOW - 4 * 86400));
+        for (double t : {0.0, 15.0, 30.0}) d.applyProbeResult(failFor(u, NOW - 60 + t));
+        CHECK(d.evictDead() == 0 && d.removeDeadLive(1) == 0, "freshly Dead record kept despite 4-day-old success");
+        ConfigHealthRecord r; d.getRecord(u, &r);
+        CHECK(r.ev.dead_since == NOW - 30, "dead_since persisted value");
+        d.saveToDisk(P("dead.tsv"));
+        ConfigDatabase x; setup(x); x.loadFromDisk(P("dead.tsv"));
+        x.getRecord(u, &r);
+        CHECK(r.ev.state == HealthState::Dead && r.ev.dead_since == NOW - 30, "dead_since survives reload");
+        NOW += 72 * 3600 + 31;
+        CHECK(d.removeDeadLive(1) == 1, "removed after 72 h in Dead");
+        // legacy-adapter failures never create an evictable Dead record
+        ConfigDatabase l; setup(l);
+        l.addConfigs({u});
+        l.updateHealth(u, true, 10);
+        NOW += 5 * 86400;
+        for (int i = 0; i < 4; i++) { NOW += 1; l.updateHealth(u, false, 0, "", true); }
+        CHECK(l.evictDead() == 0 && l.removeDeadLive(1) == 0 && l.size() == 1, "outage via legacy callers cannot mass-evict");
+        NOW = 1.7e9;
+    }
+    T_END();
+
+    T_CASE("concurrent saves to one path from separate instances (unique temps, no corruption)");
+    {
+        std::vector<std::thread> ts;
+        std::atomic<int> bad{0};
+        for (int k = 0; k < 4; k++)
+            ts.emplace_back([&, k] {
+                ConfigDatabase d;
+                d.setClock([]() { return 1.7e9; });
+                d.addConfigs({vless(k + 1)});
+                for (int i = 0; i < 25; i++) if (d.saveToDisk(P("conc.tsv")) != 1) bad++;
+            });
+        for (auto& t : ts) t.join();
+        ConfigDatabase x; setup(x);
+        CHECK(bad == 0 && x.loadFromDisk(P("conc.tsv")) == 1 && x.lastLoadReport().rejected == 0, "file valid after concurrent writers");
+        CHECK(!exists(P("conc.tsv.tmp")), "no fixed-name temp");
     }
     T_END();
 

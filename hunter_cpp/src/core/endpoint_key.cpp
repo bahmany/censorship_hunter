@@ -126,6 +126,116 @@ bool truthy(const std::string& v) {
     return l == "1" || l == "true" || l == "yes" || l == "on";
 }
 
+
+// Percent-decoding of credentials, done exactly once; '+' is NOT a space; case preserved.
+std::string pctDecode(const std::string& in) {
+    std::string o;
+    for (size_t i = 0; i < in.size(); i++) {
+        if (in[i] == '%' && i + 2 < in.size() + 0 && isHex(in[i + 1]) && isHex(in[i + 2])) {
+            o.push_back(char(std::stoi(in.substr(i + 1, 2), nullptr, 16)));
+            i += 2;
+        } else o.push_back(in[i]);
+    }
+    return o;
+}
+
+// Flat JSON object reader (strings/numbers/bool/null only). Returns false for anything else.
+bool flatJson(const std::string& s, std::map<std::string, std::string>* out) {
+    size_t i = 0;
+    auto ws = [&]() { while (i < s.size() && std::isspace((unsigned char)s[i])) i++; };
+    auto str = [&](std::string* o) {
+        if (i >= s.size() || s[i] != '"') return false;
+        i++;
+        o->clear();
+        while (i < s.size() && s[i] != '"') {
+            if (s[i] == '\\') {
+                if (++i >= s.size()) return false;
+                char e = s[i];
+                if (e == '"' || e == '\\' || e == '/') o->push_back(e);
+                else if (e == 'n') o->push_back('\n');
+                else if (e == 't') o->push_back('\t');
+                else if (e == 'r') o->push_back('\r');
+                else if (e == 'u') {
+                    if (i + 4 >= s.size()) return false;
+                    unsigned v = 0;
+                    for (int k = 1; k <= 4; k++) { if (!isHex(s[i + k])) return false; v = v * 16 + std::stoi(std::string(1, s[i + k]), nullptr, 16); }
+                    if (v > 0x7f) return false;
+                    o->push_back(char(v));
+                    i += 4;
+                } else return false;
+                i++;
+            } else o->push_back(s[i++]);
+        }
+        if (i >= s.size()) return false;
+        i++;
+        return true;
+    };
+    ws();
+    if (i >= s.size() || s[i] != '{') return false;
+    i++;
+    ws();
+    if (i < s.size() && s[i] == '}') { return ++i, ws(), i == s.size(); }
+    while (true) {
+        ws();
+        std::string k, v;
+        if (!str(&k)) return false;
+        ws();
+        if (i >= s.size() || s[i] != ':') return false;
+        i++;
+        ws();
+        if (i < s.size() && s[i] == '"') { if (!str(&v)) return false; }
+        else {
+            size_t st = i;
+            while (i < s.size() && s[i] != ',' && s[i] != '}' && !std::isspace((unsigned char)s[i])) i++;
+            v = s.substr(st, i - st);
+            if (v.empty() || v == "{" || v[0] == '[' || v[0] == '{') return false;
+            if (v == "null") v.clear();
+        }
+        if (out->count(k)) return false;  // duplicate key: ambiguous
+        (*out)[k] = v;
+        ws();
+        if (i < s.size() && s[i] == ',') { i++; continue; }
+        if (i < s.size() && s[i] == '}') { i++; ws(); return i == s.size(); }
+        return false;
+    }
+}
+
+// Strict authority split for URI-style protocols: returns false if malformed.
+bool splitHostPort(const std::string& uri, std::string* host, std::string* port_text, bool* has_port) {
+    size_t p = uri.find("://");
+    if (p == std::string::npos) return false;
+    std::string rest = uri.substr(p + 3);
+    size_t cut = rest.find_first_of("?#");
+    if (cut != std::string::npos) rest = rest.substr(0, cut);
+    size_t at = rest.rfind('@');
+    if (at == std::string::npos) return false;
+    std::string hp = rest.substr(at + 1);
+    if (hp.find('/') != std::string::npos) hp = hp.substr(0, hp.find('/'));
+    *has_port = false;
+    if (hp.empty()) return false;
+    if (hp[0] == '[') {
+        size_t rb = hp.find(']');
+        if (rb == std::string::npos) return false;
+        *host = hp.substr(1, rb - 1);
+        std::string tail = hp.substr(rb + 1);
+        if (tail.empty()) return true;
+        if (tail[0] != ':') return false;
+        *port_text = tail.substr(1);
+        *has_port = true;
+    } else {
+        size_t c = hp.rfind(':');
+        if (c == std::string::npos) { *host = hp; return true; }
+        *host = hp.substr(0, c);
+        *port_text = hp.substr(c + 1);
+        *has_port = true;
+    }
+    if (*has_port) {
+        if (port_text->empty() || port_text->size() > 5) return false;
+        for (char ch : *port_text) if (ch < '0' || ch > '9') return false;
+    }
+    return !host->empty();
+}
+
 }  // namespace
 
 std::string sha256Hex(const std::string& data) {
@@ -198,11 +308,28 @@ EndpointKey computeEndpointKey(const std::string& uri) {
 
     const std::string proto = canonicalProtocol(pc.protocol);
     std::string host;
-    if (proto.empty() || !canonicalHost(pc.address, &host)) return finish_raw();
-    if (pc.port < 1 || pc.port > 65535) return finish_raw();
+    int port = pc.port;
+    std::string host_in = pc.address;
+    if (proto.empty()) return finish_raw();
+    const bool is_vmess = (proto == "vmess");
+    if (!is_vmess) {
+        // Strict authority parse (ss base64 form without '@' falls back to the shared parser).
+        std::string h, pt;
+        bool hp = false;
+        const bool need_strict = uri.find('@') != std::string::npos;
+        if (need_strict) {
+            if (!splitHostPort(utils::trim(uri), &h, &pt, &hp)) return finish_raw();
+            host_in = h;
+            if (hp) port = std::stoi(pt);
+            else if (proto != "hysteria2") return finish_raw();
+        }
+    }
+    if (!canonicalHost(host_in, &host)) return finish_raw();
+    if (port < 1 || port > 65535) return finish_raw();
 
-    // Credential identity: UUID protocols fold case; passwords/auth stay case-sensitive.
+    // Credential identity: percent-decoded once (case kept); UUID protocols fold case.
     std::string cred = pc.uuid;
+    if (proto == "vless" || proto == "trojan" || proto == "hysteria2" || proto == "tuic") cred = pctDecode(cred);
     if (proto == "vmess" || proto == "vless" || proto == "tuic") {
         std::string u;
         if (canonicalUuid(cred, &u)) cred = u;
@@ -217,31 +344,57 @@ EndpointKey computeEndpointKey(const std::string& uri) {
         if (vv != dflt) opts[k] = vv;
     };
 
-    const bool is_tls_default = (proto == "trojan" || proto == "hysteria2" || proto == "tuic");
-    put_default("security", lowerAscii(pc.security), is_tls_default ? "tls" : "none");
-    put_default("transport", lowerAscii(pc.network), "tcp");
-    put_default("headertype", lowerAscii(pc.type), "none");
-    std::string enc_default = proto == "vmess" ? "auto" : (proto == "vless" ? "none" : "");
-    put_default("cipher", lowerAscii(pc.encryption), enc_default);
-    put("sni", lowerAscii(pc.sni));
-    put("host", lowerAscii(pc.host));
-    put("path", pc.path);
-    put("flow", lowerAscii(pc.flow));
-    put("fp", lowerAscii(pc.fingerprint));
-    put("pbk", pc.public_key);
-    put("sid", pc.short_id);
-    for (const auto& [k, v] : pc.extra) {
-        if (k == "ps") continue;
-        put("x." + k, v);
-    }
+    if (is_vmess) {
+        // Every connection-affecting JSON field is retained (the shared parser drops several).
+        std::string payload = utils::trim(uri).substr(8);
+        auto hp = payload.find('#');
+        if (hp != std::string::npos) payload = payload.substr(0, hp);
+        std::map<std::string, std::string> j;
+        if (!flatJson(utils::base64Decode(payload), &j)) return finish_raw();
+        auto get = [&](const char* k) { auto it = j.find(k); return it == j.end() ? std::string() : it->second; };
+        put_default("security", lowerAscii(get("tls")), "none");
+        if (opts.count("security") && opts["security"] == "") opts.erase("security");
+        put_default("transport", lowerAscii(get("net")), "tcp");
+        put_default("headertype", lowerAscii(get("type")), "none");
+        put_default("cipher", lowerAscii(get("scy")), "auto");
+        put("sni", lowerAscii(get("sni")));
+        put("host", lowerAscii(get("host")));
+        put("path", get("path"));
+        put("fp", lowerAscii(get("fp")));
+        put("alpn", lowerAscii(get("alpn")));
+        std::string aid = get("aid");
+        if (!aid.empty() && aid != "0") opts["aid"] = aid;
+        for (const char* k : {"allowInsecure", "allowinsecure", "insecure"})
+            if (truthy(get(k))) opts["insecure"] = "1";
+        static const std::set<std::string> handled = {"v", "ps", "add", "port", "id", "tls", "net", "type", "scy", "sni",
+                                                      "host", "path", "fp", "alpn", "aid", "allowInsecure",
+                                                      "allowinsecure", "insecure"};
+        for (const auto& [k, v] : j)
+            if (!handled.count(k) && !v.empty()) opts["j." + k] = v;
+    } else {
+        const bool is_tls_default = (proto == "trojan" || proto == "hysteria2" || proto == "tuic");
+        put_default("security", lowerAscii(pc.security), is_tls_default ? "tls" : "none");
+        put_default("transport", lowerAscii(pc.network), "tcp");
+        put_default("headertype", lowerAscii(pc.type), "none");
+        std::string enc_default = proto == "vless" ? "none" : "";
+        put_default("cipher", lowerAscii(pc.encryption), enc_default);
+        put("sni", lowerAscii(pc.sni));
+        put("host", lowerAscii(pc.host));
+        put("path", pc.path);
+        put("flow", lowerAscii(pc.flow));
+        put("fp", lowerAscii(pc.fingerprint));
+        put("pbk", pc.public_key);
+        put("sid", pc.short_id);
+        for (const auto& [k, v] : pc.extra) {
+            if (k == "ps") continue;
+            put("x." + k, k == "password" ? pctDecode(v) : v);
+        }
 
-    // Retain query options the parser does not consume (alpn, obfs, plugin, insecure, ...).
-    std::set<std::string> consumed;
-    if (proto == "vless") consumed = {"encryption", "security", "type", "sni", "host", "path", "fp", "pbk", "sid", "flow"};
-    else if (proto == "trojan") consumed = {"security", "type", "sni", "host", "path", "fp"};
-    else if (proto == "hysteria2" || proto == "tuic") consumed = {"sni"};
-    std::string raw = utils::trim(uri);
-    if (proto != "vmess") {
+        std::set<std::string> consumed;
+        if (proto == "vless") consumed = {"encryption", "security", "type", "sni", "host", "path", "fp", "pbk", "sid", "flow"};
+        else if (proto == "trojan") consumed = {"security", "type", "sni", "host", "path", "fp"};
+        else if (proto == "hysteria2" || proto == "tuic") consumed = {"sni"};
+        std::string raw = utils::trim(uri);
         auto hp = raw.find('#');
         if (hp != std::string::npos) raw = raw.substr(0, hp);
         auto qp = raw.find('?');
@@ -263,6 +416,11 @@ EndpointKey computeEndpointKey(const std::string& uri) {
                     if (truthy(v)) opts["insecure"] = "1";
                     continue;
                 }
+                if (kl == "headertype") {  // documented alias of the header type; "none" is the default
+                    std::string hv = lowerAscii(v);
+                    if (!hv.empty() && hv != "none") opts["headertype"] = hv;
+                    continue;
+                }
                 if (kl == "alpn") v = lowerAscii(v);
                 opts["q." + k] = v;
             }
@@ -273,8 +431,8 @@ EndpointKey computeEndpointKey(const std::string& uri) {
     ek.valid = true;
     ek.protocol = proto;
     ek.host = host;
-    ek.port = pc.port;
-    ek.canonical = "EKV1;" + lp(proto) + lp(host) + lp(std::to_string(pc.port)) + lp(cred);
+    ek.port = port;
+    ek.canonical = "EKV1;" + lp(proto) + lp(host) + lp(std::to_string(port)) + lp(cred);
     for (const auto& [k, v] : opts) ek.canonical += lp(k) + lp(v);
     ek.key = "ek1:" + sha256Hex(ek.canonical);
     return ek;

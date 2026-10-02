@@ -223,7 +223,7 @@ int main() {
         HealthEvidence q;
         applyProbe(q, pass(0.0), TH);
         CHECK(applyProbe(q, fail(10.0, ProbeOutcome::Partial), TH) == ApplyEffect::Excluded, "default partial excluded from ring");
-        CHECK(q.state == HealthState::Degraded && q.failure_streak == 0 && q.success_streak == 0, "partial -> Degraded, no death increment");
+        CHECK(q.state == HealthState::Degraded && q.failure_streak == 0 && q.success_streak == 1, "partial -> Degraded (display only), no death increment, certification evidence frozen");
     }
     T_END();
 
@@ -281,6 +281,7 @@ int main() {
         auto crafted = [](int fails) {
             HealthEvidence x;
             x.state = HealthState::Healthy;
+            x.session_confirmed = true;
             x.eligible_count = fails + 6;
             x.success_streak = 6;
             x.streak_started_at = 1000.0;
@@ -338,6 +339,112 @@ int main() {
         CHECK(!evidenceConsistent(b, TH, &why), "eligible < ring");
         b = e; b.failure_streak = 1; b.failure_streak_started_at = 5;
         CHECK(!evidenceConsistent(b, TH, &why), "both streaks");
+    }
+    T_END();
+
+    T_CASE("excluded run ids are remembered (cannot be re-applied as Pass)");
+    {
+        HealthEvidence e;
+        ProbeResult x = fail(100.0, ProbeOutcome::Indeterminate);
+        x.run_id = "excluded-run";
+        CHECK(applyProbe(e, x, TH) == ApplyEffect::Excluded, "excluded");
+        x.outcome = ProbeOutcome::Pass; x.latency_ms = 10; x.finished_at = 101;
+        CHECK(applyProbe(e, x, TH) == ApplyEffect::Duplicate, "same id rejected afterwards");
+        for (int i = 0; i < 100; i++) { ProbeResult y = fail(200.0 + i, ProbeOutcome::Cancelled); y.run_id = "c" + std::to_string(i); applyProbe(e, y, TH); }
+        CHECK(e.recent_ids.size() == TH.recent_id_capacity, "identity memory is bounded");
+    }
+    T_END();
+
+    T_CASE("Partial freezes certification; recovery tracked separately from the stability run");
+    {
+        HealthEvidence e;
+        for (int i = 0; i < 6; i++) applyProbe(e, pass(1000.0 + 60.0 * i, 200, true), TH);
+        applyProbe(e, fail(1310.0, ProbeOutcome::Partial), TH);  // unattributed
+        CHECK(e.state == HealthState::Degraded && e.success_streak == 6 && e.streak_started_at == 1000.0, "stability run frozen");
+        applyProbe(e, pass(1320.0, 200, true), TH);
+        CHECK(e.state == HealthState::Degraded && e.success_streak == 7, "first recovery pass: Degraded, qualifying pass still counted");
+        applyProbe(e, pass(1334.9, 200, true), TH);
+        CHECK(e.state == HealthState::Degraded, "14.9 s: still Degraded");
+        applyProbe(e, pass(1335.0, 200, true), TH);
+        CHECK(e.state == HealthState::Healthy && e.success_streak == 9, "recovered without discarding passes");
+        // recovery from a real failure: both passes count toward the stability run
+        HealthEvidence f;
+        applyProbe(f, fail(100.0), TH);
+        applyProbe(f, pass(110.0), TH);
+        applyProbe(f, pass(125.0), TH);
+        CHECK(f.state == HealthState::Healthy && f.success_streak == 2 && f.streak_started_at == 110.0, "streak keeps recovery passes");
+        // stability gap rule applies in every state
+        HealthEvidence g;
+        applyProbe(g, fail(100.0), TH);
+        applyProbe(g, pass(110.0), TH);
+        applyProbe(g, pass(300.0), TH);
+        CHECK(g.success_streak == 1 && g.streak_started_at == 300.0, "gap >90 s restarts the run even while recovering");
+    }
+    T_END();
+
+    T_CASE("generation change and restart drop session certification");
+    {
+        HealthEvidence e;
+        for (int i = 0; i < 6; i++) { ProbeResult p = pass(1000.0 + 60.0 * i, 200, true); p.generation = 1; applyProbe(e, p, TH); }
+        CHECK(ev(e, 1300.0).stable, "stable in generation 1");
+        ProbeResult n = pass(1315.0, 200, true);
+        n.generation = 2;
+        applyProbe(e, n, TH);
+        CHECK(e.success_streak == 1 && !ev(e, 1315.0).stable && e.last_bulk_success == 1315.0, "new generation starts a new run");
+        CHECK(e.ring.size() == 7, "history ring retained for display");
+        HealthEvidence r = e;
+        resetSessionEvidence(r);
+        CHECK(!r.session_confirmed && r.success_streak == 0 && r.last_bulk_success == 0.0 && !ev(r, 1316.0).switch_eligible, "restart reset");
+        CHECK(!r.ring.empty() && r.last_full_success > 0, "history kept");
+        applyProbe(r, pass(1400.0), TH);
+        CHECK(r.session_confirmed && ev(r, 1400.0).switch_eligible, "fresh pass re-confirms");
+    }
+    T_END();
+
+    T_CASE("dead_since is set on entering Dead and cleared on recovery");
+    {
+        HealthEvidence e;
+        applyProbe(e, pass(1000.0), TH);
+        for (double t : {5000.0, 5015.0, 5030.0}) applyProbe(e, fail(t), TH);
+        CHECK(e.state == HealthState::Dead && e.dead_since == 5030.0, "dead_since = entry time, not last success");
+        std::string why;
+        CHECK(evidenceConsistent(e, TH, &why), why);
+        applyProbe(e, pass(6000.0), TH);
+        CHECK(e.dead_since == 0.0 && e.state == HealthState::Degraded, "cleared");
+    }
+    T_END();
+
+    T_CASE("evidence stays internally consistent under arbitrary sequences (fuzz)");
+    {
+        unsigned seed = 12345;
+        auto rnd = [&]() { seed = seed * 1664525u + 1013904223u; return (seed >> 8) & 0xFFFF; };
+        const ProbeOutcome outs[] = {ProbeOutcome::Pass, ProbeOutcome::RemoteFailure, ProbeOutcome::Partial,
+                                     ProbeOutcome::LocalNetworkDown, ProbeOutcome::Indeterminate, ProbeOutcome::EngineError,
+                                     ProbeOutcome::BindConflict, ProbeOutcome::Unsupported, ProbeOutcome::InvalidConfig,
+                                     ProbeOutcome::Cancelled};
+        bool all_ok = true;
+        std::string why;
+        for (int run = 0; run < 200 && all_ok; run++) {
+            HealthEvidence e;
+            double t = 1000.0;
+            uint64_t gen = 1;
+            for (int i = 0; i < 80; i++) {
+                t += (rnd() % 4 == 0) ? 200.0 : double(rnd() % 40);
+                if (rnd() % 25 == 0) gen++;
+                ProbeResult r;
+                r.outcome = outs[rnd() % 10];
+                r.finished_at = r.started_at = t;
+                r.latency_ms = double(rnd() % 4000);
+                r.bulk_passed = rnd() % 2;
+                r.attributable = rnd() % 3 != 0;
+                r.generation = gen;
+                if (rnd() % 5 == 0) r.run_id = "id" + std::to_string(rnd() % 30);
+                applyProbe(e, r, TH);
+                if (!evidenceConsistent(e, TH, &why)) { all_ok = false; break; }
+                if (rnd() % 40 == 0) resetSessionEvidence(e);
+            }
+        }
+        CHECK(all_ok, "inconsistent evidence produced: " + why);
     }
     T_END();
 

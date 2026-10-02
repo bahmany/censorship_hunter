@@ -56,29 +56,49 @@ static void pushSample(HealthEvidence& ev, const ProbeSample& s, const HealthThr
     while (ev.ring.size() > cap) ev.ring.pop_front();
 }
 
+void resetSessionEvidence(HealthEvidence& ev) {
+    ev.success_streak = 0;
+    ev.streak_started_at = 0.0;
+    ev.last_bulk_success = 0.0;
+    ev.recovery_anchor = 0.0;
+    ev.session_confirmed = false;
+    ev.recent_ids.clear();
+}
+
+static void rememberId(HealthEvidence& ev, const std::string& id, const HealthThresholds& th) {
+    if (id.empty()) return;
+    ev.recent_ids.push_back(id);
+    while (ev.recent_ids.size() > th.recent_id_capacity) ev.recent_ids.pop_front();
+}
+
 ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThresholds& th) {
     if (!finiteNonNeg(r.finished_at)) return ApplyEffect::Rejected;
     if (r.outcome == ProbeOutcome::Pass && !finiteNonNeg(r.latency_ms)) return ApplyEffect::Rejected;
     if (r.generation != 0 && r.generation < ev.generation) return ApplyEffect::Stale;
     if (!r.run_id.empty()) {
+        for (const auto& id : ev.recent_ids) if (id == r.run_id) return ApplyEffect::Duplicate;
         for (const auto& s : ev.ring) if (s.id == r.run_id) return ApplyEffect::Duplicate;
     }
     if (ev.last_attempt_at > 0.0 && r.finished_at < ev.last_attempt_at) return ApplyEffect::Stale;
 
-    if (r.generation > ev.generation) ev.generation = r.generation;
+    if (r.generation > ev.generation) {
+        // A new network/engine generation cannot reuse the previous session's certification.
+        if (ev.generation != 0) resetSessionEvidence(ev);
+        ev.generation = r.generation;
+    }
+    rememberId(ev, r.run_id, th);
     ev.last_attempt_at = r.finished_at;
     ev.last_outcome = outcomeName(r.outcome);
     if (r.bulk_passed && r.outcome == ProbeOutcome::Pass) ev.last_bulk_success = r.finished_at;
 
     if (!isEligibleResult(r)) {
-        // Partial that is not attributable still means "not a full pass": Degraded, and the
-        // success run is broken. It never touches counters, ring or the failure streak.
-        if (r.outcome == ProbeOutcome::Partial) {
-            if (ev.state == HealthState::Healthy || ev.state == HealthState::Unknown ||
-                ev.state == HealthState::Testing)
-                ev.state = HealthState::Degraded;
-            ev.success_streak = 0;
-            ev.streak_started_at = 0.0;
+        // Excluded evidence is frozen: counters, ring, streaks and certification are untouched.
+        // A non-attributable Partial only degrades the displayed state (and restarts recovery).
+        if (r.outcome == ProbeOutcome::Partial &&
+            (ev.state == HealthState::Healthy || ev.state == HealthState::Unknown ||
+             ev.state == HealthState::Testing)) {
+            ev.state = HealthState::Degraded;
+            ev.recovery_anchor = 0.0;
         }
         return ApplyEffect::Excluded;
     }
@@ -91,9 +111,8 @@ ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThr
         s.success = true;
         s.latency_ms = r.latency_ms;
         pushSample(ev, s, th);
-        // Gap rule: an over-long gap between full successes restarts the run.
-        // (Recovery from a non-Healthy state ignores the gap rule; see below.)
-        if (ev.state == HealthState::Healthy && ev.success_streak > 0 && ev.last_full_success > 0.0 &&
+        // Stability run: restarted solely by its own gap rule.
+        if (ev.success_streak > 0 && ev.last_full_success > 0.0 &&
             r.finished_at - ev.last_full_success > th.stable_max_gap_s) {
             ev.success_streak = 0;
         }
@@ -102,21 +121,23 @@ ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThr
         ev.last_full_success = r.finished_at;
         ev.failure_streak = 0;
         ev.failure_streak_started_at = 0.0;
+        ev.session_confirmed = true;
         switch (ev.state) {
             case HealthState::Unknown:
             case HealthState::Testing:
             case HealthState::Healthy:
                 ev.state = HealthState::Healthy;
+                ev.recovery_anchor = 0.0;
                 break;
             default:  // Degraded / Unstable / Dead: two full passes >= recovery gap apart
-                if (ev.success_streak >= 2 &&
-                    r.finished_at - ev.streak_started_at >= th.recovery_min_gap_s) {
+                if (ev.recovery_anchor > 0.0 && r.finished_at - ev.recovery_anchor >= th.recovery_min_gap_s) {
                     ev.state = HealthState::Healthy;
-                    // Stability evidence restarts from the recovery point.
-                    ev.success_streak = 1;
-                    ev.streak_started_at = r.finished_at;
-                } else
+                    ev.recovery_anchor = 0.0;
+                } else {
+                    if (ev.recovery_anchor <= 0.0) ev.recovery_anchor = r.finished_at;
                     ev.state = HealthState::Degraded;
+                }
+                ev.dead_since = 0.0;
                 break;
         }
     } else {
@@ -125,31 +146,22 @@ ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThr
         pushSample(ev, s, th);
         ev.success_streak = 0;
         ev.streak_started_at = 0.0;
+        ev.recovery_anchor = 0.0;
         if (ev.failure_streak == 0) ev.failure_streak_started_at = r.finished_at;
         ev.failure_streak++;
         const double span = r.finished_at - ev.failure_streak_started_at;
-        if (ev.failure_streak >= static_cast<uint32_t>(th.dead_failures) && span >= th.dead_min_span_s)
+        if (ev.state == HealthState::Dead) {
+            // only a recovery leaves Dead
+        } else if (ev.failure_streak >= static_cast<uint32_t>(th.dead_failures) && span >= th.dead_min_span_s) {
             ev.state = HealthState::Dead;
-        else if (ev.state == HealthState::Dead)
-            ev.state = HealthState::Dead;  // only a recovery leaves Dead
-        else if (ev.failure_streak >= static_cast<uint32_t>(th.unstable_failures))
+            ev.dead_since = r.finished_at;
+        } else if (ev.failure_streak >= static_cast<uint32_t>(th.unstable_failures)) {
             ev.state = HealthState::Unstable;
-        else
+        } else {
             ev.state = HealthState::Degraded;
+        }
     }
     return ApplyEffect::Applied;
-}
-
-void forceDead(HealthEvidence& ev, double now, const HealthThresholds& th) {
-    ev.state = HealthState::Dead;
-    ev.success_streak = 0;
-    ev.streak_started_at = 0.0;
-    if (ev.failure_streak < static_cast<uint32_t>(th.dead_failures))
-        ev.failure_streak = static_cast<uint32_t>(th.dead_failures);
-    if (ev.failure_streak_started_at <= 0.0 || now - ev.failure_streak_started_at < th.dead_min_span_s)
-        ev.failure_streak_started_at = now - th.dead_min_span_s;
-    if (ev.failure_streak_started_at < 0.0) ev.failure_streak_started_at = 0.0;
-    if (ev.eligible_count < ev.failure_streak) ev.eligible_count = ev.failure_streak;
 }
 
 bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, std::string* why) {
@@ -174,6 +186,7 @@ bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, st
         if (s.success && !finiteNonNeg(s.latency_ms)) return bad("ring latency invalid");
         prev = s.t;
     }
+    if (ev.state != HealthState::Dead && ev.dead_since != 0.0) return bad("dead_since outside Dead");
     bool any_success = false;
     for (const auto& s : ev.ring) any_success |= s.success;
     if (any_success && ev.last_full_success <= 0.0) return bad("ring success without last_full_success");
@@ -187,6 +200,7 @@ bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, st
             break;
         case HealthState::Dead:
             if (ev.failure_streak < static_cast<uint32_t>(th.dead_failures)) return bad("dead without failures");
+            if (!(ev.dead_since > 0.0) || ev.dead_since < ev.failure_streak_started_at) return bad("dead without dead_since");
             break;
         case HealthState::Unstable:
             if (ev.failure_streak < static_cast<uint32_t>(th.unstable_failures)) return bad("unstable without failures");
@@ -226,7 +240,7 @@ HealthEvaluation evaluateHealth(const HealthEvidence& ev, double now, const Heal
 
     const bool fresh = ev.last_full_success > 0.0 &&
                        (now - ev.last_full_success) <= th.stable_max_success_age_s;
-    e.switch_eligible = ev.state == HealthState::Healthy && fresh;
+    e.switch_eligible = ev.state == HealthState::Healthy && fresh && ev.session_confirmed;
     e.stable = ev.state == HealthState::Healthy &&
                ev.success_streak >= static_cast<uint32_t>(th.stable_min_successes) &&
                ev.streak_started_at > 0.0 &&
@@ -234,7 +248,7 @@ HealthEvaluation evaluateHealth(const HealthEvidence& ev, double now, const Heal
                e.ewma >= th.stable_min_ewma && e.has_p90 && e.p90_ms <= th.stable_max_p90_ms &&
                fresh && ev.last_bulk_success > 0.0 &&
                (now - ev.last_bulk_success) <= th.stable_max_bulk_age_s &&
-               !ev.telegram_only && !ev.unsupported;
+               ev.session_confirmed && !ev.telegram_only && !ev.unsupported;
     if (ev.eligible_count == 0) e.stability = Stability::Unrated;
     else if (ev.state == HealthState::Dead) e.stability = Stability::Dead;
     else if (e.stable) e.stability = Stability::Stable;

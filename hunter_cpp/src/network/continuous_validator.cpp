@@ -125,7 +125,7 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
         ConfigHealthRecord rec;
         rec.uri = uri;
         initRecordIdentity(&rec);
-        rec.tag = tag;
+        rec.tag = tag.substr(0, 128);
         rec.first_seen = now;
         rec.priority_boost_until = boost_until;
         rec.needs_retest = true;
@@ -169,19 +169,28 @@ ApplyEffect ConfigDatabase::applyProbeResult(const ProbeResult& r) {
 
 ApplyEffect ConfigDatabase::applyLocked(ConfigHealthRecord& rec, const ProbeResult& r) {
     const ApplyEffect eff = applyProbe(rec.ev, r, th_);
-    if (eff != ApplyEffect::Applied && eff != ApplyEffect::Excluded) return eff;
+    if (eff == ApplyEffect::Excluded) {
+        // Infrastructure/local/unclassified round: no evidence, stays schedulable with bounded backoff.
+        rec.excluded_streak++;
+        double back = th_.excluded_retry_base_s;
+        for (int i = 1; i < rec.excluded_streak && back < th_.excluded_retry_max_s; i++) back *= 2.0;
+        rec.next_retry_at = r.finished_at + std::min(back, th_.excluded_retry_max_s);
+        return eff;
+    }
+    if (eff != ApplyEffect::Applied) return eff;
     touchLegacyCounters(rec, r.finished_at, r.engine);
-    if (eff == ApplyEffect::Applied) {
-        rec.total_tests++;
-        if (r.outcome == ProbeOutcome::Pass) {
-            rec.total_passes++;
-            rec.telegram_only = false;
-            if (!r.exit_country.empty() && r.finished_at >= rec.exit_country_at) {
-                rec.exit_country = r.exit_country;
-                rec.exit_ip = r.exit_ip;
-                rec.exit_country_source = "cloudflare_trace";
-                rec.exit_country_at = r.finished_at;
-            }
+    rec.excluded_streak = 0;
+    rec.next_retry_at = 0.0;
+    rec.legacy_fails = 0;
+    rec.total_tests++;
+    if (r.outcome == ProbeOutcome::Pass) {
+        rec.total_passes++;
+        rec.telegram_only = false;
+        if (!r.exit_country.empty() && r.finished_at >= rec.exit_country_at) {
+            rec.exit_country = r.exit_country;
+            rec.exit_ip = r.exit_ip;
+            rec.exit_country_source = "cloudflare_trace";
+            rec.exit_country_at = r.finished_at;
         }
     }
     syncLegacyFromEvidence(&rec);
@@ -218,8 +227,9 @@ void ConfigDatabase::markTestingRound(const std::string& endpoint_key) {
     if (it != db_.end()) markTesting(it->second.ev);
 }
 
-// Legacy adapter (until A2 rewires callers): alive -> full Pass, !alive -> attributable
-// RemoteFailure, telegram-only -> capability hint without health evidence.
+// Legacy adapter (until A2 rewires callers): alive -> full Pass. A failure from a legacy
+// caller carries no baseline attribution, so it is recorded as an unclassified (non-penalizing)
+// round for the typed evidence; only the legacy counters/alive hint react to it.
 void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float latency_ms,
                                   const std::string& engine_used, bool force_dead,
                                   bool telegram_only) {
@@ -237,6 +247,7 @@ void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float late
         rec.ev.telegram_only = true;
         rec.latency_ms = latency_ms;
         rec.last_alive_time = t;
+        rec.legacy_fails = 0;
         return;
     }
     rec.ev.telegram_only = false;
@@ -244,19 +255,28 @@ void ConfigDatabase::updateHealth(const std::string& uri, bool alive, float late
     r.endpoint_key = it->first;
     r.engine = engine_used;
     r.started_at = r.finished_at = t;
-    r.attributable = true;
     if (alive) {
         r.outcome = ProbeOutcome::Pass;
+        r.attributable = true;
         r.latency_ms = std::isfinite(latency_ms) && latency_ms >= 0.0f ? latency_ms : 0.0;
-    } else {
-        r.outcome = ProbeOutcome::RemoteFailure;
+        applyLocked(rec, r);
+        rec.latency_ms = latency_ms;
+        return;
     }
-    applyLocked(rec, r);
-    if (!alive && force_dead) {
-        forceDead(rec.ev, t, th_);
-        syncLegacyFromEvidence(&rec);
+    r.outcome = ProbeOutcome::RemoteFailure;
+    r.attributable = false;  // no baseline: never penalizes the typed evidence
+    applyProbe(rec.ev, r, th_);
+    touchLegacyCounters(rec, t, engine_used);
+    rec.total_tests++;
+    rec.legacy_fails = force_dead ? std::max(rec.legacy_fails, 3) : rec.legacy_fails + 1;
+    rec.excluded_streak = 0;
+    rec.next_retry_at = 0.0;
+    if (rec.ev.last_full_success <= 0.0 || rec.legacy_fails >= 2) {
+        rec.alive = false;
+        rec.telegram_only = false;
+        rec.latency_ms = 0.0f;
     }
-    if (alive) rec.latency_ms = latency_ms;
+    rec.consecutive_fails = rec.legacy_fails;
 }
 
 void ConfigDatabase::updateGeminiStatus(const std::string& uri, int gemini_status) {
@@ -300,6 +320,7 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
     std::vector<Candidate> candidates;
 
     for (auto& [hash, rec] : db_) {
+        if (rec.next_retry_at > now) continue;  // bounded backoff after excluded rounds
         const bool boosted = rec.priority_boost_until > now;
         // Priority 0: never tested (brand new configs)
         if (rec.total_tests == 0) {
@@ -551,8 +572,8 @@ int ConfigDatabase::evictDead() {
     return before - (int)db_.size();
 }
 
-// Age basis for eviction: last evidence of life, else first sighting. Local outages never
-// create failure evidence (excluded outcomes), so they cannot mass-delete records.
+// Age basis for eviction of never-working records. Dead (attributed) records are measured
+// from dead_since, never from an old success. Local outages create no failure evidence.
 static double evidenceAnchor(const ConfigHealthRecord& rec) {
     double a = std::max(rec.ev.last_full_success, rec.last_alive_time);
     return a > 0.0 ? a : rec.first_seen;
@@ -561,15 +582,20 @@ static double evidenceAnchor(const ConfigHealthRecord& rec) {
 void ConfigDatabase::evictStale() {
     if (db_.empty()) return;
     const double now = clock_();
-    // Phase 1: Dead records past the retention window (>= 72 h).
+    // Phase 1: attributed Dead records only after >= retention in Dead; legacy-adapter failures
+    // (never full success, >=3 reported failures) after the same window from first sighting.
     std::vector<std::string> dead_hashes;
     for (auto& [hash, rec] : db_) {
-        if (rec.ev.state == HealthState::Dead && (now - evidenceAnchor(rec)) > th_.dead_retention_s)
+        if (rec.ev.state == HealthState::Dead && rec.ev.dead_since > 0.0 &&
+            (now - rec.ev.dead_since) > th_.dead_retention_s)
+            dead_hashes.push_back(hash);
+        else if (rec.ev.last_full_success <= 0.0 && rec.legacy_fails >= 3 && !rec.alive &&
+                 (now - rec.first_seen) > th_.dead_retention_s)
             dead_hashes.push_back(hash);
     }
     for (auto& h : dead_hashes) db_.erase(h);
 
-    // Phase 2: at capacity, evict the oldest inactive evidence (never Healthy/Degraded).
+    // Phase 2 (separate policy): at capacity, evict the oldest inactive evidence (never Healthy/Degraded).
     if ((int)db_.size() < max_size_) return;
     std::vector<std::pair<std::string, double>> candidates;
     for (auto& [hash, rec] : db_) {
@@ -657,22 +683,16 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForRevalidation(
 
 int ConfigDatabase::removeDeadLive(int dead_ttl_s) {
     std::lock_guard<std::mutex> lock(mutex_);
-    double now = clock_();
+    const double now = clock_();
+    const double ttl = std::max<double>(dead_ttl_s, th_.dead_retention_s);
     int removed = 0;
-    std::vector<std::string> to_remove;
-    for (auto& [hash, rec] : db_) {
-        // Remove configs that were once alive but have been dead for
-        // longer than dead_ttl_s (3 days by default).
-        if (!rec.alive && rec.last_alive_time > 0.0) {
-            double dead_age = now - rec.last_alive_time;
-            if (dead_age > dead_ttl_s) {
-                to_remove.push_back(hash);
-            }
-        }
-    }
-    for (auto& h : to_remove) {
-        db_.erase(h);
-        removed++;
+    for (auto it = db_.begin(); it != db_.end();) {
+        const auto& ev = it->second.ev;
+        // Only attributed Dead records, measured from entry into Dead.
+        if (ev.state == HealthState::Dead && ev.dead_since > 0.0 && (now - ev.dead_since) > ttl) {
+            it = db_.erase(it);
+            removed++;
+        } else ++it;
     }
     return removed;
 }

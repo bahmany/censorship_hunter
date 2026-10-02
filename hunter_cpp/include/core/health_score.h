@@ -43,7 +43,10 @@ struct HealthThresholds {
     double stable_max_p90_ms = 3000.0;
     double stable_max_success_age_s = 180.0;
     double stable_max_bulk_age_s = 300.0;
-    double dead_retention_s = 72.0 * 3600.0;
+    double dead_retention_s = 72.0 * 3600.0;   // measured from dead_since (entry into Dead)
+    size_t recent_id_capacity = 64;
+    double excluded_retry_base_s = 5.0;        // backoff for schedulable-but-excluded rounds
+    double excluded_retry_max_s = 300.0;
 };
 
 struct ProbeResult {
@@ -86,7 +89,11 @@ struct HealthEvidence {
     double last_full_success = 0.0;
     double last_bulk_success = 0.0;
     double last_attempt_at = 0.0;
-    uint64_t generation = 0;
+    uint64_t generation = 0;                  // session-only: network/engine generation
+    double dead_since = 0.0;                  // entry time into Dead (persisted); 0 otherwise
+    double recovery_anchor = 0.0;             // first full pass of a recovery (session-only)
+    bool session_confirmed = false;           // a full pass was applied in this process/generation
+    std::deque<std::string> recent_ids;       // bounded completed run ids, incl. excluded (session-only)
     std::string last_outcome;                 // outcomeName or empty
     std::deque<ProbeSample> ring;             // oldest -> newest, bounded
     // Static attributes used by P
@@ -101,7 +108,9 @@ enum class ApplyEffect { Applied, Excluded, Duplicate, Stale, Rejected, UnknownE
 bool isEligibleResult(const ProbeResult& r);  // Pass, or attributable RemoteFailure/Partial
 void markTesting(HealthEvidence& ev);         // Unknown -> Testing
 ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThresholds& th);
-void forceDead(HealthEvidence& ev, double now, const HealthThresholds& th);  // legacy adapter only
+// Restart / network-generation boundary: drops session-dependent confirmation (success run,
+// bulk confirmation, certification) while keeping the historical ring for display.
+void resetSessionEvidence(HealthEvidence& ev);
 // Checks internal consistency (states/streaks vs ring); used when loading files.
 bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, std::string* why);
 

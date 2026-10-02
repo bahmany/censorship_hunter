@@ -19,7 +19,7 @@ const std::vector<std::string>& v4ExtensionColumns() {
         "success_streak", "streak_started_at", "failure_streak_started_at", "last_full_success",
         "last_bulk_success", "last_attempt_at", "last_outcome", "probe_ring", "server_ips",
         "server_country", "server_country_source", "server_country_at", "geo_db_version", "exit_ip",
-        "exit_country", "exit_country_source", "exit_country_at", "network_generation"};
+        "exit_country", "exit_country_source", "exit_country_at", "network_generation", "dead_since"};
     return cols;
 }
 
@@ -278,7 +278,9 @@ void syncLegacyFromEvidence(ConfigHealthRecord* rec) {
     rec->consecutive_fails = static_cast<int>(std::min<uint32_t>(ev.failure_streak, 1000000));
     if (ev.last_full_success > 0.0) rec->last_alive_time = ev.last_full_success;
     if (ev.state == HealthState::Unknown || ev.state == HealthState::Testing) return;  // hints stay
-    rec->alive = (ev.state == HealthState::Healthy || ev.state == HealthState::Degraded);
+    // Alive means a full success actually happened; a never-working config is never alive.
+    rec->alive = (ev.state == HealthState::Healthy || ev.state == HealthState::Degraded) &&
+                 ev.last_full_success > 0.0;
     if (!rec->alive) { rec->latency_ms = 0.0f; rec->telegram_only = false; }
     else {
         for (auto it = ev.ring.rbegin(); it != ev.ring.rend(); ++it)
@@ -330,6 +332,7 @@ std::string serializeRecordV4(const ConfigHealthRecord& rec, double now, const H
     f.push_back(rec.exit_country_source);
     f.push_back(fmtD(rec.exit_country_at));
     f.push_back(std::to_string(rec.network_generation));
+    f.push_back(fmtD(ev.dead_since));
     std::string line;
     for (size_t i = 0; i < f.size(); i++) {
         if (i) line.push_back('\t');
@@ -407,18 +410,23 @@ bool parseRecordV4(const std::string& line, const HealthThresholds& th, ConfigHe
     r.exit_country_source = f[k++];
     if (!pD(f[k++], &r.exit_country_at)) return bad("bad exit_country_at");
     if (!pU64(f[k++], &r.network_generation)) return bad("bad network_generation");
+    if (!pD(f[k++], &r.ev.dead_since)) return bad("bad dead_since");
 
     std::string why;
     if (!evidenceConsistent(r.ev, th, &why)) return bad("inconsistent evidence: " + why);
     // Identity: recompute and compare; static attributes always come from the URI.
     initRecordIdentity(&r);
     if (r.endpoint_key != stored_key) return bad("endpoint_key mismatch");
-    r.needs_retest = r.ev.state == HealthState::Unknown || r.ev.state == HealthState::Testing;
+    // Restart boundary: history stays for display, but every loaded record needs a fresh probe
+    // and its session-dependent certification (success run, bulk confirmation) is dropped.
+    r.needs_retest = true;
     if (r.ev.state == HealthState::Testing) r.ev.state = HealthState::Unknown;  // no round survives restart
+    resetSessionEvidence(r.ev);
     // alive is derived from state once there is evidence; otherwise the stored value is a hint.
-    ConfigHealthRecord tmp = r;
+    const bool hint_alive = r.alive;
+    const float hint_lat = r.latency_ms;
     syncLegacyFromEvidence(&r);
-    if (r.ev.state == HealthState::Unknown) { r.alive = tmp.alive; r.latency_ms = tmp.latency_ms; }
+    if (r.ev.state == HealthState::Unknown) { r.alive = hint_alive; r.latency_ms = hint_lat; }
     return *out = std::move(r), true;
 }
 
@@ -429,8 +437,8 @@ bool parseRecordLegacy(int layout, const std::vector<std::string>& f, const Heal
     ConfigHealthRecord r;
     r.uri = f[0];
     if (r.uri.empty() || r.uri.find("://") == std::string::npos) return false;
-    r.tag = f[1];
-    r.engine_used = f[2];
+    r.tag = f[1].substr(0, 128);
+    r.engine_used = f[2].substr(0, 128);
     long long iv;
     size_t shift = layout >= 2 ? 1 : 0;
     if (!pD(f[3], &r.first_seen) || !pD(f[4], &r.last_tested) || !pD(f[5], &r.last_alive_time)) return false;

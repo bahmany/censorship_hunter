@@ -152,6 +152,10 @@ struct ConfigHealthRecord {
     // (alive, latency_ms, consecutive_fails, last_alive_time, ...) are derived from it
     // by ConfigDatabase and are hints only for records without evidence.
     HealthEvidence ev;
+    // Session-only scheduling state (not persisted)
+    double next_retry_at = 0.0;   // backoff after excluded (infrastructure/local) rounds
+    int excluded_streak = 0;
+    int legacy_fails = 0;         // consecutive failures reported through the legacy adapter
     // Country (D4 columns; written by later batches via applyCountryResult)
     std::vector<std::string> server_ips;
     std::string server_country;

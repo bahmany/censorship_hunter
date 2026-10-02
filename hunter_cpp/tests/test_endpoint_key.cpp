@@ -121,5 +121,28 @@ int main() {
     CHECK(K("trojan://ab@host:443") != K("trojan://a@bhost:443"), "boundary shift");
     T_END();
 
+    T_CASE("review fixes: header default, encoded credentials, strict port, lossless VMess");
+    const std::string vl = std::string("vless://") + U1 + "@example.com:443";
+    CHECK(K(vl) == K(vl + "?headerType=none") && K(vl) != K(vl + "?headerType=http"), "headerType none is the default");
+    CHECK(K("trojan://secret@example.com:443") == K("trojan://se%63ret@example.com:443"), "percent-encoded credential decoded once");
+    CHECK(K("trojan://Secret@example.com:443") != K("trojan://se%63ret@example.com:443"), "decoded credential keeps case");
+    CHECK(K("trojan://a+b@example.com:443") != K("trojan://a%20b@example.com:443"), "'+' is not a space");
+    CHECK(!computeEndpointKey(vl + "garbage").valid, "port 443garbage -> fallback");
+    CHECK(!computeEndpointKey("trojan://pw@example.com:44x3").valid, "non-numeric port -> fallback");
+    CHECK(!computeEndpointKey("trojan://pw@example.com:").valid, "empty port -> fallback");
+    CHECK(computeEndpointKey("trojan://pw@example.com:443?x=1").port == 443, "query does not leak into the port");
+    auto vm = [](const std::string& extra, const std::string& ps = "a") {
+        return "vmess://" + utils::base64Encode("{\"add\":\"example.com\",\"port\":443,\"id\":\"11111111-2222-3333-4444-555555555555\",\"net\":\"tcp\",\"tls\":\"tls\",\"ps\":\"" + ps + "\"" + (extra.empty() ? "" : "," + extra) + "}");
+    };
+    CHECK(computeEndpointKey(vm("")).valid, "vmess valid");
+    CHECK(K(vm("\"aid\":0")) != K(vm("\"aid\":64")), "alterId distinguishes");
+    CHECK(K(vm("\"aid\":0")) == K(vm("")) && K(vm("\"aid\":\"0\"")) == K(vm("")), "aid 0 is the default");
+    CHECK(K(vm("\"alpn\":\"h2\"")) != K(vm("\"alpn\":\"http/1.1\"")), "ALPN distinguishes");
+    CHECK(K(vm("", "one")) == K(vm("", "two")), "remark ignored");
+    CHECK(K(vm("\"allowInsecure\":1")) != K(vm("")), "insecure policy distinguishes");
+    CHECK(K(vm("\"future_opt\":\"x\"")) != K(vm("\"future_opt\":\"y\"")), "unknown JSON options kept");
+    CHECK(!computeEndpointKey("vmess://" + utils::base64Encode("{\"add\":\"h\",\"port\":1,\"id\":\"x\",\"o\":{\"n\":1}}")).valid, "nested JSON -> exact-byte fallback");
+    T_END();
+
     return T_SUMMARY();
 }

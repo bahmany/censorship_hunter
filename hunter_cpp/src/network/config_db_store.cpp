@@ -5,6 +5,9 @@
 #include "core/utils.h"
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
+#include <mutex>
 #include <cstdio>
 #include <fstream>
 #include <sstream>
@@ -13,6 +16,7 @@
 #include <io.h>
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -21,29 +25,68 @@ namespace hunter {
 namespace network {
 namespace {
 
+std::mutex& fileTxMutex() {  // serializes path-level save/migration transactions in-process
+    static std::mutex m;
+    return m;
+}
+
+#ifdef _WIN32
+std::wstring widen(const std::string& u8) {
+    if (u8.empty()) return std::wstring();
+    int n = MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), nullptr, 0);
+    std::wstring w(n, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, u8.data(), (int)u8.size(), &w[0], n);
+    return w;
+}
+#endif
+
 bool readWholeFile(const std::string& path, std::string* out) {
+#ifdef _WIN32
+    std::ifstream ifs(widen(path), std::ios::binary);
+#else
     std::ifstream ifs(path, std::ios::binary);
+#endif
     if (!ifs) return false;
     std::ostringstream ss;
     ss << ifs.rdbuf();
+    if (ifs.bad() || ss.bad()) return false;
     *out = ss.str();
     return true;
 }
 
 bool fileExists(const std::string& path) {
-    std::ifstream f(path, std::ios::binary);
-    return f.good();
+#ifdef _WIN32
+    return GetFileAttributesW(widen(path).c_str()) != INVALID_FILE_ATTRIBUTES;
+#else
+    return ::access(path.c_str(), F_OK) == 0;
+#endif
+}
+
+std::string uniqueTempName(const std::string& path) {
+    static std::atomic<unsigned> counter{0};
+    std::ostringstream o;
+#ifdef _WIN32
+    o << path << ".tmp." << GetCurrentProcessId() << "." << counter++ << "." << GetTickCount64();
+#else
+    o << path << ".tmp." << getpid() << "." << counter++ << "." << std::chrono::steady_clock::now().time_since_epoch().count();
+#endif
+    return o.str();
 }
 
 bool writeFileAtomic(const std::string& path, const std::string& data, std::string* err) {
     try { utils::mkdirRecursive(utils::dirName(path)); } catch (...) {}
-    const std::string tmp = path + ".tmp";
+    const std::string tmp = uniqueTempName(path);
+#ifdef _WIN32
+    FILE* f = _wfopen(widen(tmp).c_str(), L"wb");
+#else
     FILE* f = std::fopen(tmp.c_str(), "wb");
-    if (!f) { *err = "cannot open " + tmp; return false; }
-#ifndef _WIN32
-    fchmod(fileno(f), 0600);
 #endif
-    bool ok = std::fwrite(data.data(), 1, data.size(), f) == data.size();
+    if (!f) { *err = "cannot open " + tmp; return false; }
+    bool ok = true;
+#ifndef _WIN32
+    ok = (fchmod(fileno(f), 0600) == 0) && ok;  // restrictive permissions (Windows ACLs: follow-up)
+#endif
+    ok = std::fwrite(data.data(), 1, data.size(), f) == data.size() && ok;
     ok = (std::fflush(f) == 0) && ok;
 #ifdef _WIN32
     ok = (_commit(_fileno(f)) == 0) && ok;
@@ -51,21 +94,46 @@ bool writeFileAtomic(const std::string& path, const std::string& data, std::stri
     ok = (fsync(fileno(f)) == 0) && ok;
 #endif
     ok = (std::fclose(f) == 0) && ok;
-    if (!ok) { std::remove(tmp.c_str()); *err = "write failed: " + tmp; return false; }
+    auto drop = [&]() {
 #ifdef _WIN32
-    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        _wremove(widen(tmp).c_str());
+#else
         std::remove(tmp.c_str());
+#endif
+    };
+    if (!ok) { drop(); *err = "write failed: " + tmp; return false; }
+#ifdef _WIN32
+    if (!MoveFileExW(widen(tmp).c_str(), widen(path).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+        drop();
         *err = "rename failed: " + path;
         return false;
     }
 #else
-    if (std::rename(tmp.c_str(), path.c_str()) != 0) {
-        std::remove(tmp.c_str());
-        *err = "rename failed: " + path;
-        return false;
-    }
+    if (std::rename(tmp.c_str(), path.c_str()) != 0) { drop(); *err = "rename failed: " + path; return false; }
+    // Make the rename itself durable.
+    std::string dir = utils::dirName(path);
+    if (dir.empty()) dir = ".";
+    int dfd = ::open(dir.c_str(), O_RDONLY);
+    if (dfd >= 0) { (void)fsync(dfd); ::close(dfd); }
 #endif
     return true;
+}
+
+// Backup `data` next to `base`: reuse an existing backup only if it holds identical bytes,
+// otherwise use the next free numbered name (base.1, base.2, ...). Never overwrites.
+bool makeBackup(const std::string& base, const std::string& data, std::string* used, std::string* err) {
+    for (int i = 0; i < 100; i++) {
+        const std::string cand = i == 0 ? base : base + "." + std::to_string(i);
+        if (!fileExists(cand)) {
+            if (!writeFileAtomic(cand, data, err)) return false;
+            *used = cand;
+            return true;
+        }
+        std::string cur;
+        if (readWholeFile(cand, &cur) && cur == data) { *used = cand; return true; }
+    }
+    *err = "no free backup name for " + base;
+    return false;
 }
 
 std::string firstLine(const std::string& data) {
@@ -155,6 +223,7 @@ std::string ConfigDatabase::lastSaveError() const {
 
 int ConfigDatabase::saveToDisk(const std::string& filepath) const {
     std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(mutex_));
+    std::lock_guard<std::mutex> txl(fileTxMutex());
     auto& err = const_cast<std::string&>(save_error_);
     err.clear();
 
@@ -166,8 +235,8 @@ int ConfigDatabase::saveToDisk(const std::string& filepath) const {
             int v = headerVersion(first, "#HUNTER_CONFIG_DB_V");
             if (v < 1 || v > 4) { err = "refusing to overwrite unsupported config DB version: " + first; return -1; }
             if (v < 4) {
-                const std::string bak = filepath + ".v" + std::to_string(v) + ".bak";
-                if (!fileExists(bak) && !writeFileAtomic(bak, existing, &err)) return -1;
+                std::string used;
+                if (!makeBackup(filepath + ".v" + std::to_string(v) + ".bak", existing, &used, &err)) return -1;
             }
         }
     }
@@ -176,12 +245,14 @@ int ConfigDatabase::saveToDisk(const std::string& filepath) const {
     std::vector<const ConfigHealthRecord*> recs;
     for (const auto& [k, rec] : db_) if (!rec.uri.empty()) recs.push_back(&rec);
     const std::string content = buildV4Content(kDbHeaderV4, recs, now, th_);
+    if (!validateV4Content(content, kDbHeaderV4, recs.size(), th_, &err)) { err = "save refused: " + err; return -1; }
     if (!writeFileAtomic(filepath, content, &err)) return -1;
     return static_cast<int>(recs.size());
 }
 
 int ConfigDatabase::saveLiveToDisk(const std::string& filepath) const {
     std::lock_guard<std::mutex> lock(const_cast<std::mutex&>(mutex_));
+    std::lock_guard<std::mutex> txl(fileTxMutex());
     auto& err = const_cast<std::string&>(save_error_);
     err.clear();
     std::string existing;
@@ -204,6 +275,7 @@ int ConfigDatabase::saveLiveToDisk(const std::string& filepath) const {
         recs.push_back(&rec);
     }
     const std::string content = buildV4Content(kLiveHeaderV3, recs, now, th_);
+    if (!validateV4Content(content, kLiveHeaderV3, recs.size(), th_, &err)) { err = "save refused: " + err; return -1; }
     if (!writeFileAtomic(filepath, content, &err)) return -1;
     return static_cast<int>(recs.size());
 }
@@ -228,6 +300,7 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     }
     rep.source_version = ver;
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> txl(fileTxMutex());
     auto lines = bodyLines(data);
     size_t start = 0;
     std::vector<ConfigHealthRecord> parsed;
@@ -254,6 +327,12 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
             rep.loaded++;
         }
         rep.ok = true;
+        if (rep.rejected > 0) {
+            // A later save would drop the rejected rows: keep the current file bytes first.
+            std::string err;
+            if (!makeBackup(filepath + ".v4.bak", data, &rep.backup_path, &err))
+                rep.error = "rejected rows not backed up: " + err;
+        }
         load_report_ = rep;
         return rep.loaded;
     }
@@ -283,12 +362,16 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     const double now = clock_();
     const std::string content = buildV4Content(kDbHeaderV4, recs, now, th_);
     std::string err;
-    if (!validateV4Content(content, kDbHeaderV4, recs.size(), th_, &err)) {
+    if (rep.rejected > 0) {
+        // Rewriting would silently drop the rejected rows: leave the original file untouched.
+        rep.error = "migration not written: " + std::to_string(rep.rejected) +
+                    " row(s) could not be parsed; original kept";
+    } else if (!validateV4Content(content, kDbHeaderV4, recs.size(), th_, &err)) {
         rep.error = "migration not written: " + err;
     } else {
-        const std::string bak = filepath + ".v" + std::to_string(ver) + ".bak";
-        bool bak_ok = fileExists(bak) || writeFileAtomic(bak, data, &err);
-        if (!bak_ok) rep.error = "migration not written (backup failed): " + err;
+        std::string bak;
+        if (!makeBackup(filepath + ".v" + std::to_string(ver) + ".bak", data, &bak, &err))
+            rep.error = "migration not written (backup failed): " + err;
         else if (!writeFileAtomic(filepath, content, &err)) rep.error = "migration not written: " + err;
         else { rep.migrated = true; rep.backup_path = bak; }
     }
