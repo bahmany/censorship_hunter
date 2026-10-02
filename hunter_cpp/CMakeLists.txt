@@ -201,6 +201,9 @@ set(PROXY_SOURCES
     src/proxy/xray_manager.cpp
     src/proxy/proxy_server_manager.cpp
 )
+# Stage 4 B: process runner (Job object / reaping), health monitor (watchdog + failover)
+include(cmake/runtime_health.cmake)
+list(APPEND PROXY_SOURCES ${HUNTER_RUNTIME_HEALTH_SOURCES})
 
 # ─── Cache Library Sources ───
 set(CACHE_SOURCES
@@ -354,6 +357,9 @@ if(HUNTER_INTEGRATION_TESTS)
     target_link_options(test_singbox_schema PRIVATE -static-libgcc -static-libstdc++)
     target_link_libraries(test_singbox_schema PRIVATE hunter_core)
 endif()
+
+# Stage 4 B suites (fake probe/launcher/clock; no public network)
+hunter_add_runtime_health_tests()
 
 # CTest registration
 enable_testing()

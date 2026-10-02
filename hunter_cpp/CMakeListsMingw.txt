@@ -211,6 +211,8 @@ set(NETWORK_SOURCES
 set(PROXY_SOURCES
     src/proxy/xray_manager.cpp
     src/proxy/proxy_server_manager.cpp
+    src/proxy/process_runner.cpp
+    src/proxy/health_monitor.cpp
 )
 
 # ─── Cache Library Sources ───
