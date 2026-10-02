@@ -580,7 +580,7 @@ void HunterGuiApp::renderTable() {
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::PushID(r.uri.c_str());
-            ImGuiSelectableFlags sel_flags = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap;
+            ImGuiSelectableFlags sel_flags = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap;
             if (ImGui::Selectable("##row", selected, sel_flags)) {
                 ImGuiIO& io = ImGui::GetIO();
                 if (io.KeyCtrl) {
