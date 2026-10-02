@@ -225,8 +225,22 @@ set(ORCHESTRATOR_SOURCES
     src/orchestrator/runtime_cleanup_manager.cpp
 )
 
+# Stage 4 C1/C2: offline country DB, country service, search/filter parser (unverified on Windows).
+set(GEO_SOURCES
+    src/geo/country_database.cpp
+    src/geo/country_query.cpp
+    src/geo/country_service.cpp
+    src/network/country_provider.cpp
+)
+# Stub embed header (no embedded DB in MinGW builds unless country.cmake's generator is wired in).
+set(HUNTER_GEO_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded_geo" CACHE PATH "Output dir for geo embed stub")
+file(MAKE_DIRECTORY ${HUNTER_GEO_EMBED_OUT_DIR})
+file(WRITE ${HUNTER_GEO_EMBED_OUT_DIR}/geo_embedded.h
+"// Stub - embedded geo disabled.\n#pragma once\n#include <stdint.h>\n#define HUNTER_EMBED_HAS_GEO 0\n#define HUNTER_EMBED_GEO_USE_ZSTD 0\n")
+
 # Create hunter core static library
 add_library(hunter_core STATIC
+    ${GEO_SOURCES}
     ${CORE_SOURCES}
     ${NETWORK_SOURCES}
     ${PROXY_SOURCES}
@@ -261,6 +275,8 @@ target_include_directories(hunter_core PUBLIC
 # Static libcurl on MinGW: without CURL_STATICLIB, curl.h declares dllimport
 # and the linker fails on unresolved __imp_curl_* symbols.
 target_compile_definitions(hunter_core PUBLIC CURL_STATICLIB)
+
+target_include_directories(hunter_core PUBLIC ${HUNTER_GEO_EMBED_OUT_DIR})
 
 # Add embedded header include dir (always — stub or real, engine_embed.cpp needs it).
 target_include_directories(hunter_core PUBLIC ${HUNTER_EMBED_INCLUDE_DIR})

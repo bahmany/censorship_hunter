@@ -196,6 +196,16 @@ ApplyEffect ConfigDatabase::applyLocked(ConfigHealthRecord& rec, const ProbeResu
     return eff;
 }
 
+void ConfigDatabase::forEachRecord(const std::function<void(const ConfigHealthRecord&)>& fn) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& kv : db_) fn(kv.second);
+}
+
+void ConfigDatabase::setBatchPrioritizer(BatchPrioritizer fn) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    batch_prioritizer_ = std::move(fn);
+}
+
 bool ConfigDatabase::applyCountryResult(const std::string& endpoint_key, const CountryUpdate& u) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = db_.find(endpoint_key);
@@ -359,6 +369,20 @@ std::vector<ConfigHealthRecord> ConfigDatabase::getUntestedBatch(int batch_size)
         if (a.priority != b.priority) return a.priority < b.priority;
         return a.total_tests < b.total_tests;
     });
+
+    if (batch_prioritizer_ && !candidates.empty()) {
+        // Country-targeted discovery: hand a bounded pool (base order) to the hook.
+        const size_t pool_cap = std::max<size_t>(500, (size_t)std::max(batch_size, 1) * 10);
+        std::vector<ConfigHealthRecord> pool;
+        pool.reserve(std::min(pool_cap, candidates.size()));
+        for (auto& c : candidates) {
+            pool.push_back(*c.rec);
+            if (pool.size() >= pool_cap) break;
+        }
+        batch_prioritizer_(pool, batch_size);
+        if ((int)pool.size() > batch_size) pool.resize((size_t)std::max(batch_size, 0));
+        return pool;
+    }
 
     for (auto& c : candidates) {
         batch.push_back(*c.rec);
