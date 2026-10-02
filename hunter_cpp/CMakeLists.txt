@@ -321,6 +321,11 @@ add_executable(test_embed
 target_link_options(test_embed PRIVATE -static-libgcc -static-libstdc++)
 target_link_libraries(test_embed PRIVATE hunter_core)
 
+# CTest registration
+enable_testing()
+add_test(NAME hunter_tests COMMAND hunter_tests)
+add_test(NAME test_embed COMMAND test_embed)
+
 # Install targets
 install(TARGETS hunter
     RUNTIME DESTINATION bin
