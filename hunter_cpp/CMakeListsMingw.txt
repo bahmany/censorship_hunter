@@ -1,33 +1,36 @@
-cmake_minimum_required(VERSION 3.16)
-
-set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
-project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX ASM RC)
+# NOTE: included from CMakeLists.txt (after project()); not a standalone project file.
+enable_language(RC)
+enable_language(ASM)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Enable assembly language for .incbin-based engine + config embedding.
-enable_language(ASM)
+# Windows (MinGW-w64) build. Entered from CMakeLists.txt when CMAKE_SYSTEM_NAME=Windows:
+#   cross (Linux):  cmake -S hunter_cpp -B build/win -DCMAKE_TOOLCHAIN_FILE=hunter_cpp/cmake/mingw-w64-toolchain.cmake
+#   see scripts/build_windows.sh (does deps + engines + build in one go).
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
 
 find_package(Threads REQUIRED)
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+set(HUNTER_PYTHON ${Python3_EXECUTABLE})
 
-# Cross-compiled dependencies
-set(CROSS_PREFIX /home/mohammad/Documents/projects/censorship_hunter/cross_build/mingw/install)
-
-# zlib
-set(ZLIB_INCLUDE_DIR ${CROSS_PREFIX}/include)
-set(ZLIB_LIBRARY ${CROSS_PREFIX}/lib/libzlibstatic.a)
+# Static deps (zlib, curl+Schannel, GLFW) from scripts/fetch_windows_deps.sh.
+# HUNTER_WIN_DEPS is set by the toolchain file (cache var / env var); MSYS2 users may
+# instead rely on pacman-provided static packages found via CMAKE_PREFIX_PATH.
+if(NOT HUNTER_WIN_DEPS)
+    set(HUNTER_WIN_DEPS "$ENV{HUNTER_WIN_DEPS}")
+endif()
+if(HUNTER_WIN_DEPS)
+    list(PREPEND CMAKE_PREFIX_PATH "${HUNTER_WIN_DEPS}")
+endif()
+find_path(ZLIB_INCLUDE_DIR zlib.h HINTS "${HUNTER_WIN_DEPS}/include" REQUIRED)
+find_library(ZLIB_LIBRARY NAMES libz.a libzlibstatic.a z HINTS "${HUNTER_WIN_DEPS}/lib" REQUIRED)
+set(ZLIB_INCLUDE_DIRS ${ZLIB_INCLUDE_DIR})
 set(ZLIB_LIBRARIES ${ZLIB_LIBRARY})
-set(ZLIB_FOUND TRUE)
-
-# curl (static)
-set(CURL_INCLUDE_DIR ${CROSS_PREFIX}/include)
-set(CURL_LIBRARY ${CROSS_PREFIX}/lib/libcurl.a)
-set(CURL_FOUND TRUE)
-
-# GLFW
-set(glfw3_DIR ${CROSS_PREFIX}/lib/cmake/glfw3)
+find_path(CURL_INCLUDE_DIR curl/curl.h HINTS "${HUNTER_WIN_DEPS}/include" REQUIRED)
+find_library(CURL_LIBRARY NAMES libcurl.a curl HINTS "${HUNTER_WIN_DEPS}/lib" REQUIRED)
 find_package(glfw3 REQUIRED)
+message(STATUS "Windows deps: zlib=${ZLIB_LIBRARY} curl=${CURL_LIBRARY} glfw3=${glfw3_DIR}")
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
@@ -35,17 +38,22 @@ include_directories(${CMAKE_SOURCE_DIR})
 
 # ─── Embedded Engine Support (xray + sing-box) ───
 option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" OFF)
-set(HUNTER_EMBED_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin/windows" CACHE PATH "Directory containing Windows engine binaries to embed")
+set(HUNTER_EMBED_BIN_DIR "${CMAKE_BINARY_DIR}/engines" CACHE PATH "Directory containing Windows engine binaries to embed")
+option(HUNTER_FETCH_ENGINES "Download pinned+SHA256-verified xray/sing-box when HUNTER_EMBED_ENGINES=ON" ON)
 set(HUNTER_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded" CACHE PATH "Output dir for generated engine embed files")
 
 if(HUNTER_EMBED_ENGINES)
+    if(HUNTER_FETCH_ENGINES)
+        include(HunterEngines)
+        hunter_fetch_engines(PLATFORM windows OUT_DIR "${HUNTER_EMBED_BIN_DIR}")
+    endif()
     add_custom_command(
         OUTPUT
             ${HUNTER_EMBED_OUT_DIR}/engine_embedded.h
             ${HUNTER_EMBED_OUT_DIR}/engine_embedded.S
             ${HUNTER_EMBED_OUT_DIR}/engine_meta.json
         COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_EMBED_OUT_DIR}
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
+        COMMAND ${HUNTER_PYTHON} ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
                 --bin ${HUNTER_EMBED_BIN_DIR}
                 --outdir ${HUNTER_EMBED_OUT_DIR}
                 --platform windows
@@ -85,7 +93,7 @@ if(HUNTER_EMBED_CONFIGS)
         add_custom_command(
             OUTPUT ${HUNTER_CONFIG_BUNDLE}
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}"
-            COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/download_configs.py
+            COMMAND ${HUNTER_PYTHON} ${CMAKE_SOURCE_DIR}/tools/download_configs.py
                     --outfile ${HUNTER_CONFIG_BUNDLE}
                     --timeout ${HUNTER_CONFIG_DOWNLOAD_TIMEOUT}
                     --workers ${HUNTER_CONFIG_DOWNLOAD_WORKERS}
@@ -102,7 +110,7 @@ if(HUNTER_EMBED_CONFIGS)
             ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.S
             ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_meta.json
         COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_CONFIG_EMBED_OUT_DIR}
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
+        COMMAND ${HUNTER_PYTHON} ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
                 --bundle ${HUNTER_CONFIG_BUNDLE}
                 --outdir ${HUNTER_CONFIG_EMBED_OUT_DIR}
                 --platform windows
@@ -336,3 +344,22 @@ add_custom_command(TARGET hunter POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory "${_hunter_deploy_dir}"
     COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:hunter>" "${_hunter_deploy_dir}/hunter.exe"
 )
+
+# ─── Tests (Windows binaries; run natively on Windows or under wine) ───
+add_executable(hunter_tests tests/test_core.cpp)
+target_link_options(hunter_tests PRIVATE -static -static-libgcc -static-libstdc++)
+target_link_libraries(hunter_tests PRIVATE hunter_core)
+add_executable(test_embed tests/test_embed.cpp)
+target_link_options(test_embed PRIVATE -static -static-libgcc -static-libstdc++)
+target_link_libraries(test_embed PRIVATE hunter_core)
+enable_testing()
+if(CMAKE_CROSSCOMPILING)
+    find_program(HUNTER_WINE NAMES wine64 wine)
+    if(HUNTER_WINE)
+        add_test(NAME hunter_tests COMMAND ${HUNTER_WINE} $<TARGET_FILE:hunter_tests>)
+        add_test(NAME test_embed COMMAND ${HUNTER_WINE} $<TARGET_FILE:test_embed>)
+    endif()
+else()
+    add_test(NAME hunter_tests COMMAND hunter_tests)
+    add_test(NAME test_embed COMMAND test_embed)
+endif()

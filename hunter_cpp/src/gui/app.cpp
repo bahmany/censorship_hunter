@@ -58,6 +58,7 @@ namespace {
 //
 // We provide multiple sizes (16, 32, 48, 64, 128, 256) so the window
 // manager can pick the best fit for each context.
+#ifndef _WIN32  // Windows: icon comes from resources.rc; stb_image is not included there.
 void setWindowIcon(GLFWwindow* window) {
     // Search for the icon next to the executable, then in common locations.
     std::vector<std::string> search_paths = {
@@ -116,6 +117,7 @@ void setWindowIcon(GLFWwindow* window) {
 
     stbi_image_free(pixels);
 }
+#endif  // !_WIN32
 
 // Portable time function - uses glfwGetTime() on desktop, chrono on Android
 #ifdef __ANDROID__
