@@ -245,6 +245,9 @@ target_include_directories(hunter_core PUBLIC ${HUNTER_EMBED_INCLUDE_DIR})
 # Add embedded config header include dir (always — stub or real, config_embed.cpp needs it).
 target_include_directories(hunter_core PUBLIC ${HUNTER_CONFIG_EMBED_INCLUDE_DIR})
 
+# ─── Country Database Support (Stage 4 Batch C) ───
+include(cmake/country.cmake)
+
 # Static link C++ runtime
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
 

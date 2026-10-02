@@ -94,3 +94,10 @@ hunter_cpp/build_*/
 
 # ─── GUI Local State ───────────────────────────────────────
 imgui.ini
+
+# ─── Geo Database Artifacts ────────────────────────────────
+*.bin.zst
+*.hcgeo
+country.bin
+country.zst
+dbip-country-lite-*.csv.gz
