@@ -21,7 +21,7 @@ struct BaselineSnapshot {
     bool a_ok = false;        // direct Check A validated
     bool b_ok = false;        // direct Check B validated
     bool link_up = true;      // OS reports a usable link / default route
-    double at = 0.0;          // UTC seconds when measured
+    double at = 0.0;          // UTC seconds when the measurement finished
     uint64_t generation = 0;  // network generation it belongs to
 };
 
@@ -29,12 +29,15 @@ struct BaselineSnapshot {
 // A candidate is never its own control.
 class ControlTracker {
 public:
-    void record(const std::string& endpoint_key, uint32_t check_mask, double now);
-    bool passed(const std::string& exclude_key, uint32_t check_bit, double now, double max_age_s = 60.0) const;
+    void record(const std::string& endpoint_key, uint32_t check_mask, double now, uint64_t generation = 0);
+    /// A control counts only if its own Pass happened inside [t0, t1] (the failed round's window)
+    /// on the same network generation. No retroactive application of later controls.
+    bool passed(const std::string& exclude_key, uint32_t check_bit, double t0, double t1, uint64_t generation) const;
     void clear();
 private:
     mutable std::mutex mu_;
-    std::map<std::string, std::pair<uint32_t, double>> last_;
+    struct Entry { uint32_t mask = 0; double at = 0.0; uint64_t gen = 0; };
+    std::map<std::string, Entry> last_;
 };
 
 class ConnectivityBaseline {
@@ -92,8 +95,13 @@ struct Attribution {
 //  - otherwise: Offline baseline -> LocalNetworkDown; everything else -> Indeterminate
 //    (Partial stays Partial, unattributed).
 //  - every local proxy port refused -> EngineError (never a server failure).
+/// Round window slack: baseline/control evidence must fall in [start-kWindowSlack, end+kWindowSlack].
+constexpr double kWindowSlackSeconds = 5.0;
+
+/// `generation` is the network generation the round ran under; baseline and controls must match it.
 Attribution classifyRound(const RawProbe& raw, const BaselineSnapshot& base,
-                          const ControlTracker* controls, const std::string& endpoint_key, double now);
+                          const ControlTracker* controls, const std::string& endpoint_key,
+                          uint64_t generation);
 
 // Assemble the typed result consumed by ConfigDatabase::applyProbeResult.
 ProbeResult buildProbeResult(const RawProbe& raw, const Attribution& attr, const std::string& endpoint_key,

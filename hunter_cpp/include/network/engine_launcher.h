@@ -1,6 +1,7 @@
 #pragma once
 // Process launching abstraction for the tester. ProxyTester talks to EngineLauncher so unit
 // tests can inject a mock runner (batch bisect, bind conflicts) without real engines.
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
@@ -26,6 +27,7 @@ struct LaunchRequest {
 struct LaunchResult {
     LaunchStatus status = LaunchStatus::Error;
     std::string detail;
+    std::function<bool()> alive;   // empty = unknown (treated as alive); false once the child exited
     std::shared_ptr<void> guard;   // destroying it stops the process and removes its files
 };
 

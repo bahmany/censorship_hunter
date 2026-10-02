@@ -267,6 +267,7 @@ struct ProxyTester::Impl {
         ProbeOutcome terminal = ProbeOutcome::Indeterminate;
         std::string detail;
         double t_start = 0.0, t_end = 0.0;
+        BaselineSnapshot snap;            // direct evidence captured right after THIS round
     };
 
     ProxyTester& t;
@@ -276,6 +277,7 @@ struct ProxyTester::Impl {
     std::atomic<int> launches_left;
     std::atomic<int> ok_launches{0};
     int startup_ms = 10000;
+    uint64_t round_gen = 0;           // network generation this call runs under
 
     Impl(ProxyTester& tester, const BatchTestOptions& o) : t(tester), opts(o), launches_left(o.max_launches) {
         startup_ms = std::max(5000, std::min(15000, o.timeout_seconds * 1000));
@@ -299,20 +301,38 @@ struct ProxyTester::Impl {
     std::string chooseEngine(Item& it, std::string* why) {
         const bool quic = it.cfg.protocol == "hysteria2" || it.cfg.protocol == "tuic";
         auto avail = [&](const char* e) { return t.launcher_->available(e); };
-        const bool xray_ok = !quic && !it.cfg.toXrayOutboundJson(0).empty();
+        // Explicitly insecure upstream TLS cannot be expressed by modern xray (allowInsecure removed):
+        // such links run on sing-box, or are Unsupported. Never tested on an engine that ignores the option.
+        const bool needs_insecure = it.cfg.insecureTls();
+        const bool xray_ok = !quic && !needs_insecure && !it.cfg.toXrayOutboundJson(0).empty();
         const bool sb_ok = !it.cfg.toSingBoxConfigJson(0).empty();
         const bool mh_ok = !it.cfg.toMihomoConfigYaml(0).empty();
+        if (needs_insecure) {
+            if (sb_ok && avail("sing-box")) return "sing-box";
+            *why = sb_ok ? "insecure TLS (allowInsecure) requires sing-box, which is not installed"
+                         : "insecure TLS (allowInsecure) is not expressible by an available engine";
+            return "";
+        }
         if (!xray_ok && !sb_ok && !mh_ok) { *why = "config not expressible by any engine"; return ""; }
         if (xray_ok && avail("xray")) return "xray";
         if (sb_ok && avail("sing-box")) return "sing-box";
-        if (mh_ok && avail("mihomo")) return "mihomo";
+        if (mh_ok && avail("mihomo") && !needs_insecure) return "mihomo";
         *why = quic ? "sing-box (or mihomo) engine required for QUIC protocols is not installed"
                     : "no installed engine can run this config";
         return "";
     }
 
     // ── probing ──
-    void probeGroup(const std::vector<Item*>& group, const std::vector<int>& ports) {
+    // Capture direct evidence for THIS round right after it finished (cached <=5 s, shared by
+    // concurrent failures), so it is comparable with the round's time window and generation.
+    void captureEvidence(Item& it) {
+        if (it.raw.bothPass() && !(it.raw.bulk_run && it.raw.bulk.status != CheckStatus::Pass)) return;
+        if (it.raw.engine_unreachable || it.raw.engine_died) return;
+        it.snap = t.baseline_->current(ConnectivityBaseline::kFailureRecheckSeconds);
+    }
+
+    void probeGroup(const std::vector<Item*>& group, const std::vector<int>& ports,
+                    const std::function<bool()>& alive) {
         int conc = std::max(4, std::min(32, utils::getCpuCount() * 2));
         const char* env = std::getenv("HUNTER_BATCH_CONCURRENCY");
         if (env && *env) { try { conc = std::max(1, std::min(64, std::stoi(env))); } catch (...) {} }
@@ -321,11 +341,13 @@ struct ProxyTester::Impl {
         for (size_t i = 0; i < group.size(); i++) {
             Item* it = group[i];
             int port = ports[i];
-            fs.push_back(std::async(std::launch::async, [this, it, port, &sem]() {
+            fs.push_back(std::async(std::launch::async, [this, it, port, &sem, &alive]() {
                 BatchSlotGuard slot(sem);
                 try {
                     it->raw = t.probe_->run(port, opts.bulk);
                     it->probed = true;
+                    if (alive && !alive()) it->raw.engine_died = true;   // crash during the round
+                    captureEvidence(*it);
                 } catch (const std::exception& e) {
                     terminalFail(*it, ProbeOutcome::EngineError, std::string("probe exception: ") + e.what());
                 } catch (...) {
@@ -334,6 +356,11 @@ struct ProxyTester::Impl {
             }));
         }
         for (auto& f : fs) { try { f.get(); } catch (...) {} }
+        // The engine may have died after an item's failure was recorded: any non-pass item of a
+        // dead engine is an engine problem, not evidence against the server.
+        if (alive && !alive()) {
+            for (auto* it : group) if (it->probed && !it->raw.bothPass()) it->raw.engine_died = true;
+        }
     }
 
     // ── xray shared process with bisect ──
@@ -372,7 +399,7 @@ struct ProxyTester::Impl {
             switch (lr.status) {
                 case LaunchStatus::Ok:
                     ok_launches++;
-                    probeGroup(g, ports);
+                    probeGroup(g, ports, lr.alive);
                     return;   // lr.guard + leases released here (engine stopped, ports freed)
                 case LaunchStatus::BindConflict:
                     continue;  // fresh random ports, no penalty
@@ -434,7 +461,7 @@ struct ProxyTester::Impl {
                 case LaunchStatus::Ok: {
                     ok_launches++;
                     std::vector<Item*> one{&it};
-                    probeGroup(one, {lease.port()});
+                    probeGroup(one, {lease.port()}, lr.alive);
                     return;
                 }
                 case LaunchStatus::BindConflict: continue;
@@ -458,6 +485,7 @@ struct ProxyTester::Impl {
     }
 
     void run(const std::vector<std::string>& uris, std::vector<ProxyTestResult>& results) {
+        round_gen = opts.generation ? opts.generation : t.baseline_->generation();
         items.resize(uris.size());
         std::vector<Item*> xray_g, other_g;
         for (size_t i = 0; i < uris.size(); i++) {
@@ -479,6 +507,7 @@ struct ProxyTester::Impl {
                 it.raw.a.detail = it.raw.b.detail = "tcp prescreen failed";
                 it.raw.started_at = it.raw.finished_at = t.clock_();
                 it.probed = true;   // goes through baseline attribution like any other failure
+                captureEvidence(it);
                 continue;
             }
             (it.engine == "xray" ? xray_g : other_g).push_back(&it);
@@ -510,14 +539,14 @@ struct ProxyTester::Impl {
 
     void finalize(std::vector<ProxyTestResult>& results) {
         auto& ctl = t.baseline_->controls();
-        bool any_fail = false;
+        // Controls: only FULL successes (A+B and, when requested, bulk) with their own timestamp
+        // and generation. classifyRound admits a control only inside the failed round's window.
         for (auto& it : items) {
-            if (!it.probed) continue;
-            if (it.raw.bothPass()) ctl.record(it.key, kCheckA | kCheckB, it.raw.finished_at);
-            else if (!it.raw.engine_unreachable) any_fail = true;
+            if (!it.probed || !it.raw.bothPass()) continue;
+            if (it.raw.bulk_run && it.raw.bulk.status != CheckStatus::Pass) continue;
+            if (it.raw.engine_died) continue;
+            ctl.record(it.key, kCheckA | kCheckB, it.raw.finished_at, round_gen);
         }
-        BaselineSnapshot snap;
-        if (any_fail) snap = t.baseline_->current(ConnectivityBaseline::kFailureRecheckSeconds);
         const double now = t.clock_();
 
         int pass = 0, excluded = 0, fail = 0;
@@ -529,13 +558,16 @@ struct ProxyTester::Impl {
             std::string run_id = run_prefix + "-" + std::to_string(it.idx);
             ProbeResult pr;
             if (it.probed) {
-                Attribution at = classifyRound(it.raw, snap, &ctl, it.key, now);
-                pr = buildProbeResult(it.raw, at, it.key, it.engine, run_id, opts.generation);
-                if (!it.raw.bothPass()) r.error_message = describe(it);
+                Attribution at = classifyRound(it.raw, it.snap, &ctl, it.key, round_gen);
+                pr = buildProbeResult(it.raw, at, it.key, it.engine, run_id, round_gen);
+                if (at.outcome != ProbeOutcome::Pass) {
+                    r.error_message = describe(it);
+                    if (it.raw.engine_died) r.error_message += "engine exited during round";
+                }
             } else {
                 pr.endpoint_key = it.key;
                 pr.run_id = run_id;
-                pr.generation = opts.generation;
+                pr.generation = round_gen;
                 pr.engine = it.engine;
                 pr.outcome = it.has_terminal ? it.terminal : ProbeOutcome::EngineError;
                 pr.started_at = it.t_start;

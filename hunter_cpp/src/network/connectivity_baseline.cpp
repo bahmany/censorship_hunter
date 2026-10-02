@@ -21,21 +21,22 @@ const char* baselineStateName(BaselineState s) {
 }
 
 // ── ControlTracker ──────────────────────────────────────────────────────
-void ControlTracker::record(const std::string& key, uint32_t mask, double now) {
+void ControlTracker::record(const std::string& key, uint32_t mask, double now, uint64_t generation) {
     std::lock_guard<std::mutex> lk(mu_);
     auto& e = last_[key];
-    e.first = mask;
-    e.second = now;
+    e.mask = mask;
+    e.at = now;
+    e.gen = generation;
     if (last_.size() > 4096) {   // bounded
-        for (auto it = last_.begin(); it != last_.end();) it = (now - it->second.second > 300.0) ? last_.erase(it) : std::next(it);
+        for (auto it = last_.begin(); it != last_.end();) it = (now - it->second.at > 300.0) ? last_.erase(it) : std::next(it);
     }
 }
 
-bool ControlTracker::passed(const std::string& exclude_key, uint32_t bit, double now, double max_age_s) const {
+bool ControlTracker::passed(const std::string& exclude_key, uint32_t bit, double t0, double t1, uint64_t generation) const {
     std::lock_guard<std::mutex> lk(mu_);
     for (const auto& [k, v] : last_) {
         if (k == exclude_key) continue;
-        if ((v.first & bit) == bit && now - v.second <= max_age_s && now >= v.second - 1.0) return true;
+        if ((v.mask & bit) == bit && v.gen == generation && v.at >= t0 && v.at <= t1) return true;
     }
     return false;
 }
@@ -117,7 +118,15 @@ BaselineSnapshot ConnectivityBaseline::current(double max_age_s) {
     }
     BaselineSnapshot m = measure();   // network I/O outside the lock
     std::lock_guard<std::mutex> lk(mu_);
-    if (m.generation == generation_) { cached_ = m; have_ = true; }
+    if (!enabled_ || m.generation != generation_) {
+        // The world changed while we were measuring (M5 disabled / network generation bumped):
+        // the measurement is not evidence for anyone. Never cache it, never report it as ok.
+        m.a_ok = m.b_ok = false;
+        m.state = BaselineState::Indeterminate;
+        m.enabled = enabled_;
+        return m;   // keeps the stale generation => the classifier rejects it
+    }
+    cached_ = m; have_ = true;
     return m;
 }
 
@@ -151,16 +160,31 @@ BaselineSnapshot ConnectivityBaseline::measure() {
 
 // ── attribution ─────────────────────────────────────────────────────────
 Attribution classifyRound(const RawProbe& raw, const BaselineSnapshot& base, const ControlTracker* controls,
-                          const std::string& key, double now) {
+                          const std::string& key, uint64_t generation) {
     Attribution out;
-    if (raw.bothPass()) { out.outcome = ProbeOutcome::Pass; out.attributable = true; return out; }
+    const double t0 = raw.started_at - kWindowSlackSeconds;
+    const double t1 = raw.finished_at + kWindowSlackSeconds;
+    const bool bulk_failed = raw.bulk_run && raw.bulk.status != CheckStatus::Pass;
+
+    if (raw.engine_died && !(raw.bothPass() && !bulk_failed)) {   // local crash: never the server's fault
+        out.outcome = ProbeOutcome::EngineError;
+        return out;
+    }
+    if (raw.bothPass()) {
+        if (bulk_failed) { out.outcome = ProbeOutcome::Partial; out.attributable = false; return out; }   // A+B ok, bulk not
+        out.outcome = ProbeOutcome::Pass; out.attributable = true; return out;
+    }
     if (raw.engine_unreachable) { out.outcome = ProbeOutcome::EngineError; return out; }
+
+    // Direct evidence only counts when it belongs to this round: same generation, enabled,
+    // and captured inside the round window.
+    const bool base_valid = base.enabled && base.generation == generation && base.at >= t0 && base.at <= t1;
 
     auto failedAttributable = [&](const CheckOutcome& c, bool direct_ok, uint32_t bit) {
         if (c.status != CheckStatus::Fail) return false;
         if (c.failure == CheckFailure::ProxyConnect) return false;   // local engine, never the server
-        if (base.enabled && direct_ok) return true;
-        return controls && controls->passed(key, bit, now);
+        if (base_valid && direct_ok) return true;
+        return controls && controls->passed(key, bit, t0, t1, generation);
     };
     bool attributable = failedAttributable(raw.a, base.a_ok, kCheckA) || failedAttributable(raw.b, base.b_ok, kCheckB);
     const bool one_passed = raw.a.status == CheckStatus::Pass || raw.b.status == CheckStatus::Pass;
@@ -172,8 +196,8 @@ Attribution classifyRound(const RawProbe& raw, const BaselineSnapshot& base, con
     }
     if (attributable) { out.outcome = ProbeOutcome::RemoteFailure; out.attributable = true; return out; }
     out.attributable = false;
-    out.outcome = (base.enabled && base.state == BaselineState::Offline) ? ProbeOutcome::LocalNetworkDown
-                                                                         : ProbeOutcome::Indeterminate;
+    out.outcome = (base_valid && base.state == BaselineState::Offline) ? ProbeOutcome::LocalNetworkDown
+                                                                      : ProbeOutcome::Indeterminate;
     return out;
 }
 

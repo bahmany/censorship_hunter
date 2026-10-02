@@ -6,6 +6,10 @@
 #include <atomic>
 #include <cstdlib>
 #include <map>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 using namespace hunter;
 using namespace hunter::network;
 using namespace fake;
@@ -23,13 +27,15 @@ struct MockLauncher : EngineLauncher {
     std::map<int, std::pair<std::string, std::string>> live;   // port -> {engine, host}
     std::set<std::string> missing;
     int conflicts = 0;           // number of BindConflict answers to give first
-    bool break_all = false;      // every launch is rejected
+    bool break_all = false;
+    bool crash = false;          // launched engine reports exited during the round      // every launch is rejected
     bool available(const std::string& e) const override { return !missing.count(e); }
     LaunchResult launch(const LaunchRequest& rq) override {
         std::lock_guard<std::mutex> l(mu);
         calls.push_back({rq.engine, rq.config_text, rq.ports});
         LaunchResult r;
         if (conflicts > 0) { conflicts--; r.status = LaunchStatus::BindConflict; return r; }
+        if (rq.config_text.find("crash") != std::string::npos) crash = true;
         if (break_all || rq.config_text.find("bad-") != std::string::npos) { r.status = LaunchStatus::StartupFailed; r.detail = "bad outbound"; return r; }
         for (int p : rq.ports) {
             std::string host = rq.engine == "xray" ? hostAfter(rq.config_text, "\"tag\":\"proxy-" + std::to_string(p) + "\"", "\"address\":\"")
@@ -38,6 +44,7 @@ struct MockLauncher : EngineLauncher {
         }
         auto ports = rq.ports; auto* self = this;
         r.status = LaunchStatus::Ok;
+        if (crash) r.alive = [] { return false; };
         r.guard = std::shared_ptr<void>(nullptr, [self, ports](void*) { std::lock_guard<std::mutex> g(self->mu); for (int p : ports) self->live.erase(p); });
         return r;
     }
@@ -56,6 +63,8 @@ struct Rig {
             std::string host, engine;
             { std::lock_guard<std::mutex> l(ml->mu); auto it = ml->live.find(q.proxy_port); if (it == ml->live.end()) return err(TransportError::ProxyConnect); host = it->second.second; engine = it->second.first; }
             if (host.find("dead") != std::string::npos) return err(TransportError::Timeout);
+            if (host.find("crash") != std::string::npos) return err(TransportError::Tls, "Broken pipe");
+            if (host.find("slowbulk") != std::string::npos && isBulk(q)) return err(TransportError::Timeout);
             if (isA(q)) return okA(); if (isB(q)) return okB(); return okBulk();
         };
         direct->handler = [](const TransportRequest& q) { return isA(q) ? okA() : okB(); };
@@ -135,5 +144,38 @@ int main() {
       auto res = r.t.testBatch({trojan("a.example.com"), trojan("b.example.com")}, o);
       CHECK(res[0].probe.generation == 7 && res[0].probe.run_id == "rp-0" && res[1].probe.run_id == "rp-1", "ids");
       CHECK(!res[0].probe.endpoint_key.empty() && res[0].endpoint_key == res[0].probe.endpoint_key, "key"); } T_END();
+
+    // ── Fix round 1 regressions ──
+    const std::string kInsecure = "trojan://review-only@127.0.0.1:34990?security=tls&sni=localhost&allowInsecure=1&fp=chrome";   // reviewer fixture URI
+    // The fixture URI points at 127.0.0.1:34990; keep a TCP listener there so the (enabled) prescreen passes.
+    int lsock = socket(AF_INET, SOCK_STREAM, 0); { sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = htons(34990);
+      int one = 1; setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one); bind(lsock, (sockaddr*)&a, sizeof a); listen(lsock, 64); }
+    T_CASE("#1 insecure TLS link runs on sing-box with insecure honored, never on xray");
+    { Rig r; auto res = r.t.testBatch({kInsecure});
+      CHECK(res[0].engine_used == "sing-box" && r.ml->count("xray") == 0, "sing-box chosen");
+      CHECK(!r.ml->calls.empty() && r.ml->calls[0].text.find("\"insecure\":true") != std::string::npos, "insecure emitted");
+      CHECK(res[0].success, "passes through capable engine"); } T_END();
+
+    T_CASE("#1 insecure link without sing-box => Unsupported, non-attributable (no false Dead)");
+    { Rig r; r.ml->missing = {"sing-box"}; auto res = r.t.testBatch({kInsecure});
+      CHECK(res[0].probe.outcome == ProbeOutcome::Unsupported && !res[0].probe.attributable, "unsupported");
+      CHECK(r.ml->calls.empty(), "nothing launched on an engine that ignores the option"); } T_END();
+
+    T_CASE("#4 bulk failure after A+B pass => Partial (not Pass, not attributed)");
+    { Rig r; BatchTestOptions o; o.bulk = true; auto res = r.t.testBatch({trojan("slowbulk.example.com"), trojan("ok.example.com")}, o);
+      CHECK(res[0].probe.outcome == ProbeOutcome::Partial && !res[0].success && !res[0].probe.attributable, "partial");
+      CHECK(!res[0].probe.bulk_passed && res[0].error_message.find("bulk") != std::string::npos, "reason preserved");
+      CHECK(res[1].success && res[1].probe.bulk_passed, "other passes fully"); } T_END();
+
+    T_CASE("#5 engine exit during the round => EngineError for failing configs, even with a healthy control");
+    { Rig r; r.ml->crash = true; auto res = r.t.testBatch({trojan("crash.example.com"), trojan("crash2.example.com")});
+      for (auto& x : res) CHECK(x.probe.outcome == ProbeOutcome::EngineError && !x.probe.attributable, "engine error");
+      Rig q; q.ml->conflicts = 0; auto ok = q.t.testBatch({trojan("dead.example.com"), trojan("ok.example.com")});
+      CHECK(ok[0].probe.outcome == ProbeOutcome::RemoteFailure, "no crash => normal attribution"); } T_END();
+
+    T_CASE("#2 results carry the live baseline generation");
+    { Rig r; r.bl->bumpGeneration(); r.bl->bumpGeneration(); auto res = r.t.testBatch({trojan("dead.example.com")});
+      CHECK(res[0].probe.generation == 2, "generation propagated"); CHECK(res[0].probe.attributable, "fresh evidence under same generation"); } T_END();
+    close(lsock);
     return T_SUMMARY();
 }

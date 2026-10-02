@@ -25,7 +25,7 @@ long long bindLoopback(int port) {
     BOOL excl = TRUE;   // exclusive: no other process may share the port
     setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char*)&excl, sizeof excl);
 #else
-    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+    int s = ::socket(AF_INET, SOCK_STREAM | SOCK_CLOEXEC, 0);   // never inherited by exec children
     if (s < 0) return -1;
     // No SO_REUSEADDR / SO_REUSEPORT: any existing listener or TIME_WAIT remnant => collision.
 #endif

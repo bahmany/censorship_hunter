@@ -69,6 +69,23 @@ struct ProcessGuard {
     int pid = -1;
 #endif
     std::string cfg, log;
+    std::atomic<bool> dead{false};
+    // True while the child process is still running (detects crashes after startup).
+    bool alive() {
+        if (dead.load()) return false;
+#ifdef _WIN32
+        DWORD code = 0;
+        if (!proc || !GetExitCodeProcess(proc, &code) || code != STILL_ACTIVE) { dead = true; return false; }
+        return true;
+#else
+        if (pid <= 0) { dead = true; return false; }
+        int st = 0;
+        pid_t w = waitpid(pid, &st, WNOHANG);
+        if (w == pid) { pid = -1; dead = true; return false; }   // reaped: destructor will not kill
+        if (w == -1) { dead = true; return false; }
+        return true;
+#endif
+    }
     ~ProcessGuard() {
 #ifdef _WIN32
         if (proc) { TerminateProcess(proc, 0); WaitForSingleObject(proc, 3000); CloseHandle(proc); }
@@ -204,6 +221,8 @@ LaunchResult ProcessEngineLauncher::launch(const LaunchRequest& req) {
     }
     out.status = LaunchStatus::Ok;
     out.guard = guard;
+    std::weak_ptr<ProcessGuard> wg = guard;
+    out.alive = [wg]() { auto g = wg.lock(); return g && g->alive(); };
     return out;
 }
 

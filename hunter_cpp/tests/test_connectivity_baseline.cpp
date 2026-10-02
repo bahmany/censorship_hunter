@@ -41,7 +41,7 @@ int main() {
     T_CASE("offline: link down and direct fails => LocalNetworkDown, no penalty");
     { Env e([](const TransportRequest&) { return err(TransportError::Timeout); }); e.link = false;
       auto s = e.bl->current(); CHECK(s.state == BaselineState::Offline, "offline");
-      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", e.now);
+      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", 0);
       CHECK(a.outcome == ProbeOutcome::LocalNetworkDown && !a.attributable, "local down");
       auto pr = buildProbeResult(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), a, "k1", "xray", "r-1", 1);
       CHECK(!pr.attributable && pr.outcome == ProbeOutcome::LocalNetworkDown, "no penalty result"); } T_END();
@@ -49,31 +49,31 @@ int main() {
     T_CASE("link up but direct fails (censored/captive) => Indeterminate, not attributable");
     { Env e([](const TransportRequest&) { return err(TransportError::Timeout); });
       auto s = e.bl->current(); CHECK(s.state != BaselineState::Online, "not online");
-      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", e.now);
+      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", 0);
       CHECK(a.outcome == ProbeOutcome::Indeterminate && !a.attributable, "indeterminate"); } T_END();
 
     T_CASE("online + failed tunnel => attributable RemoteFailure");
     { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
       auto s = e.bl->current();
-      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", e.now);
+      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", 0);
       CHECK(a.outcome == ProbeOutcome::RemoteFailure && a.attributable, "remote failure");
-      auto p = classifyRound(failedRaw(CheckFailure::None, CheckFailure::Timeout), s, &e.bl->controls(), "k1", e.now);
+      auto p = classifyRound(failedRaw(CheckFailure::None, CheckFailure::Timeout), s, &e.bl->controls(), "k1", 0);
       CHECK(p.outcome == ProbeOutcome::Partial, "partial");
-      auto ok = classifyRound(passRaw(), s, &e.bl->controls(), "k1", e.now);
+      auto ok = classifyRound(passRaw(), s, &e.bl->controls(), "k1", 0);
       CHECK(ok.outcome == ProbeOutcome::Pass, "pass"); } T_END();
 
     T_CASE("engine unreachable => EngineError, never attributable");
     { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
       auto s = e.bl->current(); auto r = failedRaw(CheckFailure::ProxyConnect, CheckFailure::ProxyConnect); r.engine_unreachable = true;
-      auto a = classifyRound(r, s, &e.bl->controls(), "k1", e.now); CHECK(a.outcome == ProbeOutcome::EngineError && !a.attributable, "engine error");
+      auto a = classifyRound(r, s, &e.bl->controls(), "k1", 0); CHECK(a.outcome == ProbeOutcome::EngineError && !a.attributable, "engine error");
       auto r2 = failedRaw(CheckFailure::ProxyConnect, CheckFailure::ProxyConnect);
-      CHECK(!classifyRound(r2, s, &e.bl->controls(), "k1", e.now).attributable, "ProxyConnect never attributable"); } T_END();
+      CHECK(!classifyRound(r2, s, &e.bl->controls(), "k1", 0).attributable, "ProxyConnect never attributable"); } T_END();
 
     T_CASE("M5 toggle off: no direct probes, failures not attributable");
     { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
       e.bl->setEnabled(false); CHECK(!e.bl->enabled(), "disabled");
       auto s = e.bl->current(); CHECK(e.tr->calls.empty(), "no direct traffic when disabled"); CHECK(!s.enabled, "snapshot says disabled");
-      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", e.now);
+      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", 0);
       CHECK(!a.attributable && a.outcome != ProbeOutcome::RemoteFailure, "no attribution without evidence");
       e.bl->setEnabled(true); CHECK(e.bl->current().enabled, "re-enabled"); } T_END();
 
@@ -81,17 +81,64 @@ int main() {
     { Env e([](const TransportRequest&) { return err(TransportError::Timeout); });
       auto s = e.bl->current(); // direct failing, link up -> indeterminate
       auto fail = failedRaw(CheckFailure::Timeout, CheckFailure::Timeout);
-      CHECK(!classifyRound(fail, s, &e.bl->controls(), "k1", e.now).attributable, "no control yet");
+      CHECK(!classifyRound(fail, s, &e.bl->controls(), "k1", 0).attributable, "no control yet");
       e.bl->controls().record("k1", kCheckA | kCheckB, e.now);
-      CHECK(!classifyRound(fail, s, &e.bl->controls(), "k1", e.now).attributable, "own key is not a control");
+      CHECK(!classifyRound(fail, s, &e.bl->controls(), "k1", 0).attributable, "own key is not a control");
       e.bl->controls().record("k2", kCheckA | kCheckB, e.now);
-      auto a = classifyRound(fail, s, &e.bl->controls(), "k1", e.now);
+      auto a = classifyRound(fail, s, &e.bl->controls(), "k1", 0);
       CHECK(a.attributable && a.outcome == ProbeOutcome::RemoteFailure, "other tunnel works => server fault");
-      CHECK(!e.bl->controls().passed("k1", kCheckA, e.now + 120), "control expires after 60s"); } T_END();
+      CHECK(!e.bl->controls().passed("k1", kCheckA, e.now + 100, e.now + 110, 0), "control outside the window does not count"); } T_END();
 
     T_CASE("generation bump drops cache");
     { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
       e.bl->current(); int n = (int)e.tr->calls.size(); e.bl->bumpGeneration(); e.bl->current();
       CHECK((int)e.tr->calls.size() > n, "re-measured"); CHECK(e.bl->generation() == 1, "generation"); } T_END();
+
+    // ── Fix round 1 regressions ──
+    T_CASE("#2 baseline from another generation is not evidence");
+    { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
+      auto s = e.bl->current(); e.bl->bumpGeneration();
+      auto a = classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s, &e.bl->controls(), "k1", e.bl->generation());
+      CHECK(!a.attributable && a.outcome == ProbeOutcome::Indeterminate, "old-generation snapshot rejected");
+      auto s2 = e.bl->current();
+      CHECK(classifyRound(failedRaw(CheckFailure::Timeout, CheckFailure::Timeout), s2, &e.bl->controls(), "k1", e.bl->generation()).attributable, "fresh snapshot accepted"); } T_END();
+
+    T_CASE("#2 generation bump / M5 disable during an in-flight measurement discards it");
+    { Env* ep = nullptr; Env e([&ep](const TransportRequest& q) { if (ep && isA(q)) ep->bl->bumpGeneration(); return isA(q) ? okA() : okB(); });
+      ep = &e; auto s = e.bl->current();
+      CHECK(!s.a_ok && !s.b_ok && s.state == BaselineState::Indeterminate, "in-flight measurement invalidated");
+      CHECK(s.generation != e.bl->generation(), "stamped with the stale generation");
+      ep = nullptr; auto s3 = e.bl->current(); CHECK(s3.a_ok, "not cached as good");
+      Env* fp = nullptr; Env f([&fp](const TransportRequest& q) { if (fp && isA(q)) fp->bl->setEnabled(false); return isA(q) ? okA() : okB(); });
+      fp = &f; auto s2 = f.bl->current(); CHECK(!s2.a_ok && !s2.enabled, "M5 off mid-flight: no evidence"); } T_END();
+
+    T_CASE("#2 stale (out-of-window) baseline is not evidence");
+    { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
+      auto s = e.bl->current(); auto raw = failedRaw(CheckFailure::Timeout, CheckFailure::Timeout, 1100.0);
+      CHECK(!classifyRound(raw, s, &e.bl->controls(), "k1", 0).attributable, "baseline from t=1000 vs round at 1100"); } T_END();
+
+    T_CASE("#3 control must pass inside the failed round's window (no retroactive blame)");
+    { Env e([](const TransportRequest&) { return err(TransportError::Timeout); });
+      auto s = e.bl->current(); auto raw = failedRaw(CheckFailure::Timeout, CheckFailure::Timeout, 1000.0); raw.finished_at = 1001.0;
+      e.bl->controls().record("k2", kCheckA | kCheckB, 1040.0, 0);
+      CHECK(!classifyRound(raw, s, &e.bl->controls(), "k1", 0).attributable, "control at 1040 cannot blame a round ending 1001");
+      e.bl->controls().record("k3", kCheckA | kCheckB, 1003.0, 0);
+      CHECK(classifyRound(raw, s, &e.bl->controls(), "k1", 0).attributable, "control inside window counts");
+      ControlTracker other; other.record("k4", kCheckA | kCheckB, 1000.5, 7);
+      CHECK(!classifyRound(raw, s, &other, "k1", 0).attributable, "control from another generation ignored"); } T_END();
+
+    T_CASE("#4 bulk failure with A+B passing is Partial, never Pass");
+    { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
+      auto s = e.bl->current(); auto raw = passRaw(); raw.bulk_run = true; raw.bulk.status = CheckStatus::Fail; raw.bulk.failure = CheckFailure::Timeout; raw.latency_ms = 50;
+      auto a = classifyRound(raw, s, &e.bl->controls(), "k1", 0);
+      CHECK(a.outcome == ProbeOutcome::Partial && !a.attributable, "unattributed Partial");
+      auto pr = buildProbeResult(raw, a, "k1", "xray", "r", 0); CHECK(!pr.bulk_passed && (pr.checks & kCheckBulk) == 0, "no bulk credit");
+      raw.bulk.status = CheckStatus::Pass; CHECK(classifyRound(raw, s, &e.bl->controls(), "k1", 0).outcome == ProbeOutcome::Pass, "bulk ok => Pass"); } T_END();
+
+    T_CASE("#5 engine died during the round => EngineError, never attributable");
+    { Env e([](const TransportRequest& q) { return isA(q) ? okA() : okB(); });
+      auto s = e.bl->current(); e.bl->controls().record("k2", kCheckA | kCheckB, 1000.0, 0);
+      auto raw = failedRaw(CheckFailure::Tls, CheckFailure::Tls); raw.engine_died = true;
+      auto a = classifyRound(raw, s, &e.bl->controls(), "k1", 0); CHECK(a.outcome == ProbeOutcome::EngineError && !a.attributable, "engine error"); } T_END();
     return T_SUMMARY();
 }

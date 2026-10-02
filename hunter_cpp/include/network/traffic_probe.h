@@ -107,6 +107,7 @@ struct RawProbe {
     int port = 0;
     double started_at = 0.0;    // UTC seconds
     double finished_at = 0.0;
+    bool engine_died = false;          // local engine process exited during/after the round (set by the tester)
     bool engine_unreachable = false;   // local proxy port refused on every check
     bool bothPass() const { return a.status == CheckStatus::Pass && b.status == CheckStatus::Pass; }
 };

@@ -10,6 +10,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#include <atomic>
+#include <poll.h>
 #include <cstdlib>
 #include <cstring>
 #include <thread>
@@ -21,7 +23,9 @@ int main() {
     int hs = socket(AF_INET, SOCK_STREAM, 0); int one = 1; setsockopt(hs, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); bind(hs, (sockaddr*)&a, sizeof a); listen(hs, 8);
     socklen_t l = sizeof a; getsockname(hs, (sockaddr*)&a, &l); int hp = ntohs(a.sin_port);
-    std::thread srv([hs] { for (int i = 0; i < 2; i++) { int c = accept(hs, nullptr, nullptr); if (c < 0) return; char b[2048]; recv(c, b, sizeof b, 0);
+    std::atomic<bool> stop{false};
+    std::thread srv([hs, &stop] { while (!stop) { pollfd pf{hs, POLLIN, 0}; if (poll(&pf, 1, 100) <= 0) continue;   // stop-aware: never blocks forever
+        int c = accept(hs, nullptr, nullptr); if (c < 0) continue; char b[2048]; recv(c, b, sizeof b, 0);
         const char* r = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"; send(c, r, strlen(r), MSG_NOSIGNAL); close(c); } });
 
     T_CASE("real xray: launch on leased port, fetch loopback server through it");
@@ -39,7 +43,7 @@ int main() {
         auto r = tr->fetch(q); CHECK(r.status == 204, "204 through real xray");
     }
     T_END();
-    { int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (sockaddr*)&a, sizeof a); close(c); }
+    stop = true;
     srv.join(); close(hs);
     return T_SUMMARY();
 }
