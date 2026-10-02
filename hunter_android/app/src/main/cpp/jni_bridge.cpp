@@ -26,7 +26,10 @@ void setAndroidAssetManager(AAssetManager* am);
 // Forward declarations for functions defined in android_app.cpp
 extern "C" bool androidAppInit();
 extern "C" void androidAppShutdown();
+extern "C" void androidUiShutdown();
 extern "C" void androidRenderFrame();
+
+static bool g_gl_inited = false;
 
 extern "C" {
 
@@ -40,25 +43,22 @@ Java_com_hunter_app_MainActivity_nativeSetAssetManager(JNIEnv* env, jclass cls, 
 }
 
 JNIEXPORT void JNICALL
-Java_com_hunter_app_MainActivity_nativeSetEngineDir(JNIEnv* env, jclass cls, jstring dir) {
-    const char* cdir = env->GetStringUTFChars(dir, nullptr);
-    if (cdir) {
-        LOGI("nativeSetEngineDir: %s", cdir);
-        hunter::embed::setExtractionBaseDir(std::string(cdir));
-        env->ReleaseStringUTFChars(dir, cdir);
-    }
-}
-
-JNIEXPORT void JNICALL
 Java_com_hunter_app_MainActivity_nativeInit(JNIEnv* env, jclass cls) {
     LOGI("nativeInit");
-    androidAppInit();
+    androidAppInit();  // idempotent; no-op if the service already started the core
 }
 
 JNIEXPORT void JNICALL
 Java_com_hunter_app_MainActivity_nativeShutdown(JNIEnv* env, jclass cls) {
-    LOGI("nativeShutdown");
-    androidAppShutdown();
+    // UI teardown only; the core (orchestrator + engines) is owned by HunterVpnService /
+    // HunterNative and is stopped via HunterNative.stopCore().
+    LOGI("nativeShutdown (UI)");
+    if (g_gl_inited) {
+        ImGui_ImplOpenGL3_Shutdown();
+        ImGui_ImplAndroid_Shutdown();
+        g_gl_inited = false;
+    }
+    if (ImGui::GetCurrentContext()) ImGui::DestroyContext();
 }
 
 JNIEXPORT void JNICALL
@@ -103,8 +103,11 @@ Java_com_hunter_app_HunterView_00024Renderer_nativeOnSurfaceCreated(JNIEnv* env,
         io.Fonts->AddFontDefault(&font_cfg);
     }
 
-    ImGui_ImplAndroid_Init();
+    // Surface re-created (EGL context preserved/lost): drop old GL objects first to avoid leaks.
+    if (g_gl_inited) ImGui_ImplOpenGL3_Shutdown();
+    else ImGui_ImplAndroid_Init();
     ImGui_ImplOpenGL3_Init("#version 300 es");
+    g_gl_inited = true;
 }
 
 JNIEXPORT void JNICALL
@@ -116,12 +119,8 @@ Java_com_hunter_app_HunterView_00024Renderer_nativeOnSurfaceChanged(JNIEnv* env,
 
 JNIEXPORT void JNICALL
 Java_com_hunter_app_HunterView_00024Renderer_nativeOnDrawFrame(JNIEnv* env, jobject thiz) {
-    // Ensure app is initialized
-    static bool app_init = false;
-    if (!app_init) {
-        androidAppInit();
-        app_init = true;
-    }
+    // Ensure core is up (idempotent; fails harmlessly until the data dir is set).
+    androidAppInit();
 
     // New frame
     ImGui_ImplOpenGL3_NewFrame();
