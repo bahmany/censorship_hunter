@@ -6,6 +6,7 @@
 #include "network/engine_launcher.h"
 #include "network/port_lease.h"
 #include "network/traffic_probe.h"
+#include "network/uri_parser.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -19,7 +20,23 @@ using namespace hunter::network;
 
 int main() {
     const char* xp = std::getenv("HUNTER_XRAY_PATH");
-    if (!xp || access(xp, X_OK) != 0) { std::cout << "SKIP: set HUNTER_XRAY_PATH to an xray binary" << std::endl; return 77; }
+    const char* sbp = std::getenv("HUNTER_SINGBOX_PATH");
+    const bool have_sb = sbp && access(sbp, X_OK) == 0;
+    if ((!xp || access(xp, X_OK) != 0) && !have_sb) { std::cout << "SKIP: set HUNTER_XRAY_PATH and/or HUNTER_SINGBOX_PATH" << std::endl; return 77; }
+    if (!xp || access(xp, X_OK) != 0) {   // sing-box only
+        T_CASE("real sing-box: generated hy2/tuic/insecure configs start and listen");
+        auto reg = PortLeaseRegistry::create();
+        for (const char* uri : {"hysteria2://pw@203.0.113.9:443?sni=a.example.com&insecure=1", "tuic://11111111-2222-3333-4444-555555555555:pw@203.0.113.9:443?sni=a.example.com&alpn=h3",
+                                "trojan://pw@203.0.113.9:443?security=tls&sni=a.example.com&allowInsecure=1"}) {
+            auto c = hunter::network::UriParser::parse(uri); CHECK(c && c->isValid(), "parsed");
+            auto lease = reg->acquire(); LaunchRequest rq; rq.engine = "sing-box"; rq.ports = {lease.port()}; rq.startup_timeout_ms = 15000;
+            rq.config_text = c->toSingBoxConfigJson(lease.port()); lease.releaseSocket();
+            ProcessEngineLauncher pl("", sbp, ""); auto lr = pl.launch(rq);
+            CHECK(lr.status == LaunchStatus::Ok, std::string(uri) + ": " + lr.detail);
+        }
+        T_END();
+        return T_SUMMARY();
+    }
     int hs = socket(AF_INET, SOCK_STREAM, 0); int one = 1; setsockopt(hs, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); bind(hs, (sockaddr*)&a, sizeof a); listen(hs, 8);
     socklen_t l = sizeof a; getsockname(hs, (sockaddr*)&a, &l); int hp = ntohs(a.sin_port);

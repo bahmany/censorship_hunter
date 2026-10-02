@@ -141,7 +141,7 @@ struct BenchResult {
     std::string uri;
     float latency_ms = 0.0f;
     bool success = false;
-    std::string tier;             // "gold", "silver", "dead"
+    std::string tier;             // "gold","silver" on pass; else "dead"/"unstable" (Stability verdict) or "untested" (excluded/insufficient evidence)
     std::string ps;               // Config remark
     std::string protocol;
     std::string engine_used;

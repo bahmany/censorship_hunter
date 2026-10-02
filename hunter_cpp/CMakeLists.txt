@@ -350,6 +350,9 @@ if(HUNTER_INTEGRATION_TESTS)
     add_executable(test_engine_integration tests/test_engine_integration.cpp)
     target_link_options(test_engine_integration PRIVATE -static-libgcc -static-libstdc++)
     target_link_libraries(test_engine_integration PRIVATE hunter_core)
+    add_executable(test_singbox_schema tests/test_singbox_schema.cpp)
+    target_link_options(test_singbox_schema PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(test_singbox_schema PRIVATE hunter_core)
 endif()
 
 # CTest registration
@@ -367,6 +370,8 @@ endforeach()
 if(HUNTER_INTEGRATION_TESTS)
     add_test(NAME test_engine_integration COMMAND test_engine_integration)
     set_tests_properties(test_engine_integration PROPERTIES LABELS integration TIMEOUT 120 SKIP_RETURN_CODE 77)
+    add_test(NAME test_singbox_schema COMMAND test_singbox_schema)
+    set_tests_properties(test_singbox_schema PROPERTIES LABELS integration TIMEOUT 300 SKIP_RETURN_CODE 77)
 endif()
 
 # Install targets

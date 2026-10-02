@@ -1066,6 +1066,7 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
             BenchResult br;
             br.uri = batch_configs[i];
             const auto& r = batch_results[i];
+            bool applied = false;
 
             br.success = r.success;
             br.telegram_only = false;   // Telegram is optional capability metadata, not health
@@ -1074,13 +1075,27 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
                 br.tier = br.latency_ms <= constants::GOLD_LATENCY_MS ? "gold" : "silver";
             } else {
                 br.latency_ms = 0;
-                br.tier = "dead";
+                // "dead" is a Stability verdict from accumulated evidence, never a single failed or
+                // excluded round: typed outcome / current DB stability decide the label.
+                br.tier = "untested";
+                if (config_db_ && r.has_probe) {
+                    config_db_->applyProbeResult(r.probe);
+                    ConfigHealthRecord rec;
+                    if (config_db_->getRecord(br.uri, &rec)) {
+                        switch (config_db_->evaluate(rec).stability) {
+                            case Stability::Dead: br.tier = "dead"; break;
+                            case Stability::Unstable: br.tier = "unstable"; break;
+                            default: br.tier = "untested"; break;
+                        }
+                    }
+                    applied = true;
+                }
             }
             br.engine_used = r.engine_used;
             br.error = r.error_message;
             results.push_back(br);
 
-            if (config_db_ && r.has_probe) config_db_->applyProbeResult(r.probe);
+            if (config_db_ && r.has_probe && !applied) config_db_->applyProbeResult(r.probe);
         }
 
         if (offset + batch_size < deduped.size()) {

@@ -44,7 +44,7 @@ int main() {
           CHECK(!c || !c->isValid() || (std::string(port).empty() && c->port == 443), std::string("rejected: ") + port); } } T_END();
 
     T_CASE("full option map retained; insecure only when asked");
-    { auto c = P("hysteria2://pw@h.example.com:443?sni=h.example.com&obfs=salamander&obfs-password=op&pinSHA256=AA:BB&alpn=h3&insecure=0#n");
+    { auto c = P("hysteria2://pw@h.example.com:443?sni=h.example.com&obfs=salamander&obfs-password=op&alpn=h3&insecure=0#n");
       CHECK(c && c->option("obfs") == "salamander" && c->option("alpn") == "h3", "options"); if (c) {
         CHECK(!c->insecureTls(), "insecure=0 is verified");
         auto j = c->toSingBoxConfigJson(1080);
@@ -53,6 +53,10 @@ int main() {
       auto d = P("tuic://" + U + ":pw@t.example.com:443?sni=t.example.com&allow_insecure=1&congestion_control=cubic&udp_relay_mode=native");
       CHECK(d && d->insecureTls(), "insecure honored when asked"); if (d) { auto j = d->toSingBoxConfigJson(1080);
         CHECK(j.find("cubic") != std::string::npos && j.find("native") != std::string::npos, "tuic opts"); CHECK(j.find("\"insecure\":true") != std::string::npos, "insecure emitted"); } } T_END();
+
+    T_CASE("hy2 certificate pin cannot be expressed by sing-box: refused unless insecure");
+    { auto c = P("hysteria2://pw@h.example.com:443?sni=h.example.com&pinSHA256=AA:BB"); CHECK(c && c->toSingBoxConfigJson(1080).empty(), "pin => unsupported (no silent policy change)");
+      auto d = P("hysteria2://pw@h.example.com:443?sni=h.example.com&pinSHA256=AA:BB&insecure=1"); CHECK(d && !d->toSingBoxConfigJson(1080).empty(), "pin + insecure => insecure test"); } T_END();
 
     T_CASE("no direct egress in sing-box test config");
     { auto c = P("hysteria2://pw@h.example.com:443?sni=h.example.com"); auto j = c->toSingBoxConfigJson(1080);

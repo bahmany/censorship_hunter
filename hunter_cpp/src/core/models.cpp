@@ -1,3 +1,4 @@
+#include <vector>
 #include "core/models.h"
 #include "core/utils.h"
 #include "core/constants.h"
@@ -363,7 +364,10 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
         const std::string alpn = alpnJsonArray(option("alpn"));
         if (!alpn.empty()) ob << ",\"alpn\":" << alpn;
         const std::string pin = option("pinSHA256");
-        if (!pin.empty() && proto == "hysteria2") ob << ",\"certificate_public_key_sha256\":[\"" << pin << "\"]";
+        // hysteria2 pinSHA256 is a CERTIFICATE fingerprint; sing-box can only pin the PUBLIC KEY hash,
+        // so it cannot be expressed faithfully. With insecure TLS the pin is moot (verification is off);
+        // otherwise refuse (Unsupported, non-attributable) instead of testing with a different policy.
+        if (!pin.empty() && proto == "hysteria2" && !insecureTls()) return "";
 
         if (security == "reality") {
             ob << ",\"reality\":{\"enabled\":true";
@@ -401,21 +405,18 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
     
     ob << "}";
     
-    // Full sing-box config with blackhole kill switch
+    // Full sing-box 1.14 config (new DNS server format, route actions; no legacy block/dns outbounds,
+    // no inbound sniff fields). Private destinations are rejected; everything else goes to "proxy".
     std::ostringstream ss;
     ss << "{"
        << "\"log\":{\"level\":\"warn\"},"
-       << "\"dns\":{\"servers\":[{\"tag\":\"dns-direct\",\"address\":\"1.1.1.1\"},{\"tag\":\"dns-google\",\"address\":\"8.8.8.8\"}]},"
-       << "\"inbounds\":[{\"type\":\"mixed\",\"tag\":\"mixed-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << ",\"sniff\":true,\"sniff_override_destination\":true}],"
-       << "\"outbounds\":["
-       << ob.str()
-       << ",{\"type\":\"direct\",\"tag\":\"direct\"}"
-       << ",{\"type\":\"block\",\"tag\":\"blackhole\"}"
-       << "],"
+       << "\"dns\":{\"servers\":[{\"type\":\"udp\",\"tag\":\"dns-direct\",\"server\":\"1.1.1.1\"}],\"final\":\"dns-direct\"},"
+       << "\"inbounds\":[{\"type\":\"mixed\",\"tag\":\"mixed-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << "}],"
+       << "\"outbounds\":[" << ob.str() << "],"
        << "\"route\":{\"rules\":["
-       << "{\"ip_is_private\":true,\"outbound\":\"blackhole\"},"
-       << "{\"inbound\":[\"mixed-in\"],\"outbound\":\"proxy\"}"
-       << "],\"final\":\"blackhole\"}"
+       << "{\"ip_is_private\":true,\"action\":\"reject\"},"
+       << "{\"inbound\":[\"mixed-in\"],\"action\":\"route\",\"outbound\":\"proxy\"}"
+       << "],\"final\":\"proxy\",\"default_domain_resolver\":\"dns-direct\"}"
        << "}";
     return ss.str();
 }
