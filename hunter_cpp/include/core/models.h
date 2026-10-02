@@ -69,7 +69,8 @@ struct ParsedConfig {
     std::string flow;             // XTLS flow (xtls-rprx-vision)
     std::string ps;               // Remark/name
     std::string type;             // Header type (http, none)
-    std::map<std::string, std::string> extra;  // Extra params
+    std::map<std::string, std::string> extra;  // Extra params (serviceName, plugin, obfs, ...)
+    std::map<std::string, std::string> options;  // FULL option map as parsed (query / vmess JSON); nothing dropped
 
     static bool hasBadChars_(const std::string& s) {
         for (unsigned char c : s) {
@@ -79,11 +80,40 @@ struct ParsedConfig {
     }
     bool isValid() const {
         if (protocol.empty() || address.empty() || port < 1 || port > 65535) return false;
+        // Every field spliced into generated JSON must be free of quotes/backslashes/control chars.
         if (hasBadChars_(address) || hasBadChars_(uuid) || hasBadChars_(sni) ||
-            hasBadChars_(host) || hasBadChars_(encryption)) return false;
+            hasBadChars_(host) || hasBadChars_(encryption) || hasBadChars_(path) ||
+            hasBadChars_(fingerprint) || hasBadChars_(public_key) || hasBadChars_(short_id) ||
+            hasBadChars_(flow) || hasBadChars_(type) || hasBadChars_(network) || hasBadChars_(security))
+            return false;
+        for (const auto& kv : extra) if (hasBadChars_(kv.second)) return false;
+        for (const char* k : {"alpn", "obfs", "obfs-password", "pinSHA256", "congestion_control", "udp_relay_mode"}) {
+            auto it = options.find(k);
+            if (it != options.end() && hasBadChars_(it->second)) return false;
+        }
         if (address.size() > 253 || uuid.size() > 512) return false;
         if ((protocol == "vmess" || protocol == "vless") && uuid.empty()) return false;
         return true;
+    }
+    /// True when the link explicitly asks to skip upstream certificate verification
+    /// (allowInsecure / insecure / skip-cert-verify aliases). Default is verified TLS.
+    bool insecureTls() const {
+        for (const char* k : {"allowInsecure", "insecure", "allow_insecure", "skip-cert-verify", "skip_cert_verify"}) {
+            auto it = options.find(k);
+            if (it != options.end() && (it->second == "1" || it->second == "true" || it->second == "True")) return true;
+        }
+        return false;
+    }
+    std::string option(const char* key, const std::string& def = "") const {
+        auto it = options.find(key);
+        if (it != options.end()) return it->second;
+        it = extra.find(key);
+        return it == extra.end() ? def : it->second;
+    }
+    std::string grpcServiceName() const {
+        auto it = extra.find("serviceName");
+        if (it != extra.end() && !it->second.empty()) return it->second;
+        return path;
     }
     bool isReality() const { return security == "reality"; }
     bool isTLS() const { return security == "tls"; }

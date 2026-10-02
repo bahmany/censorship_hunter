@@ -3,11 +3,205 @@
 #include "core/constants.h"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 #include <regex>
 
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
+
 namespace hunter {
 namespace network {
+
+namespace {
+
+// Strict port: 1-5 ASCII digits only, 1..65535 ("443abc", "4-43", "", "0" are rejected).
+bool parsePortStrict(const std::string& s, int* out) {
+    if (s.empty() || s.size() > 5) return false;
+    int v = 0;
+    for (char c : s) {
+        if (c < '0' || c > '9') return false;
+        v = v * 10 + (c - '0');
+    }
+    if (v < 1 || v > 65535) return false;
+    *out = v;
+    return true;
+}
+
+bool isIpv6Literal(const std::string& h) {
+    unsigned char buf[16];
+    return h.find(':') != std::string::npos && inet_pton(AF_INET6, h.c_str(), buf) == 1;
+}
+
+bool hostCharsOk(const std::string& h) {
+    if (h.empty() || h.size() > 253) return false;
+    if (isIpv6Literal(h)) return true;
+    for (unsigned char c : h) {
+        if (!(std::isalnum(c) || c == '.' || c == '-' || c == '_')) return false;
+    }
+    return true;
+}
+
+// host:port | [v6]:port | host (when port_optional). Unbracketed IPv6 is accepted only as a bare
+// literal without port. Anything with a trailing path ("/...") must be stripped by the caller.
+bool splitHostPort(const std::string& hp, std::string* host, int* port, bool port_optional, int default_port) {
+    if (hp.empty()) return false;
+    if (hp.front() == '[') {
+        auto rb = hp.find(']');
+        if (rb == std::string::npos) return false;
+        std::string h = hp.substr(1, rb - 1);
+        if (!isIpv6Literal(h)) return false;
+        *host = h;
+        if (rb + 1 == hp.size()) {
+            if (!port_optional) return false;
+            *port = default_port;
+            return true;
+        }
+        if (hp[rb + 1] != ':') return false;
+        return parsePortStrict(hp.substr(rb + 2), port);
+    }
+    if (std::count(hp.begin(), hp.end(), ':') > 1) {
+        if (!port_optional || !isIpv6Literal(hp)) return false;
+        *host = hp;
+        *port = default_port;
+        return true;
+    }
+    auto colon = hp.rfind(':');
+    if (colon == std::string::npos) {
+        if (!port_optional || !hostCharsOk(hp)) return false;
+        *host = hp;
+        *port = default_port;
+        return true;
+    }
+    std::string h = hp.substr(0, colon);
+    if (!hostCharsOk(h)) return false;
+    *host = h;
+    return parsePortStrict(hp.substr(colon + 1), port);
+}
+
+// Percent-decode WITHOUT turning '+' into a space (credentials keep '+').
+std::string pctDecode(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == '%' && i + 2 < s.size() + 0 && std::isxdigit((unsigned char)s[i + 1]) && std::isxdigit((unsigned char)s[i + 2])) {
+            out += (char)std::stoi(s.substr(i + 1, 2), nullptr, 16);
+            i += 2;
+        } else out += s[i];
+    }
+    return out;
+}
+
+std::string b64UrlDecode(std::string s) {
+    for (auto& c : s) { if (c == '-') c = '+'; else if (c == '_') c = '/'; }
+    return utils::base64Decode(s);
+}
+
+// Pieces shared by all "scheme://userinfo@host:port/path?query#frag" URIs.
+struct Split {
+    std::string userinfo;
+    bool has_userinfo = false;
+    std::string hostport;
+    std::string frag;
+    std::map<std::string, std::string> params;
+};
+
+Split splitUri(std::string rest) {
+    Split sp;
+    auto hash = rest.find('#');
+    if (hash != std::string::npos) { sp.frag = utils::urlDecode(rest.substr(hash + 1)); rest = rest.substr(0, hash); }
+    auto q = rest.find('?');
+    if (q != std::string::npos) {
+        sp.params = UriParser::parseQueryParams(rest.substr(q + 1));
+        rest = rest.substr(0, q);
+    }
+    auto at = rest.rfind('@');
+    if (at != std::string::npos) { sp.userinfo = rest.substr(0, at); sp.has_userinfo = true; rest = rest.substr(at + 1); }
+    auto slash = rest.find('/');
+    if (slash != std::string::npos) rest = rest.substr(0, slash);   // "host:443/" and "host:443/path"
+    sp.hostport = rest;
+    return sp;
+}
+
+std::string param(const std::map<std::string, std::string>& m, const char* k, const std::string& def = "") {
+    auto it = m.find(k);
+    return it == m.end() ? def : it->second;
+}
+
+void retainOptions(ParsedConfig& cfg, const std::map<std::string, std::string>& params) {
+    for (const auto& kv : params) cfg.options[kv.first] = kv.second;   // full option map, nothing dropped
+}
+
+// Minimal strict parser for a FLAT JSON object of scalars (vmess share links).
+// Returns false on nested values / malformed text so callers can fall back.
+bool parseFlatJson(const std::string& j, std::map<std::string, std::string>* out) {
+    size_t i = 0, n = j.size();
+    auto ws = [&] { while (i < n && std::isspace((unsigned char)j[i])) i++; };
+    auto str = [&](std::string* r) -> bool {
+        if (i >= n || j[i] != '"') return false;
+        i++;
+        r->clear();
+        while (i < n && j[i] != '"') {
+            if (j[i] == '\\') {
+                i++;
+                if (i >= n) return false;
+                switch (j[i]) {
+                    case 'n': *r += '\n'; break; case 't': *r += '\t'; break; case 'r': *r += '\r'; break;
+                    case 'b': *r += '\b'; break; case 'f': *r += '\f'; break;
+                    case 'u': {
+                        if (i + 4 >= n) return false;
+                        unsigned cp = 0;
+                        for (int k = 1; k <= 4; k++) { if (!std::isxdigit((unsigned char)j[i + k])) return false; cp = cp * 16 + (unsigned)std::stoi(std::string(1, j[i + k]), nullptr, 16); }
+                        i += 4;
+                        if (cp < 0x80) *r += (char)cp;
+                        else if (cp < 0x800) { *r += (char)(0xC0 | (cp >> 6)); *r += (char)(0x80 | (cp & 0x3F)); }
+                        else { *r += (char)(0xE0 | (cp >> 12)); *r += (char)(0x80 | ((cp >> 6) & 0x3F)); *r += (char)(0x80 | (cp & 0x3F)); }
+                        break;
+                    }
+                    default: *r += j[i]; break;   // \" \\ \/
+                }
+                i++;
+            } else *r += j[i++];
+        }
+        if (i >= n) return false;
+        i++;
+        return true;
+    };
+    ws();
+    if (i >= n || j[i] != '{') return false;
+    i++;
+    ws();
+    if (i < n && j[i] == '}') return true;
+    while (i < n) {
+        ws();
+        std::string k, v;
+        if (!str(&k)) return false;
+        ws();
+        if (i >= n || j[i] != ':') return false;
+        i++;
+        ws();
+        if (i >= n) return false;
+        if (j[i] == '"') { if (!str(&v)) return false; }
+        else if (j[i] == '{' || j[i] == '[') return false;   // nested: not a flat vmess object
+        else {
+            size_t e = j.find_first_of(",}", i);
+            if (e == std::string::npos) return false;
+            v = utils::trim(j.substr(i, e - i));
+            i = e;
+        }
+        (*out)[k] = v;
+        ws();
+        if (i < n && j[i] == ',') { i++; continue; }
+        if (i < n && j[i] == '}') return true;
+        return false;
+    }
+    return false;
+}
+
+}  // namespace
 
 bool UriParser::isValidScheme(const std::string& uri) {
     for (const auto& scheme : constants::supportedSchemes()) {
@@ -19,6 +213,7 @@ bool UriParser::isValidScheme(const std::string& uri) {
 std::map<std::string, std::string> UriParser::parseQueryParams(const std::string& query) {
     std::map<std::string, std::string> params;
     for (const auto& pair : utils::split(query, '&')) {
+        if (pair.empty()) continue;
         auto eq = pair.find('=');
         if (eq != std::string::npos) {
             params[pair.substr(0, eq)] = utils::urlDecode(pair.substr(eq + 1));
@@ -58,17 +253,14 @@ std::vector<ParsedConfig> UriParser::parseMany(const std::vector<std::string>& u
 
 // ─── VMess ───
 std::optional<ParsedConfig> UriParser::parseVmess(const std::string& uri) {
-    // vmess://base64json
-    std::string payload = uri.substr(8); // skip "vmess://"
-    // Remove fragment
+    std::string payload = uri.substr(8);
     auto hash_pos = payload.find('#');
     std::string remark;
     if (hash_pos != std::string::npos) {
         remark = utils::urlDecode(payload.substr(hash_pos + 1));
         payload = payload.substr(0, hash_pos);
     }
-
-    std::string json = utils::base64Decode(payload);
+    std::string json = b64UrlDecode(payload);
     if (json.empty() || json.find('{') == std::string::npos) return std::nullopt;
 
     ParsedConfig cfg;
@@ -76,170 +268,106 @@ std::optional<ParsedConfig> UriParser::parseVmess(const std::string& uri) {
     cfg.protocol = "vmess";
     cfg.ps = remark;
 
-    // Minimal JSON parsing for vmess fields
-    auto extractField = [&json](const std::string& key) -> std::string {
-        std::string search = "\"" + key + "\"";
-        auto pos = json.find(search);
-        if (pos == std::string::npos) return "";
-        pos = json.find(':', pos + search.size());
-        if (pos == std::string::npos) return "";
-        pos++;
-        while (pos < json.size() && json[pos] == ' ') pos++;
-        if (pos >= json.size()) return "";
-        if (json[pos] == '"') {
-            auto end = json.find('"', pos + 1);
-            if (end == std::string::npos) return "";
-            return json.substr(pos + 1, end - pos - 1);
-        }
-        // Number
-        auto end = json.find_first_of(",}", pos);
-        if (end == std::string::npos) end = json.size();
-        return utils::trim(json.substr(pos, end - pos));
-    };
+    std::map<std::string, std::string> f;
+    if (!parseFlatJson(json, &f)) {
+        // Legacy tolerant extraction (nested/odd JSON) - keeps previously parseable links alive.
+        auto extractField = [&json](const std::string& key) -> std::string {
+            std::string search = "\"" + key + "\"";
+            auto pos = json.find(search);
+            if (pos == std::string::npos) return "";
+            pos = json.find(':', pos + search.size());
+            if (pos == std::string::npos) return "";
+            pos++;
+            while (pos < json.size() && json[pos] == ' ') pos++;
+            if (pos >= json.size()) return "";
+            if (json[pos] == '"') {
+                auto end = json.find('"', pos + 1);
+                if (end == std::string::npos) return "";
+                return json.substr(pos + 1, end - pos - 1);
+            }
+            auto end = json.find_first_of(",}", pos);
+            if (end == std::string::npos) end = json.size();
+            return utils::trim(json.substr(pos, end - pos));
+        };
+        for (const char* k : {"add", "port", "id", "scy", "net", "tls", "sni", "host", "path", "type", "fp", "ps", "alpn", "aid", "allowInsecure"})
+            f[k] = extractField(k);
+    }
+    cfg.address = f["add"];
+    if (!parsePortStrict(f["port"], &cfg.port)) return std::nullopt;
+    cfg.uuid = f["id"];
+    cfg.encryption = f["scy"].empty() ? "auto" : f["scy"];
+    cfg.network = f["net"].empty() ? "tcp" : f["net"];
+    cfg.security = f["tls"];
+    cfg.sni = f["sni"];
+    cfg.host = f["host"];
+    cfg.path = f["path"];
+    cfg.type = f["type"];
+    cfg.fingerprint = f["fp"];
+    if (cfg.ps.empty()) cfg.ps = f["ps"];
+    for (const auto& kv : f) cfg.options[kv.first] = kv.second;
+    if (cfg.network == "grpc" && !cfg.path.empty()) cfg.extra["serviceName"] = cfg.path;   // vmess keeps it in "path"
 
-    cfg.address = extractField("add");
-    std::string port_str = extractField("port");
-    try { cfg.port = std::stoi(port_str); } catch (...) { return std::nullopt; }
-    if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
-    cfg.uuid = extractField("id");
-    cfg.encryption = extractField("scy");
-    if (cfg.encryption.empty()) cfg.encryption = "auto";
-    cfg.network = extractField("net");
-    if (cfg.network.empty()) cfg.network = "tcp";
-    cfg.security = extractField("tls");
-    cfg.sni = extractField("sni");
-    cfg.host = extractField("host");
-    cfg.path = extractField("path");
-    cfg.type = extractField("type");
-    cfg.fingerprint = extractField("fp");
-    if (cfg.ps.empty()) cfg.ps = extractField("ps");
-
-    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535 || cfg.uuid.empty()) return std::nullopt;
+    if (!hostCharsOk(cfg.address) || cfg.uuid.empty()) return std::nullopt;
     return cfg;
 }
 
 // ─── VLESS ───
 std::optional<ParsedConfig> UriParser::parseVless(const std::string& uri) {
-    // vless://uuid@host:port?params#remark
-    std::string rest = uri.substr(8); // skip "vless://"
-
+    Split sp = splitUri(uri.substr(8));
     ParsedConfig cfg;
     cfg.uri = uri;
     cfg.protocol = "vless";
-
-    // Fragment (remark)
-    auto hash_pos = rest.find('#');
-    if (hash_pos != std::string::npos) {
-        cfg.ps = utils::urlDecode(rest.substr(hash_pos + 1));
-        rest = rest.substr(0, hash_pos);
-    }
-
-    // Query params
-    auto q_pos = rest.find('?');
-    std::map<std::string, std::string> params;
-    if (q_pos != std::string::npos) {
-        params = parseQueryParams(rest.substr(q_pos + 1));
-        rest = rest.substr(0, q_pos);
-    }
-
-    // uuid@host:port
-    auto at_pos = rest.find('@');
-    if (at_pos == std::string::npos) return std::nullopt;
-    cfg.uuid = rest.substr(0, at_pos);
-    std::string hostport = rest.substr(at_pos + 1);
-    if (hostport.empty()) return std::nullopt;
-
-    // Handle IPv6 [host]:port
-    if (hostport.front() == '[') {
-        auto bracket = hostport.find(']');
-        if (bracket == std::string::npos) return std::nullopt;
-        cfg.address = hostport.substr(1, bracket - 1);
-        if (bracket + 1 < hostport.size() && hostport[bracket + 1] == ':') {
-            std::string p = hostport.substr(bracket + 2);
-            // Remove trailing non-digits
-            p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
-            try { cfg.port = std::stoi(p); } catch (...) { return std::nullopt; }
-            if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
-        }
-    } else {
-        auto colon = hostport.rfind(':');
-        if (colon == std::string::npos) return std::nullopt;
-        cfg.address = hostport.substr(0, colon);
-        std::string p = hostport.substr(colon + 1);
-        p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
-        try { cfg.port = std::stoi(p); } catch (...) { return std::nullopt; }
-        if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
-    }
-
-    // Apply params
-    cfg.encryption = params.count("encryption") ? params["encryption"] : "none";
-    cfg.security = params.count("security") ? params["security"] : "";
-    cfg.network = params.count("type") ? params["type"] : "tcp";
-    cfg.sni = params.count("sni") ? params["sni"] : "";
-    cfg.host = params.count("host") ? params["host"] : "";
-    cfg.path = params.count("path") ? params["path"] : "";
-    cfg.fingerprint = params.count("fp") ? params["fp"] : "";
-    cfg.public_key = params.count("pbk") ? params["pbk"] : "";
-    cfg.short_id = params.count("sid") ? params["sid"] : "";
-    cfg.flow = params.count("flow") ? params["flow"] : "";
-
-    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535 || cfg.uuid.empty()) return std::nullopt;
+    cfg.ps = sp.frag;
+    if (!sp.has_userinfo) return std::nullopt;
+    cfg.uuid = pctDecode(sp.userinfo);
+    if (!splitHostPort(sp.hostport, &cfg.address, &cfg.port, false, 0)) return std::nullopt;
+    const auto& p = sp.params;
+    retainOptions(cfg, p);
+    cfg.encryption = param(p, "encryption", "none");
+    cfg.security = param(p, "security");
+    cfg.network = param(p, "type", "tcp");
+    cfg.sni = param(p, "sni");
+    cfg.host = param(p, "host");
+    cfg.path = param(p, "path");
+    cfg.fingerprint = param(p, "fp");
+    cfg.public_key = param(p, "pbk");
+    cfg.short_id = param(p, "sid");
+    cfg.flow = param(p, "flow");
+    cfg.type = param(p, "headerType");
+    if (p.count("serviceName")) cfg.extra["serviceName"] = p.at("serviceName");
+    if (cfg.uuid.empty()) return std::nullopt;
     return cfg;
 }
 
 // ─── Trojan ───
 std::optional<ParsedConfig> UriParser::parseTrojan(const std::string& uri) {
-    // trojan://password@host:port?params#remark
-    std::string rest = uri.substr(9); // skip "trojan://"
-
+    Split sp = splitUri(uri.substr(9));
     ParsedConfig cfg;
     cfg.uri = uri;
     cfg.protocol = "trojan";
-
-    auto hash_pos = rest.find('#');
-    if (hash_pos != std::string::npos) {
-        cfg.ps = utils::urlDecode(rest.substr(hash_pos + 1));
-        rest = rest.substr(0, hash_pos);
-    }
-
-    auto q_pos = rest.find('?');
-    std::map<std::string, std::string> params;
-    if (q_pos != std::string::npos) {
-        params = parseQueryParams(rest.substr(q_pos + 1));
-        rest = rest.substr(0, q_pos);
-    }
-
-    auto at_pos = rest.find('@');
-    if (at_pos == std::string::npos) return std::nullopt;
-    cfg.uuid = rest.substr(0, at_pos);
-    std::string hostport = rest.substr(at_pos + 1);
-    if (hostport.empty()) return std::nullopt;
-
-    auto colon = hostport.rfind(':');
-    if (colon == std::string::npos) return std::nullopt;
-    cfg.address = hostport.substr(0, colon);
-    std::string p = hostport.substr(colon + 1);
-    p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
-    try { cfg.port = std::stoi(p); } catch (...) { return std::nullopt; }
-    if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
-
-    cfg.security = params.count("security") ? params["security"] : "tls";
-    cfg.network = params.count("type") ? params["type"] : "tcp";
-    cfg.sni = params.count("sni") ? params["sni"] : "";
-    cfg.host = params.count("host") ? params["host"] : "";
-    cfg.path = params.count("path") ? params["path"] : "";
-    cfg.fingerprint = params.count("fp") ? params["fp"] : "";
-
-    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
+    cfg.ps = sp.frag;
+    if (!sp.has_userinfo) return std::nullopt;
+    cfg.uuid = pctDecode(sp.userinfo);
+    if (!splitHostPort(sp.hostport, &cfg.address, &cfg.port, false, 0)) return std::nullopt;
+    const auto& p = sp.params;
+    retainOptions(cfg, p);
+    cfg.security = param(p, "security", "tls");
+    cfg.network = param(p, "type", "tcp");
+    cfg.sni = param(p, "sni");
+    cfg.host = param(p, "host");
+    cfg.path = param(p, "path");
+    cfg.fingerprint = param(p, "fp");
+    cfg.type = param(p, "headerType");
+    if (p.count("serviceName")) cfg.extra["serviceName"] = p.at("serviceName");
     return cfg;
 }
 
 // ─── Shadowsocks ───
 std::optional<ParsedConfig> UriParser::parseShadowsocks(const std::string& uri) {
-    // ss://base64(method:password)@host:port#remark
-    // or ss://base64(method:password@host:port)#remark
-    std::string rest = uri.substr(5); // skip "ss://"
-
+    // SIP002:  ss://base64url(method:password)@host:port[/][?plugin=...][#tag]
+    //          ss://method:password@host:port   (plain, percent-encoded userinfo)
+    // Legacy:  ss://base64(method:password@host:port)[#tag]
+    std::string rest = uri.substr(5);
     ParsedConfig cfg;
     cfg.uri = uri;
     cfg.protocol = "shadowsocks";
@@ -249,148 +377,88 @@ std::optional<ParsedConfig> UriParser::parseShadowsocks(const std::string& uri) 
         cfg.ps = utils::urlDecode(rest.substr(hash_pos + 1));
         rest = rest.substr(0, hash_pos);
     }
-
-    auto at_pos = rest.find('@');
-    if (at_pos != std::string::npos) {
-        // Format: base64(method:password)@host:port
-        std::string userinfo = utils::base64Decode(rest.substr(0, at_pos));
-        std::string hostport = rest.substr(at_pos + 1);
-        if (hostport.empty()) return std::nullopt;
-
-        auto colon = userinfo.find(':');
-        if (colon != std::string::npos) {
-            cfg.encryption = userinfo.substr(0, colon);
-            cfg.uuid = userinfo.substr(colon + 1);
-        }
-
-        colon = hostport.rfind(':');
-        if (colon != std::string::npos) {
-            cfg.address = hostport.substr(0, colon);
-            std::string p = hostport.substr(colon + 1);
-            p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
-            try { cfg.port = std::stoi(p); } catch (...) {}
-        }
-    } else {
-        // Format: base64(method:password@host:port)
-        std::string decoded = utils::base64Decode(rest);
-        auto colon1 = decoded.find(':');
-        auto at = decoded.find('@');
-        if (colon1 != std::string::npos && at != std::string::npos && colon1 < at) {
-            cfg.encryption = decoded.substr(0, colon1);
-            cfg.uuid = decoded.substr(colon1 + 1, at - colon1 - 1);
-            std::string hostport = decoded.substr(at + 1);
-            auto colon2 = hostport.rfind(':');
-            if (colon2 != std::string::npos) {
-                cfg.address = hostport.substr(0, colon2);
-                std::string p = hostport.substr(colon2 + 1);
-                p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
-                try { cfg.port = std::stoi(p); } catch (...) {}
-            }
-        }
+    std::map<std::string, std::string> params;
+    auto q = rest.find('?');
+    if (q != std::string::npos) {   // the query is split off BEFORE any port parsing (plugin digits never leak into the port)
+        params = parseQueryParams(rest.substr(q + 1));
+        rest = rest.substr(0, q);
     }
+    while (!rest.empty() && rest.back() == '/') rest.pop_back();
+    retainOptions(cfg, params);
+    if (params.count("plugin")) cfg.extra["plugin"] = params.at("plugin");
 
-    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
+    auto at_pos = rest.rfind('@');
+    if (at_pos != std::string::npos) {
+        std::string raw_user = rest.substr(0, at_pos);
+        std::string userinfo = pctDecode(raw_user);
+        if (userinfo.find(':') == std::string::npos) userinfo = b64UrlDecode(userinfo);   // base64 form
+        auto colon = userinfo.find(':');
+        if (colon == std::string::npos) return std::nullopt;
+        cfg.encryption = userinfo.substr(0, colon);
+        cfg.uuid = userinfo.substr(colon + 1);
+        std::string hostport = rest.substr(at_pos + 1);
+        if (!splitHostPort(hostport, &cfg.address, &cfg.port, false, 0)) return std::nullopt;
+    } else {
+        std::string decoded = b64UrlDecode(pctDecode(rest));
+        auto at = decoded.rfind('@');
+        auto colon1 = decoded.find(':');
+        if (at == std::string::npos || colon1 == std::string::npos || colon1 > at) return std::nullopt;
+        cfg.encryption = decoded.substr(0, colon1);
+        cfg.uuid = decoded.substr(colon1 + 1, at - colon1 - 1);
+        if (!splitHostPort(decoded.substr(at + 1), &cfg.address, &cfg.port, false, 0)) return std::nullopt;
+    }
+    if (cfg.encryption.empty()) return std::nullopt;
     return cfg;
 }
 
 // ─── Hysteria2 ───
 std::optional<ParsedConfig> UriParser::parseHysteria2(const std::string& uri) {
-    // hysteria2://auth@host:port?params#remark (or hy2://)
     std::string rest = uri;
     if (utils::startsWith(rest, "hysteria2://")) rest = rest.substr(12);
     else if (utils::startsWith(rest, "hy2://")) rest = rest.substr(6);
     else return std::nullopt;
 
+    Split sp = splitUri(rest);
     ParsedConfig cfg;
     cfg.uri = uri;
     cfg.protocol = "hysteria2";
-
-    auto hash_pos = rest.find('#');
-    if (hash_pos != std::string::npos) {
-        cfg.ps = utils::urlDecode(rest.substr(hash_pos + 1));
-        rest = rest.substr(0, hash_pos);
-    }
-
-    auto q_pos = rest.find('?');
-    std::map<std::string, std::string> params;
-    if (q_pos != std::string::npos) {
-        params = parseQueryParams(rest.substr(q_pos + 1));
-        rest = rest.substr(0, q_pos);
-    }
-
-    auto at_pos = rest.find('@');
-    if (at_pos != std::string::npos) {
-        cfg.uuid = rest.substr(0, at_pos);
-        rest = rest.substr(at_pos + 1);
-    }
-
-    auto colon = rest.rfind(':');
-    if (colon != std::string::npos) {
-        cfg.address = rest.substr(0, colon);
-        std::string p = rest.substr(colon + 1);
-        p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
-        try { cfg.port = std::stoi(p); } catch (...) {}
-        if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
-    } else {
-        cfg.address = rest;
-        cfg.port = 443;
-    }
-
-    cfg.sni = params.count("sni") ? params["sni"] : "";
+    cfg.ps = sp.frag;
+    if (sp.has_userinfo) cfg.uuid = pctDecode(sp.userinfo);
+    if (!splitHostPort(sp.hostport, &cfg.address, &cfg.port, true, 443)) return std::nullopt;
+    const auto& p = sp.params;
+    retainOptions(cfg, p);
+    cfg.sni = param(p, "sni");
     cfg.security = "tls";
-
-    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
+    for (const char* k : {"obfs", "obfs-password", "pinSHA256", "alpn", "up", "down", "upmbps", "downmbps"})
+        if (p.count(k)) cfg.extra[k] = p.at(k);
     return cfg;
 }
 
 // ─── TUIC ───
 std::optional<ParsedConfig> UriParser::parseTuic(const std::string& uri) {
-    // tuic://uuid:password@host:port?params#remark
-    std::string rest = uri.substr(7); // skip "tuic://"
-
+    Split sp = splitUri(uri.substr(7));
     ParsedConfig cfg;
     cfg.uri = uri;
     cfg.protocol = "tuic";
-
-    auto hash_pos = rest.find('#');
-    if (hash_pos != std::string::npos) {
-        cfg.ps = utils::urlDecode(rest.substr(hash_pos + 1));
-        rest = rest.substr(0, hash_pos);
-    }
-
-    auto q_pos = rest.find('?');
-    std::map<std::string, std::string> params;
-    if (q_pos != std::string::npos) {
-        params = parseQueryParams(rest.substr(q_pos + 1));
-        rest = rest.substr(0, q_pos);
-    }
-
-    auto at_pos = rest.find('@');
-    if (at_pos != std::string::npos) {
-        std::string userinfo = rest.substr(0, at_pos);
+    cfg.ps = sp.frag;
+    if (sp.has_userinfo) {
+        std::string userinfo = sp.userinfo;
         auto colon = userinfo.find(':');
         if (colon != std::string::npos) {
-            cfg.uuid = userinfo.substr(0, colon);
-            cfg.extra["password"] = userinfo.substr(colon + 1);
+            cfg.uuid = pctDecode(userinfo.substr(0, colon));
+            cfg.extra["password"] = pctDecode(userinfo.substr(colon + 1));
         } else {
-            cfg.uuid = userinfo;
+            cfg.uuid = pctDecode(userinfo);
         }
-        rest = rest.substr(at_pos + 1);
     }
-
-    auto colon = rest.rfind(':');
-    if (colon != std::string::npos) {
-        cfg.address = rest.substr(0, colon);
-        std::string p = rest.substr(colon + 1);
-        p.erase(std::remove_if(p.begin(), p.end(), [](char c) { return !std::isdigit(c); }), p.end());
-        try { cfg.port = std::stoi(p); } catch (...) {}
-        if (cfg.port < 1 || cfg.port > 65535) return std::nullopt;
-    }
-
-    cfg.sni = params.count("sni") ? params["sni"] : "";
+    if (!splitHostPort(sp.hostport, &cfg.address, &cfg.port, false, 0)) return std::nullopt;
+    const auto& p = sp.params;
+    retainOptions(cfg, p);
+    cfg.sni = param(p, "sni");
     cfg.security = "tls";
-
-    if (cfg.address.empty() || cfg.port < 1 || cfg.port > 65535) return std::nullopt;
+    for (const char* k : {"congestion_control", "udp_relay_mode", "alpn"})
+        if (p.count(k)) cfg.extra[k] = p.at(k);
+    if (cfg.uuid.empty()) return std::nullopt;
     return cfg;
 }
 

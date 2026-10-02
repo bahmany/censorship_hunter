@@ -51,19 +51,17 @@ std::optional<T> getBefore(std::future<T>& fut,
 // chunk: process spawn, queueing behind other pool work, and teardown.
 constexpr int kChunkSlackSeconds = 60;
 
- bool isUsableResult(const ProxyTestResult& result) {
-     return result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
- }
-
- bool isTelegramOnlyResult(const ProxyTestResult& result) {
-     return result.success && result.telegram_only;
- }
-
- float healthMetricFromResult(const ProxyTestResult& result) {
-     if (!isUsableResult(result)) return 0.0f;
-     const float speed = std::max(result.download_speed_kbps, 0.1f);
-     return std::max(1.0f, 1000.0f / speed);
- }
+// Feed a tester round into the typed health pipeline. Excluded outcomes (engine/local/
+// unclassified) are recorded by the DB as schedulable-with-backoff and never as failures.
+void applyTesterResults(ConfigDatabase& db, const std::vector<ProxyTestResult>& results,
+                        int* tested, int* passed) {
+    for (const auto& r : results) {
+        if (!r.has_probe) continue;
+        db.applyProbeResult(r.probe);
+        (*tested)++;
+        if (r.probe.outcome == ProbeOutcome::Pass) (*passed)++;
+    }
+}
 
  } // namespace
 
@@ -699,13 +697,6 @@ ContinuousValidator::ContinuousValidator(ConfigDatabase& db, int batch_size,
                                          int timeout_s, int max_concurrent)
     : db_(db), batch_size_(batch_size), timeout_s_(timeout_s), max_concurrent_(max_concurrent) {}
 
-bool ContinuousValidator::quickCheck(const std::string& uri) {
-    ProxyTester tester;
-
-    ProxyTestResult result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s_);
-    return isUsableResult(result);
-}
-
 std::pair<int, int> ContinuousValidator::validateBatch() {
     // ─── Direct full proxy testing ───
     // We test each config by spawning a proxy engine (xray/sing-box) and
@@ -753,42 +744,35 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
 
     if (!revalidate_batch.empty()) {
         int test_timeout = std::max(1, std::min(30, timeout_s_));
-        size_t vchunk = (size_t)std::max(1, std::min(20, max_concurrent_));
+        size_t vchunk = (size_t)std::max(1, std::min(50, max_concurrent_ * 2));
         auto& mgr = HunterTaskManager::instance();
 
         for (size_t off = 0; off < revalidate_batch.size(); off += vchunk) {
             size_t chunk_end = std::min(off + vchunk, revalidate_batch.size());
-            std::vector<std::future<ProxyTestResult>> futures;
+            std::vector<std::string> uris;
             for (size_t i = off; i < chunk_end; i++) {
-                std::string uri = revalidate_batch[i].uri;
-                int timeout_cap = test_timeout;
-                futures.push_back(mgr.submitIO([uri, timeout_cap]() -> ProxyTestResult {
-                    ProxyTester local_tester;
-                    return local_tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_cap);
-                }));
+                uris.push_back(revalidate_batch[i].uri);
+                db_.markTestingRound(ConfigDatabase::keyFor(revalidate_batch[i].uri));
             }
+            auto fut = mgr.submitIO([uris, test_timeout]() -> std::vector<ProxyTestResult> {
+                ProxyTester local_tester;
+                BatchTestOptions bo;
+                bo.timeout_seconds = test_timeout;
+                bo.bulk = true;   // candidates re-earning Healthy also confirm the 64 KiB transfer
+                return local_tester.testBatch(uris, bo);
+            });
             auto chunk_deadline = std::chrono::steady_clock::now() +
-                                  std::chrono::seconds(test_timeout + kChunkSlackSeconds);
-            for (auto& fut : futures) {
-                try {
-                    auto maybe = getBefore(fut, chunk_deadline);
-                    if (!maybe) continue;  // straggler: drop it rather than hang
-                    const auto& result = *maybe;
-                    bool ok = isUsableResult(result);
-                    bool telegram_only = isTelegramOnlyResult(result);
-                    float health_metric = healthMetricFromResult(result);
-                    revalidated++;
-                    if (ok || telegram_only) revalidated_passed++;
-                    db_.updateHealth(result.uri, ok || telegram_only,
-                                     ok ? health_metric : 0.0f,
-                                     result.engine_used, false, telegram_only);
-                } catch (...) {}
-            }
+                                  std::chrono::seconds(test_timeout * 4 + kChunkSlackSeconds);
+            try {
+                auto maybe = getBefore(fut, chunk_deadline);
+                if (!maybe) continue;  // straggler: drop it rather than hang
+                applyTesterResults(db_, *maybe, &revalidated, &revalidated_passed);
+            } catch (...) {}
         }
         if (revalidated > 0) {
             std::ostringstream ss;
             ss << "[Validator] Revalidated " << revalidated << " live configs ("
-               << revalidated_passed << " still alive)";
+               << revalidated_passed << " passed strict traffic probes)";
             utils::LogRingBuffer::instance().push(ss.str());
         }
     }
@@ -851,12 +835,9 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
     }
 
     // ─── Phase 2: Test untested/new configs ───
-    // Use batchTestWithXray (one xray process for ALL configs in the batch)
-    // instead of testConfig (one process per config). This is 10-50x faster:
-    // a single xray process with N inbounds tests all configs in parallel
-    // through their individual SOCKS ports, vs. spawning/killing N separate
-    // processes. With 100k+ untested configs, this is the difference between
-    // finding working proxies in minutes vs. hours.
+    // One ProxyTester::testBatch call: xray-compatible configs share bisected xray processes,
+    // hysteria2/tuic run in isolated sing-box workers, every probe goes through a leased port
+    // and strict A/B traffic checks, and failures are attributed against the direct baseline.
     int effective_batch = std::max(1, std::min(batch_size_, 200));
     auto batch = db_.getUntestedBatch(effective_batch);
     if (batch.empty() && revalidated == 0) return {0, 0};
@@ -865,84 +846,26 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
     int tested = 0, passed = 0;
     int test_timeout = std::max(1, std::min(30, timeout_s_));
 
-    // Collect URIs for batch testing
     std::vector<std::string> batch_uris;
     batch_uris.reserve(batch.size());
     for (auto& rec : batch) {
         batch_uris.push_back(rec.uri);
+        db_.markTestingRound(ConfigDatabase::keyFor(rec.uri));
     }
-
-    // Use a port range that doesn't conflict with the scanner (which uses
-    // DEFAULT_BENCHMARK_BASE_PORT + offset). Rotate the offset each call
-    // so consecutive batches don't reuse ports still in TIME_WAIT.
-    constexpr int VALIDATOR_BASE_PORT = 22000;
-    int port_offset = batch_port_offset_.fetch_add(500) % 5000;
-    int batch_base_port = VALIDATOR_BASE_PORT + port_offset;
 
     ProxyTester tester;
     std::vector<ProxyTestResult> batch_results;
     try {
-        batch_results = tester.batchTestWithXray(batch_uris, batch_base_port, test_timeout);
+        BatchTestOptions bo;
+        bo.timeout_seconds = test_timeout;
+        bo.bulk = true;   // first-pass candidates confirm the 64 KiB transfer
+        batch_results = tester.testBatch(batch_uris, bo);
     } catch (const std::exception& e) {
         std::cout << "  [Validator] Batch exception: " << e.what() << std::endl;
     } catch (...) {
         std::cout << "  [Validator] Batch unknown exception" << std::endl;
     }
-
-    // Update DB health from batch results
-    for (size_t i = 0; i < batch_results.size() && i < batch_uris.size(); i++) {
-        const auto& result = batch_results[i];
-        bool ok = isUsableResult(result);
-        bool telegram_only = isTelegramOnlyResult(result);
-        float health_metric = healthMetricFromResult(result);
-        tested++;
-        if (ok) passed++;
-        db_.updateHealth(batch_uris[i], ok || telegram_only,
-                         ok ? health_metric : 0.0f,
-                         result.engine_used, false, telegram_only);
-    }
-
-    total_tested_ += tested;
-    total_passed_ += passed;
-    return {tested, passed};
-}
-
-bool ContinuousValidator::pingTestWithXray(const std::string& uri) {
-    // Use XRay to test if config can connect/download anything
-    // For now, fallback to quickCheck; in future, spawn xray with config and test connectivity
-    return quickCheck(uri);
-}
-
-std::pair<int, int> ContinuousValidator::validateBatchWithXray() {
-    auto batch = db_.getUntestedBatch(batch_size_);
-    if (batch.empty()) return {0, 0};
-
-    int tested = 0, passed = 0;
-    auto& mgr = HunterTaskManager::instance();
-
-    std::vector<std::future<std::pair<std::string, bool>>> futures;
-    for (const auto& rec : batch) {
-        futures.push_back(mgr.submitIO([this, uri = rec.uri]() -> std::pair<std::string, bool> {
-            bool ok = pingTestWithXray(uri);
-            return {uri, ok};
-        }));
-    }
-
-    // All tests were submitted at once, so budget the whole batch rather than
-    // one chunk: concurrency is capped by the pool, not by this loop.
-    const int xray_timeout = std::max(1, std::min(30, timeout_s_));
-    auto batch_deadline = std::chrono::steady_clock::now() +
-                          std::chrono::seconds(xray_timeout * 4 + kChunkSlackSeconds);
-    for (auto& fut : futures) {
-        try {
-            auto maybe = getBefore(fut, batch_deadline);
-            if (!maybe) continue;  // straggler: drop it rather than hang
-            const auto& [uri, ok] = *maybe;
-            tested++;
-            if (ok) passed++;
-            db_.updateHealth(uri, ok, ok ? 1000.0f : 0.0f, "sing-box");
-        } catch (...) {}
-    }
+    applyTesterResults(db_, batch_results, &tested, &passed);
 
     total_tested_ += tested;
     total_passed_ += passed;

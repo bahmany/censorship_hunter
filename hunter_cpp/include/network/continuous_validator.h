@@ -313,12 +313,6 @@ public:
     std::pair<int, int> validateBatch();
 
     /**
-     * @brief Run one validation batch using XRay ping test (blocking)
-     * @return pair of (tested, passed)
-     */
-    std::pair<int, int> validateBatchWithXray();
-
-    /**
      * @brief Get cumulative stats
      */
     struct ValidatorStats {
@@ -335,10 +329,6 @@ private:
     int max_concurrent_;
     std::atomic<int> total_tested_{0};
     std::atomic<int> total_passed_{0};
-    std::atomic<int> batch_port_offset_{0};  // rotates base port to avoid conflicts
-
-    bool quickCheck(const std::string& uri);
-    bool pingTestWithXray(const std::string& uri);
 };
 
 } // namespace network

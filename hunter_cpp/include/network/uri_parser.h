@@ -33,6 +33,9 @@ public:
      */
     static bool isValidScheme(const std::string& uri);
 
+    /// Parse "key=val&key2=val2" (values percent-decoded). Public for tests and helpers.
+    static std::map<std::string, std::string> parseQueryParams(const std::string& query);
+
 private:
     static std::optional<ParsedConfig> parseVmess(const std::string& uri);
     static std::optional<ParsedConfig> parseVless(const std::string& uri);
@@ -40,9 +43,6 @@ private:
     static std::optional<ParsedConfig> parseShadowsocks(const std::string& uri);
     static std::optional<ParsedConfig> parseHysteria2(const std::string& uri);
     static std::optional<ParsedConfig> parseTuic(const std::string& uri);
-
-    // Helper: parse query params from "key=val&key2=val2"
-    static std::map<std::string, std::string> parseQueryParams(const std::string& query);
 };
 
 /**

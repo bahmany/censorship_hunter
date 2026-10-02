@@ -1,31 +1,53 @@
 #pragma once
 
+#include <atomic>
+#include <functional>
+#include <memory>
 #include <string>
 #include <vector>
-#include <memory>
+
+#include "core/health_score.h"
+#include "network/connectivity_baseline.h"
+#include "network/engine_launcher.h"
+#include "network/port_lease.h"
+#include "network/traffic_probe.h"
 
 namespace hunter {
 namespace network {
 
 /**
- * @brief Result of a proxy test
+ * @brief Result of a proxy test (one per input URI, same order).
+ *
+ * `probe` is the typed round result to feed ConfigDatabase::applyProbeResult.
+ * Engine/config/local problems carry excluded outcomes (EngineError, InvalidConfig,
+ * Unsupported, BindConflict, LocalNetworkDown, Indeterminate): they never count against
+ * the server.
  */
 struct ProxyTestResult {
-    bool success = false;
-    bool telegram_only = false;        // True if proxy works for Telegram but HTTP download failed
-    float download_speed_kbps = 0.0f;  // Download speed in KB/s
+    bool success = false;              // outcome == Pass (both strict checks)
+    bool telegram_only = false;        // legacy field, always false (Telegram is optional capability metadata)
+    float download_speed_kbps = 0.0f;  // REAL bulk throughput in KiB/s; 0 = not measured (never an inverse latency)
     std::string error_message;
-    std::string engine_used;  // "xray", "sing-box", "mihomo", etc.
-    std::string uri;           // The config URI that was tested
+    std::string engine_used;           // "xray", "sing-box", "mihomo"
+    std::string uri;
+    // Typed result
+    ProbeResult probe;
+    bool has_probe = false;
+    double latency_ms = -1.0;          // max(CheckA, CheckB) wall time on success, else -1
+    std::string endpoint_key;
+};
+
+struct BatchTestOptions {
+    int timeout_seconds = 10;     // overall per-check deadline ceiling (capped to the probe profile)
+    bool bulk = false;            // run the 64 KiB transfer for configs that pass both checks
+    uint64_t generation = 0;      // network generation stamped on every ProbeResult
+    std::string run_prefix;       // unique round identity prefix; auto-generated when empty
+    int bind_retries = 3;         // lease collision retries (zero penalty)
+    int max_launches = 64;        // bisect budget per call
 };
 
 /**
- * @brief Proxy engine tester
- * 
- * Tests proxy configurations by:
- * 1. Starting a proxy engine (xray, sing-box, mihomo) with the config
- * 2. Downloading a test file via the proxy
- * 3. Measuring download speed
+ * @brief Proxy engine tester (real-traffic probes, attribution, port leases, engine dispatch).
  */
 class ProxyTester {
 public:
@@ -33,61 +55,40 @@ public:
     ~ProxyTester();
 
     /**
-     * @brief Test a proxy config URI
-     * @param config_uri The proxy config URI (vmess://, vless://, trojan://, etc.)
-     * @param test_url URL to download for testing (default: cachefly)
-     * @param timeout_seconds Timeout for the test
-     * @return Test result with success status and download speed
+     * @brief Test many configs. xray-compatible configs share one xray process per (sub)group;
+     *        hysteria2/tuic run in isolated sing-box workers. Startup failures of the shared
+     *        xray process are bisected so one bad outbound never fails its neighbours.
+     * @return one result per input URI, in order.
      */
-    ProxyTestResult testConfig(const std::string& config_uri, 
-                               const std::string& test_url = "https://cachefly.cachefly.net/1mb.test",
-                               int timeout_seconds = 30);
+    std::vector<ProxyTestResult> testBatch(const std::vector<std::string>& config_uris,
+                                           const BatchTestOptions& opts = BatchTestOptions());
 
-    /**
-     * @brief Batch-test multiple configs using a SINGLE xray process (v2rayN pattern)
-     * 
-     * Generates one xray config with N inbounds (one per config on unique ports),
-     * starts ONE process, tests all configs in parallel through their SOCKS ports.
-     * Dramatically more efficient than spawning N separate processes.
-     * 
-     * @param config_uris Vector of proxy URI strings to test
-     * @param base_port Starting port for sequential allocation
-     * @param timeout_seconds Per-config test timeout
-     * @return Vector of results (one per input URI, in same order)
-     */
-    std::vector<ProxyTestResult> batchTestWithXray(
-        const std::vector<std::string>& config_uris,
-        int base_port = 29100,
-        int timeout_seconds = 10);
+    /// Single config convenience wrapper over testBatch. `test_url` is ignored (fixed probe profile).
+    ProxyTestResult testConfig(const std::string& config_uri,
+                               const std::string& test_url = "",
+                               int timeout_seconds = 30);
 
     static int activeTestCount();
     static int peakTestCount();
     static int maxConcurrentTestCount();
 
-    /**
-     * @brief Set the path to xray executable
-     */
-    void setXrayPath(const std::string& path) { xray_path_ = path; }
+    void setXrayPath(const std::string& path);
+    void setSingBoxPath(const std::string& path);
+    void setMihomoPath(const std::string& path);
+
+    // Dependency injection (tests). All default to process-wide real implementations.
+    void setLauncher(std::shared_ptr<EngineLauncher> l);
+    void setTrafficProbe(std::shared_ptr<TrafficProbe> p) { probe_ = std::move(p); }
+    void setBaseline(std::shared_ptr<ConnectivityBaseline> b) { baseline_ = std::move(b); }
+    void setLeaseRegistry(std::shared_ptr<PortLeaseRegistry> r) { leases_ = std::move(r); }
+    void setClock(ClockFn c) { clock_ = std::move(c); }
+
+    /// QUIC upstreams (hysteria2/tuic) cannot be judged by a raw TCP connect.
+    static bool needsTcpPrescreen(const std::string& protocol);
 
     /**
-     * @brief Set the path to sing-box executable
-     */
-    void setSingBoxPath(const std::string& path) { singbox_path_ = path; }
-
-    /**
-     * @brief Set the path to mihomo executable
-     */
-    void setMihomoPath(const std::string& path) { mihomo_path_ = path; }
-
-    /**
-     * @brief Check if Gemini (Google AI API) is accessible through a proxy.
-     *        Starts the proxy engine, makes an HTTPS request to
-     *        generativelanguage.googleapis.com through the SOCKS5 proxy.
-     *        Any HTTP response (even 401/403) means the IP is NOT blocked.
-     *        Connection failure/timeout means the IP IS blocked.
-     * @param config_uri The proxy config URI to test through
-     * @param timeout_seconds Timeout for the check
-     * @return -1 = unknown/error, 0 = blocked, 1 = accessible
+     * @brief Optional capability: is Gemini (Google AI API) reachable through this config?
+     *        -1 unknown/error, 0 blocked, 1 accessible. Metadata only, never health.
      */
     int checkGeminiAccess(const std::string& config_uri, int timeout_seconds = 15);
 
@@ -95,31 +96,16 @@ private:
     std::string xray_path_;
     std::string singbox_path_;
     std::string mihomo_path_;
+    std::shared_ptr<EngineLauncher> launcher_;
+    bool custom_launcher_ = false;
+    std::shared_ptr<TrafficProbe> probe_;
+    std::shared_ptr<ConnectivityBaseline> baseline_;
+    std::shared_ptr<PortLeaseRegistry> leases_;
+    ClockFn clock_;
 
-    /**
-     * @brief Test config using XRay
-     */
-    ProxyTestResult testWithXray(const std::string& config_uri, const std::string& test_url, int timeout_seconds);
-
-    /**
-     * @brief Test config using sing-box
-     */
-    ProxyTestResult testWithSingBox(const std::string& config_uri, const std::string& test_url, int timeout_seconds);
-
-    /**
-     * @brief Test config using mihomo
-     */
-    ProxyTestResult testWithMihomo(const std::string& config_uri, const std::string& test_url, int timeout_seconds);
-
-    /**
-     * @brief Get a free local port for testing
-     */
-    int getFreePort();
-
-    /**
-     * @brief Generate XRay config JSON for a URI
-     */
-    std::string generateXrayConfig(const std::string& config_uri, int socks_port);
+    void ensureDeps();
+    struct Impl;
+    friend struct Impl;
 };
 
 } // namespace network

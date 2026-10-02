@@ -182,6 +182,10 @@ set(NETWORK_SOURCES
     src/network/continuous_validator.cpp
     src/network/config_db_store.cpp
     src/network/proxy_tester.cpp
+    src/network/traffic_probe.cpp
+    src/network/connectivity_baseline.cpp
+    src/network/port_lease.cpp
+    src/network/engine_launcher.cpp
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp
     src/network/sys_proxy.cpp
@@ -332,6 +336,22 @@ foreach(_t test_endpoint_key test_health_score test_config_db_v4)
     target_link_libraries(${_t} PRIVATE hunter_core)
 endforeach()
 
+# Stage 4 A2 suites (fake transports / loopback only: no public network)
+foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
+           test_uri_parser test_curl_transport)
+    add_executable(${_t} tests/${_t}.cpp)
+    target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(${_t} PRIVATE hunter_core)
+endforeach()
+
+# Opt-in integration test: real xray against a local test server (needs HUNTER_XRAY_PATH).
+option(HUNTER_INTEGRATION_TESTS "Register opt-in integration tests (real engines, loopback only)" OFF)
+if(HUNTER_INTEGRATION_TESTS)
+    add_executable(test_engine_integration tests/test_engine_integration.cpp)
+    target_link_options(test_engine_integration PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(test_engine_integration PRIVATE hunter_core)
+endif()
+
 # CTest registration
 enable_testing()
 add_test(NAME hunter_tests COMMAND hunter_tests)
@@ -339,6 +359,15 @@ add_test(NAME test_endpoint_key COMMAND test_endpoint_key)
 add_test(NAME test_health_score COMMAND test_health_score)
 add_test(NAME test_config_db_v4 COMMAND test_config_db_v4)
 add_test(NAME test_embed COMMAND test_embed)
+foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
+           test_uri_parser test_curl_transport)
+    add_test(NAME ${_t} COMMAND ${_t})
+    set_tests_properties(${_t} PROPERTIES TIMEOUT 120)
+endforeach()
+if(HUNTER_INTEGRATION_TESTS)
+    add_test(NAME test_engine_integration COMMAND test_engine_integration)
+    set_tests_properties(test_engine_integration PROPERTIES LABELS integration TIMEOUT 120 SKIP_RETURN_CODE 77)
+endif()
 
 # Install targets
 install(TARGETS hunter
