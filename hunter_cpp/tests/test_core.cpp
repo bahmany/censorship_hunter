@@ -16,6 +16,7 @@
 #include "core/utils.h"
 #include "core/models.h"
 #include "network/uri_parser.h"
+#include "proxy/xray_manager.h"
 #include "network/continuous_validator.h"
 
 #ifdef _WIN32
@@ -260,6 +261,45 @@ void test_isPortAlive() {
     PASS();
 }
 
+static bool bracesBalanced(const std::string& j) {
+    int brace = 0, bracket = 0; bool inStr = false;
+    for (size_t i = 0; i < j.size(); ++i) {
+        char c = j[i];
+        if (inStr) { if (c == '\\') ++i; else if (c == '"') inStr = false; continue; }
+        if (c == '"') inStr = true;
+        else if (c == '{') ++brace; else if (c == '}') --brace;
+        else if (c == '[') ++bracket; else if (c == ']') --bracket;
+        if (brace < 0 || bracket < 0) return false;
+    }
+    return !inStr && brace == 0 && bracket == 0;
+}
+
+void test_noPrivateUpstreamFallback() {
+    TEST("generated configs have no private upstream fallback");
+    ParsedConfig pc;
+    pc.protocol = "vless"; pc.address = "example.com"; pc.port = 443;
+    pc.uuid = "11111111-2222-3333-4444-555555555555";
+    pc.security = "tls"; pc.sni = "example.com";
+    std::string x = pc.toXrayConfigJson(10808);
+    std::string sb = pc.toSingBoxConfigJson(10808);
+    std::string ml = pc.toMihomoConfigYaml(10808);
+    CHECK(!x.empty() && !sb.empty() && !ml.empty(), "config generation returned empty");
+    for (const std::string* c : {&x, &sb, &ml}) {
+        CHECK(c->find("172.20.14.34") == std::string::npos, "private upstream IP still present");
+        CHECK(c->find("socks5-fb") == std::string::npos, "socks5-fb fallback tag still present");
+    }
+    CHECK(bracesBalanced(x), "xray JSON unbalanced");
+    CHECK(bracesBalanced(sb), "sing-box JSON unbalanced");
+    CHECK(x.find("\"proxy-balancer\"") != std::string::npos, "xray balancer should remain");
+    std::string full = hunter::proxy::XRayManager::generateConfig(pc, 10808);
+    std::string bal = hunter::proxy::XRayManager::generateBalancedConfig({{pc, 20001}, {pc, 20002}}, 10808);
+    CHECK(bal.find("172.20.14.34") == std::string::npos && bal.find("socks5-fb") == std::string::npos, "balanced config leaks fallback");
+    CHECK(bracesBalanced(bal), "balanced JSON unbalanced");
+    CHECK(full.find("172.20.14.34") == std::string::npos, "XRayManager config leaks private upstream");
+    CHECK(bracesBalanced(full), "XRayManager JSON unbalanced");
+    PASS();
+}
+
 void test_hardwareSnapshot() {
     TEST("HardwareSnapshot::detect");
     auto hw = HardwareSnapshot::detect();
@@ -463,6 +503,7 @@ int main() {
     test_jsonBuilder();
     test_logRingBuffer();
     test_isPortAlive();
+    test_noPrivateUpstreamFallback();
 
     // Models
     std::cout << "\n--- Models ---" << std::endl;
