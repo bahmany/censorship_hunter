@@ -269,15 +269,11 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
        <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
        <<   "}],\n";
 
-    // Outbounds with DPI bypass + SOCKS5 fallback + blackhole to prevent traffic leakage
+    // Outbounds with DPI bypass + blackhole to prevent traffic leakage
     ss << "  \"outbounds\":[" << outbound 
        << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
        << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
        << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
-    // SOCKS5 fallback outbounds
-    for (int p = 0; p < 5; ++p) {
-        ss << ",{\"protocol\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100+p) << "}]}}";
-    }
     ss << "],\n";
 
     // Build inbound tags for DNS routing
@@ -292,10 +288,10 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     ss <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},";
     // 4. Private/local IPs → direct
     ss <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},";
-    // 5. All other client traffic → balancer (proxy + SOCKS5 fallback, before final blackhole)
+    // 5. All other client traffic → balancer (proxy outbound, before final blackhole)
     ss << ",{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"balancerTag\":\"proxy-balancer\"}";
-    ss << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"strategy\":{\"type\":\"leastPing\"}}]}";
-    ss << ",\"observatory\":{\"subjectSelector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}";
+    ss << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\"],\"strategy\":{\"type\":\"leastPing\"}}]}";
+    ss << ",\"observatory\":{\"subjectSelector\":[\"proxy\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}";
     ss << "}\n";
     return ss.str();
 }
@@ -304,7 +300,6 @@ std::string XRayManager::generateTestConfig(const ParsedConfig& parsed, int sock
     // ─── Lean test config ───
     // Used by ProxyTester for liveness checks. Unlike generateConfig
     // (which targets the live proxy), this strips out:
-    //   - The 5 SOCKS5-fallback outbounds (172.20.14.34:3100-3104)
     //   - The leastPing balancer + observatory
     // The balancer/observatory was the #1 cause of false "dead" verdicts:
     // the observatory probes on a 30s interval, so during a 5-10s test
@@ -398,10 +393,6 @@ std::string XRayManager::generateBalancedConfig(
        << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
        << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
 
-    // SOCKS5 fallback outbounds
-    for (int p = 0; p < 5; ++p) {
-        ss << ",{\"protocol\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100 + p) << "}]}}";
-    }
     ss << "],\n";
 
     // Build inbound tags for DNS routing
@@ -422,9 +413,6 @@ std::string XRayManager::generateBalancedConfig(
         first = false;
         ss << "\"" << t << "\"";
     }
-    for (int p = 0; p < 5; ++p) {
-        ss << ",\"socks5-fb-" << p << "\"";
-    }
     ss << "],\"strategy\":{\"type\":\"leastPing\"}}]},\n";
 
     // Observatory
@@ -434,10 +422,6 @@ std::string XRayManager::generateBalancedConfig(
         if (!first) ss << ",";
         first = false;
         ss << "\"" << t << "\"";
-    }
-    // Add SOCKS5 fallback to observatory too
-    for (int p = 0; p < 5; ++p) {
-        ss << ",\"socks5-fb-" << p << "\"";
     }
     ss << "],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}\n";
     ss << "}";
@@ -474,10 +458,6 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
     ss << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
        << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}";
 
-    // SOCKS5 fallback outbounds
-    for (int p = 0; p < 5; ++p) {
-        ss << ",{\"protocol\":\"socks\",\"tag\":\"socks5-fb-" << p << "\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":" << (3100 + p) << "}]}}";
-    }
     ss << "],\n";
 
     ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"final\":\"blackhole\",\"rules\":["
@@ -492,9 +472,6 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
         first = false;
         ss << "\"" << tag << "\"";
     }
-    for (int p = 0; p < 5; ++p) {
-        ss << ",\"socks5-fb-" << p << "\"";
-    }
     ss << "],\"strategy\":{\"type\":\"leastPing\"}}]},\n";
 
     ss << "  \"observatory\":{\"subjectSelector\":[";
@@ -503,9 +480,6 @@ std::string XRayManager::generateLocalSocksBalancedConfig(
         if (!first) ss << ",";
         first = false;
         ss << "\"" << tag << "\"";
-    }
-    for (int p = 0; p < 5; ++p) {
-        ss << ",\"socks5-fb-" << p << "\"";
     }
     ss << "],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}\n";
     ss << "}";

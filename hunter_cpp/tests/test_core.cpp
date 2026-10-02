@@ -16,11 +16,18 @@
 #include "core/utils.h"
 #include "core/models.h"
 #include "network/uri_parser.h"
+#include "proxy/xray_manager.h"
 #include "network/continuous_validator.h"
 
 #ifdef _WIN32
 #include <winsock2.h>
+#include <ws2tcpip.h>
 #pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 #endif
 
 using namespace hunter;
@@ -208,7 +215,16 @@ void test_parsedConfig_isValid() {
     pc.protocol = "vless";
     pc.address = "example.com";
     pc.port = 443;
+    CHECK(!pc.isValid(), "vless without uuid should be invalid");
+
+    pc.uuid = "11111111-2222-3333-4444-555555555555";
     CHECK(pc.isValid(), "valid config rejected");
+
+    ParsedConfig trojan;
+    trojan.protocol = "trojan";
+    trojan.address = "example.com";
+    trojan.port = 443;
+    CHECK(trojan.isValid(), "trojan without uuid (password-based) should be valid");
 
     pc.port = 0;
     CHECK(!pc.isValid(), "port 0 should be invalid");
@@ -220,6 +236,67 @@ void test_parsedConfig_isValid() {
     pc.address = "example.com";
     pc.port = 70000;
     CHECK(!pc.isValid(), "port > 65535 should be invalid");
+    PASS();
+}
+
+void test_isPortAlive() {
+    TEST("utils::isPortAlive");
+    // Listening port -> true
+    int lfd = (int)socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(lfd >= 0, "socket() failed");
+    sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_LOOPBACK); a.sin_port = 0;
+    CHECK(bind(lfd, (sockaddr*)&a, sizeof(a)) == 0, "bind failed");
+    CHECK(listen(lfd, 4) == 0, "listen failed");
+    socklen_t al = sizeof(a);
+    getsockname(lfd, (sockaddr*)&a, &al);
+    int port = ntohs(a.sin_port);
+    CHECK(isPortAlive(port, 1000), "listening port should be alive");
+    // Closed port -> false (connection refused must not count as alive)
+#ifdef _WIN32
+    closesocket(lfd);
+#else
+    close(lfd);
+#endif
+    CHECK(!isPortAlive(port, 1000), "closed port should not be alive");
+    PASS();
+}
+
+static bool bracesBalanced(const std::string& j) {
+    int brace = 0, bracket = 0; bool inStr = false;
+    for (size_t i = 0; i < j.size(); ++i) {
+        char c = j[i];
+        if (inStr) { if (c == '\\') ++i; else if (c == '"') inStr = false; continue; }
+        if (c == '"') inStr = true;
+        else if (c == '{') ++brace; else if (c == '}') --brace;
+        else if (c == '[') ++bracket; else if (c == ']') --bracket;
+        if (brace < 0 || bracket < 0) return false;
+    }
+    return !inStr && brace == 0 && bracket == 0;
+}
+
+void test_noPrivateUpstreamFallback() {
+    TEST("generated configs have no private upstream fallback");
+    ParsedConfig pc;
+    pc.protocol = "vless"; pc.address = "example.com"; pc.port = 443;
+    pc.uuid = "11111111-2222-3333-4444-555555555555";
+    pc.security = "tls"; pc.sni = "example.com";
+    std::string x = pc.toXrayConfigJson(10808);
+    std::string sb = pc.toSingBoxConfigJson(10808);
+    std::string ml = pc.toMihomoConfigYaml(10808);
+    CHECK(!x.empty() && !sb.empty() && !ml.empty(), "config generation returned empty");
+    for (const std::string* c : {&x, &sb, &ml}) {
+        CHECK(c->find("172.20.14.34") == std::string::npos, "private upstream IP still present");
+        CHECK(c->find("socks5-fb") == std::string::npos, "socks5-fb fallback tag still present");
+    }
+    CHECK(bracesBalanced(x), "xray JSON unbalanced");
+    CHECK(bracesBalanced(sb), "sing-box JSON unbalanced");
+    CHECK(x.find("\"proxy-balancer\"") != std::string::npos, "xray balancer should remain");
+    std::string full = hunter::proxy::XRayManager::generateConfig(pc, 10808);
+    std::string bal = hunter::proxy::XRayManager::generateBalancedConfig({{pc, 20001}, {pc, 20002}}, 10808);
+    CHECK(bal.find("172.20.14.34") == std::string::npos && bal.find("socks5-fb") == std::string::npos, "balanced config leaks fallback");
+    CHECK(bracesBalanced(bal), "balanced JSON unbalanced");
+    CHECK(full.find("172.20.14.34") == std::string::npos, "XRayManager config leaks private upstream");
+    CHECK(bracesBalanced(full), "XRayManager JSON unbalanced");
     PASS();
 }
 
@@ -425,6 +502,8 @@ int main() {
     test_extractUris();
     test_jsonBuilder();
     test_logRingBuffer();
+    test_isPortAlive();
+    test_noPrivateUpstreamFallback();
 
     // Models
     std::cout << "\n--- Models ---" << std::endl;

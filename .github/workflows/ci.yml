@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -32,9 +34,6 @@ jobs:
         working-directory: hunter_cpp
         run: cmake --build build -j $(nproc)
 
-      - name: Run tests
+      - name: Run tests (ctest)
         working-directory: hunter_cpp
-        run: |
-          if [ -f build/hunter_tests ]; then
-            ./build/hunter_tests
-          fi
+        run: ctest --test-dir build --output-on-failure

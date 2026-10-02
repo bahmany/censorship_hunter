@@ -457,10 +457,28 @@ bool isPortAlive(int port, int timeout_ms) {
 #endif
     sockaddr_in addr{}; addr.sin_family=AF_INET; addr.sin_port=htons((uint16_t)port);
     inet_pton(AF_INET,"127.0.0.1",&addr.sin_addr);
-    ::connect(fd,(sockaddr*)&addr,sizeof(addr));
-    fd_set wset; FD_ZERO(&wset); FD_SET(fd,&wset);
-    timeval tv; tv.tv_sec=timeout_ms/1000; tv.tv_usec=(timeout_ms%1000)*1000;
-    bool ok=select(fd+1,nullptr,&wset,nullptr,&tv)>0;
+    bool ok=false;
+    int rc=::connect(fd,(sockaddr*)&addr,sizeof(addr));
+    if(rc==0){
+        ok=true;
+    } else {
+#ifdef _WIN32
+        const int werr=WSAGetLastError();
+        const bool inProgress=(werr==WSAEWOULDBLOCK||werr==WSAEINPROGRESS);
+#else
+        const bool inProgress=(errno==EINPROGRESS||errno==EINTR);
+#endif
+        if(inProgress){
+            fd_set wset; FD_ZERO(&wset); FD_SET(fd,&wset);
+            fd_set eset; FD_ZERO(&eset); FD_SET(fd,&eset);
+            timeval tv; tv.tv_sec=timeout_ms/1000; tv.tv_usec=(timeout_ms%1000)*1000;
+            if(select(fd+1,nullptr,&wset,&eset,&tv)>0 && FD_ISSET(fd,&wset)){
+                // Writable also means "connect failed" - SO_ERROR tells which.
+                int soerr=0; socklen_t len=sizeof(soerr);
+                if(getsockopt(fd,SOL_SOCKET,SO_ERROR,(char*)&soerr,&len)==0 && soerr==0) ok=true;
+            }
+        }
+    }
 #ifdef _WIN32
     closesocket(fd);
 #else

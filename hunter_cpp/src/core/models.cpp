@@ -271,11 +271,6 @@ std::string ParsedConfig::toXrayConfigJson(int socks_port) const {
        << "\"inbounds\":[{\"tag\":\"socks-in\",\"port\":" << socks_port << ",\"listen\":\"127.0.0.1\",\"protocol\":\"socks\",\"settings\":{\"auth\":\"noauth\",\"udp\":true},\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\"],\"routeOnly\":true}}],"
        << "\"outbounds\":["
        << outbound
-       << ",{\"tag\":\"socks5-fb-0\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":3100}]}}"
-       << ",{\"tag\":\"socks5-fb-1\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":3101}]}}"
-       << ",{\"tag\":\"socks5-fb-2\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":3102}]}}"
-       << ",{\"tag\":\"socks5-fb-3\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":3103}]}}"
-       << ",{\"tag\":\"socks5-fb-4\",\"protocol\":\"socks\",\"settings\":{\"servers\":[{\"address\":\"172.20.14.34\",\"port\":3104}]}}"
        << ",{\"tag\":\"direct\",\"protocol\":\"freedom\",\"settings\":{}}"
        << ",{\"tag\":\"dns-out\",\"protocol\":\"dns\",\"settings\":{}}"
        << ",{\"tag\":\"blackhole\",\"protocol\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}"
@@ -286,8 +281,8 @@ std::string ParsedConfig::toXrayConfigJson(int socks_port) const {
        << "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
        << "{\"type\":\"field\",\"ip\":[\"geoip:private\"],\"outboundTag\":\"direct\"},"
        << "{\"type\":\"field\",\"inboundTag\":[\"socks-in\"],\"balancerTag\":\"proxy-balancer\"}"
-       << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"strategy\":{\"type\":\"leastPing\"}}]}"
-       << ",\"observatory\":{\"subjectSelector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}"
+       << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\"],\"strategy\":{\"type\":\"leastPing\"}}]}"
+       << ",\"observatory\":{\"subjectSelector\":[\"proxy\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}"
        << "}";
     return ss.str();
 }
@@ -379,7 +374,7 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
     
     ob << "}";
     
-    // Full sing-box config with SOCKS5 fallback + blackhole kill switch
+    // Full sing-box config with blackhole kill switch
     std::ostringstream ss;
     ss << "{"
        << "\"log\":{\"level\":\"warn\"},"
@@ -387,11 +382,6 @@ std::string ParsedConfig::toSingBoxConfigJson(int socks_port) const {
        << "\"inbounds\":[{\"type\":\"mixed\",\"tag\":\"mixed-in\",\"listen\":\"127.0.0.1\",\"listen_port\":" << socks_port << ",\"sniff\":true,\"sniff_override_destination\":true}],"
        << "\"outbounds\":["
        << ob.str()
-       << ",{\"type\":\"socks\",\"tag\":\"socks5-fb-0\",\"server\":\"172.20.14.34\",\"server_port\":3100}"
-       << ",{\"type\":\"socks\",\"tag\":\"socks5-fb-1\",\"server\":\"172.20.14.34\",\"server_port\":3101}"
-       << ",{\"type\":\"socks\",\"tag\":\"socks5-fb-2\",\"server\":\"172.20.14.34\",\"server_port\":3102}"
-       << ",{\"type\":\"socks\",\"tag\":\"socks5-fb-3\",\"server\":\"172.20.14.34\",\"server_port\":3103}"
-       << ",{\"type\":\"socks\",\"tag\":\"socks5-fb-4\",\"server\":\"172.20.14.34\",\"server_port\":3104}"
        << ",{\"type\":\"direct\",\"tag\":\"direct\"}"
        << ",{\"type\":\"block\",\"tag\":\"blackhole\"}"
        << "],"
@@ -502,39 +492,12 @@ std::string ParsedConfig::toMihomoConfigYaml(int socks_port) const {
         if (!host.empty()) ss << "      host:\n        - " << host << "\n";
     }
     
-    // SOCKS5 fallback proxies
-    ss << "  - name: socks5-fb-0\n"
-       << "    type: socks5\n"
-       << "    server: 172.20.14.34\n"
-       << "    port: 3100\n"
-       << "  - name: socks5-fb-1\n"
-       << "    type: socks5\n"
-       << "    server: 172.20.14.34\n"
-       << "    port: 3101\n"
-       << "  - name: socks5-fb-2\n"
-       << "    type: socks5\n"
-       << "    server: 172.20.14.34\n"
-       << "    port: 3102\n"
-       << "  - name: socks5-fb-3\n"
-       << "    type: socks5\n"
-       << "    server: 172.20.14.34\n"
-       << "    port: 3103\n"
-       << "  - name: socks5-fb-4\n"
-       << "    type: socks5\n"
-       << "    server: 172.20.14.34\n"
-       << "    port: 3104\n";
-
-    // Proxy groups and rules with SOCKS5 fallback + BLACKHOLE kill switch
+    // Proxy groups and rules with BLACKHOLE kill switch
     ss << "proxy-groups:\n"
        << "  - name: GLOBAL\n"
        << "    type: fallback\n"
        << "    proxies:\n"
        << "      - proxy\n"
-       << "      - socks5-fb-0\n"
-       << "      - socks5-fb-1\n"
-       << "      - socks5-fb-2\n"
-       << "      - socks5-fb-3\n"
-       << "      - socks5-fb-4\n"
        << "      - BLACKHOLE\n"
        << "    url: http://1.1.1.1/generate_204\n"
        << "    interval: 30\n"
