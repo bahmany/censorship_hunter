@@ -62,6 +62,11 @@ void resetSessionEvidence(HealthEvidence& ev) {
     ev.last_bulk_success = 0.0;
     ev.recovery_anchor = 0.0;
     ev.session_confirmed = false;
+    // Failure timing never crosses a process restart or a network generation: a death verdict
+    // needs a fresh attributed streak inside the current session+generation. The displayed
+    // state and history ring are kept (state Dead/Unstable remain until recovery evidence).
+    ev.failure_streak = 0;
+    ev.failure_streak_started_at = 0.0;
     ev.recent_ids.clear();
 }
 
@@ -83,7 +88,7 @@ ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThr
 
     if (r.generation > ev.generation) {
         // A new network/engine generation cannot reuse the previous session's certification.
-        if (ev.generation != 0) resetSessionEvidence(ev);
+        if (ev.generation != 0 || ev.last_attempt_at > 0.0) resetSessionEvidence(ev);
         ev.generation = r.generation;
     }
     rememberId(ev, r.run_id, th);
@@ -199,11 +204,9 @@ bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, st
             if (ev.failure_streak != 0 || ev.last_full_success <= 0.0) return bad("healthy inconsistent");
             break;
         case HealthState::Dead:
-            if (ev.failure_streak < static_cast<uint32_t>(th.dead_failures)) return bad("dead without failures");
-            if (!(ev.dead_since > 0.0) || ev.dead_since < ev.failure_streak_started_at) return bad("dead without dead_since");
+            if (!(ev.dead_since > 0.0)) return bad("dead without dead_since");
             break;
         case HealthState::Unstable:
-            if (ev.failure_streak < static_cast<uint32_t>(th.unstable_failures)) return bad("unstable without failures");
             break;
         case HealthState::Degraded: break;
     }

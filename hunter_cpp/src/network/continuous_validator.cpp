@@ -179,6 +179,7 @@ ApplyEffect ConfigDatabase::applyLocked(ConfigHealthRecord& rec, const ProbeResu
     }
     if (eff != ApplyEffect::Applied) return eff;
     touchLegacyCounters(rec, r.finished_at, r.engine);
+    if (r.generation > rec.network_generation) rec.network_generation = r.generation;
     rec.excluded_streak = 0;
     rec.next_retry_at = 0.0;
     rec.legacy_fails = 0;
@@ -574,35 +575,28 @@ int ConfigDatabase::evictDead() {
 
 // Age basis for eviction of never-working records. Dead (attributed) records are measured
 // from dead_since, never from an old success. Local outages create no failure evidence.
-static double evidenceAnchor(const ConfigHealthRecord& rec) {
-    double a = std::max(rec.ev.last_full_success, rec.last_alive_time);
-    return a > 0.0 ? a : rec.first_seen;
-}
-
 void ConfigDatabase::evictStale() {
     if (db_.empty()) return;
     const double now = clock_();
-    // Phase 1: attributed Dead records only after >= retention in Dead; legacy-adapter failures
-    // (never full success, >=3 reported failures) after the same window from first sighting.
+    // Phase 1: ONLY attributed Dead records, measured from entering Dead. Unattributed/legacy
+    // failures, old first_seen, or lost success timestamps are never death evidence.
     std::vector<std::string> dead_hashes;
-    for (auto& [hash, rec] : db_) {
+    for (auto& [hash, rec] : db_)
         if (rec.ev.state == HealthState::Dead && rec.ev.dead_since > 0.0 &&
             (now - rec.ev.dead_since) > th_.dead_retention_s)
             dead_hashes.push_back(hash);
-        else if (rec.ev.last_full_success <= 0.0 && rec.legacy_fails >= 3 && !rec.alive &&
-                 (now - rec.first_seen) > th_.dead_retention_s)
-            dead_hashes.push_back(hash);
-    }
     for (auto& h : dead_hashes) db_.erase(h);
 
-    // Phase 2 (separate policy): at capacity, evict the oldest inactive evidence (never Healthy/Degraded).
+    // Phase 2 (capacity only): oldest inactive records that never had a full success, no alive
+    // hint, and are older than the retention window. Anything else is never evicted.
     if ((int)db_.size() < max_size_) return;
     std::vector<std::pair<std::string, double>> candidates;
     for (auto& [hash, rec] : db_) {
-        const auto st = rec.ev.state;
-        if (st == HealthState::Dead || st == HealthState::Unstable ||
-            ((st == HealthState::Unknown || st == HealthState::Testing) && !rec.alive))
-            candidates.emplace_back(hash, std::max(rec.ev.last_attempt_at, evidenceAnchor(rec)));
+        if (rec.alive || rec.ev.last_full_success > 0.0 || rec.last_alive_time > 0.0) continue;
+        if (rec.ev.state == HealthState::Healthy || rec.ev.state == HealthState::Degraded) continue;
+        const double age_anchor = std::max(rec.first_seen, rec.ev.last_attempt_at);
+        if (age_anchor <= 0.0 || now - age_anchor <= th_.dead_retention_s) continue;
+        candidates.emplace_back(hash, age_anchor);
     }
     std::sort(candidates.begin(), candidates.end(), [](const auto& a, const auto& b) {
         if (a.second != b.second) return a.second < b.second;

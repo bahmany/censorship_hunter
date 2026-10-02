@@ -5,6 +5,9 @@
 #include <atomic>
 #include <thread>
 #include <unistd.h>
+#include <chrono>
+#include <condition_variable>
+#include <mutex>
 
 #include "core/db_format.h"
 #include "core/endpoint_key.h"
@@ -65,7 +68,16 @@ static std::string v3Row(const std::string& uri, const std::string& tag, double 
     return o.str();
 }
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc >= 3 && std::string(argv[1]) == "--child-save") {
+        // Second process on the same data directory: must be refused and run read-only.
+        ConfigDatabase d;
+        d.setClock([]() { return 1.7e9; });
+        d.addConfigs({vless(9)});
+        const int n = d.saveToDisk(std::string(argv[2]) + "/lock_test.tsv");
+        const int l = d.saveLiveToDisk(std::string(argv[2]) + "/lock_test_live.tsv");
+        return (n == -1 && l == -1 && d.readOnly() && !d.readOnlyReason().empty()) ? 0 : 3;
+    }
     char tmpl[] = "/tmp/hunter_a1_XXXXXX";
     TMP = mkdtemp(tmpl);
     std::cout << "=== ConfigDatabase V4 ===  (tmp " << TMP << ")\n";
@@ -675,6 +687,177 @@ int main() {
         ConfigDatabase x; setup(x);
         CHECK(bad == 0 && x.loadFromDisk(P("conc.tsv")) == 1 && x.lastLoadReport().rejected == 0, "file valid after concurrent writers");
         CHECK(!exists(P("conc.tsv.tmp")), "no fixed-name temp");
+    }
+    T_END();
+
+    T_CASE("single-writer guard: a second process is read-only with a visible reason");
+    {
+        ConfigDatabase d; setup(d);
+        d.addConfigs({vless(1)});
+        CHECK(d.saveToDisk(P("lock_test.tsv")) == 1 && !d.readOnly(), "first instance owns the directory");
+        char self[4096]; ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1); self[sl > 0 ? sl : 0] = 0;
+        const std::string cmd = std::string(self) + " --child-save " + TMP + " >/dev/null 2>&1";
+        int rc = std::system(cmd.c_str());
+        CHECK(rc == 0, "child process refused to write (exit code " + std::to_string(rc) + ")");
+        CHECK(slurp(P("lock_test.tsv")).find(uuid(9)) == std::string::npos && !exists(P("lock_test_live.tsv")), "child wrote nothing");
+        ConfigDatabase second; setup(second); second.addConfigs({vless(4)});
+        CHECK(second.saveToDisk(P("lock_test2.tsv")) == 1, "in-process instances share the process lock");
+    }
+    T_END();
+
+    T_CASE("R2 unsupported V4 layout cannot be emptied by a later save; read-only mode");
+    {
+        std::string p = P("unrecognized_v4.tsv");
+        std::string bytes = "#HUNTER_CONFIG_DB_V4\n#COLUMNS\tfuture_layout\n" + vless(1) + "\tsecret_metadata\n";
+        spit(p, bytes);
+        ConfigDatabase d; setup(d);
+        CHECK(d.loadFromDisk(p) == 0 && !d.lastLoadReport().ok, "different V4 column header fails load visibly");
+        CHECK(d.readOnly() && !d.readOnlyReason().empty(), "read-only mode entered");
+        CHECK(d.saveToDisk(p) < 0 && slurp(p) == bytes, "different V4 layout protected from later save");
+        CHECK(d.saveToDisk(P("elsewhere.tsv")) < 0 && !exists(P("elsewhere.tsv")), "ALL saves refused while read-only");
+        CHECK(d.saveLiveToDisk(P("elsewhere_live.tsv")) < 0, "live saves refused too");
+        // stateless protection: a fresh instance that never loaded the file
+        ConfigDatabase f; setup(f); f.addConfigs({vless(2)});
+        CHECK(f.saveToDisk(p) < 0 && slurp(p) == bytes, "fresh instance also refuses to overwrite it");
+        d.clearReadOnly();
+        CHECK(!d.readOnly(), "explicit operator resolution clears the mode");
+        // preceding-commit schema (without dead_since)
+        ConfigDatabase src; setup(src); src.addConfigs({vless(3)});
+        src.applyProbeResult(passFor(vless(3), NOW - 5));
+        src.saveToDisk(P("cur.tsv"));
+        std::istringstream input(slurp(P("cur.tsv")));
+        std::string line, prev;
+        while (std::getline(input, line)) {
+            if (line.rfind("#COLUMNS", 0) == 0 || (!line.empty() && line[0] != '#')) line.erase(line.rfind('\t'));
+            prev += line + "\n";
+        }
+        spit(P("prev_v4.tsv"), prev);
+        ConfigDatabase pr; setup(pr);
+        CHECK(pr.loadFromDisk(P("prev_v4.tsv")) == 0 && !pr.lastLoadReport().ok, "preceding V4 schema is not loadable");
+        CHECK(pr.saveToDisk(P("prev_v4.tsv")) < 0 && slurp(P("prev_v4.tsv")) == prev, "...and is not silently emptied");
+        // live cache of a different layout
+        spit(P("live_other.tsv"), "#HUNTER_LIVE_CACHE_V3\n#COLUMNS\tx\n" + vless(1) + "\n");
+        ConfigDatabase lv; setup(lv); lv.addConfigs({vless(1)});
+        CHECK(lv.saveLiveToDisk(P("live_other.tsv")) < 0, "live cache with different layout refused");
+    }
+    T_END();
+
+    T_CASE("R3 failed rejected-row backup blocks every later replacement");
+    {
+        std::string p = P("backup_failed_v4.tsv");
+        ConfigDatabase src; setup(src); src.addConfigs({vless(1)}); src.saveToDisk(p);
+        std::string bytes = slurp(p) + "garbage\trow\n";
+        spit(p, bytes);
+        for (int i = 0; i < 100; ++i) spit(p + ".v4.bak" + (i ? "." + std::to_string(i) : ""), "unrelated\n");
+        ConfigDatabase d; setup(d);
+        d.loadFromDisk(p);
+        CHECK(d.lastLoadReport().rejected == 1 && !d.lastLoadReport().error.empty(), "backup refusal reported");
+        CHECK(d.readOnly(), "fail closed");
+        CHECK(d.saveToDisk(p) < 0 && slurp(p) == bytes, "save refused, original bytes intact");
+        // save-time protection without a prior load
+        ConfigDatabase f; setup(f); f.addConfigs({vless(5)});
+        CHECK(f.saveToDisk(p) < 0 && slurp(p) == bytes, "fresh instance: save-time revalidation refuses too");
+    }
+    T_END();
+
+    T_CASE("R4 unattributed legacy failures never evict");
+    {
+        ConfigDatabase d; setup(d);
+        d.addConfigs({vless(1)});
+        NOW += 4 * 86400;
+        for (int i = 0; i < 3; ++i) d.updateHealth(vless(1), false, 0);
+        ConfigHealthRecord r; d.getRecord(vless(1), &r);
+        CHECK(r.ev.failure_streak == 0 && r.ev.state != HealthState::Dead, "typed evidence untouched");
+        CHECK(d.evictDead() == 0 && d.removeDeadLive(1) == 0 && d.size() == 1, "no eviction from legacy failures");
+        // capacity eviction: only never-succeeded, inactive, older than retention
+        ConfigDatabase c(3); setup(c);
+        c.addConfigs({vless(1), vless(2), vless(3)});
+        c.applyProbeResult(passFor(vless(1), NOW - 10));
+        CHECK(c.addConfigs({vless(4)}) == 0 && c.size() == 3, "young records are never capacity-evicted");
+        NOW += 73 * 3600;
+        c.updateHealth(vless(2), true, 50);  // working: protected
+        CHECK(c.addConfigs({vless(4)}) == 1 && c.size() == 3, "old never-succeeded inactive record evicted for space");
+        ConfigHealthRecord x;
+        CHECK(c.getRecord(vless(1), &x) && c.getRecord(vless(2), &x), "records with any success survive");
+        NOW = 1.7e9;
+    }
+    T_END();
+
+    T_CASE("R5 failure streaks do not cross restarts or generations (DB level)");
+    {
+        ConfigDatabase d; setup(d);
+        std::string u = vless(1);
+        d.addConfigs({u});
+        d.applyProbeResult(passFor(u, NOW - 100));
+        d.applyProbeResult(failFor(u, NOW - 50));
+        d.applyProbeResult(failFor(u, NOW - 30));
+        d.saveToDisk(P("streak.tsv"));
+        ConfigDatabase x; setup(x);
+        x.loadFromDisk(P("streak.tsv"));
+        ConfigHealthRecord r; x.getRecord(u, &r);
+        CHECK(r.ev.failure_streak == 0, "streak reset on load");
+        x.applyProbeResult(failFor(u, NOW + 20));
+        x.getRecord(u, &r);
+        CHECK(r.ev.state != HealthState::Dead && r.ev.failure_streak == 1, "first post-restart failure cannot kill");
+        // persisted file with reset streak still re-parses (save validation) and keeps the generation
+        ProbeResult g = failFor(u, NOW + 30); g.generation = 7;
+        x.applyProbeResult(g);
+        x.getRecord(u, &r);
+        CHECK(r.network_generation == 7, "network generation stored");
+        CHECK(x.saveToDisk(P("streak2.tsv")) == 1, "state with reset streak is saveable");
+    }
+    T_END();
+
+    T_CASE("R1 load/save transaction reads inside the lock (no stale overwrite, merge keeps records)");
+    {
+        std::string p = P("load_save_race.tsv");
+        spit(p, "#HUNTER_CONFIG_DB_V3\n" + vless(1) + "\tt\txray\t1\t2\t0\t0\t0\t0\t0\t1\t0\t-1\t0\n");
+        ConfigDatabase d;
+        std::mutex gate; std::condition_variable cv;
+        bool armed = false, entered = false, released = false;
+        d.setClock([&]() {
+            std::unique_lock<std::mutex> lk(gate);
+            if (armed && !released) { entered = true; cv.notify_all(); cv.wait(lk, [&] { return released; }); }
+            return NOW;
+        });
+        d.addConfigs({vless(1), vless(2)});
+        armed = true;
+        int saved = -2;
+        std::thread writer([&] { saved = d.saveToDisk(p); });
+        { std::unique_lock<std::mutex> lk(gate); cv.wait(lk, [&] { return entered; }); }
+        std::thread loader([&] { d.loadFromDisk(p); });
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        { std::lock_guard<std::mutex> lk(gate); released = true; cv.notify_all(); }
+        writer.join(); loader.join();
+        ConfigDatabase reread; setup(reread);
+        CHECK(saved == 2 && reread.loadFromDisk(p) == 2 && d.size() == 2, "both records persisted and in memory");
+        // migration writes the union of memory, never fewer rows than memory holds
+        spit(P("union.tsv"), "#HUNTER_CONFIG_DB_V3\n" + v3Row(vless(1), "t", 1.0, 1, 5.0, 1, 1));
+        ConfigDatabase u; setup(u); u.addConfigs({vless(2)});
+        u.loadFromDisk(P("union.tsv"));
+        ConfigDatabase u2; setup(u2);
+        CHECK(u.size() == 2 && u2.loadFromDisk(P("union.tsv")) == 2, "migration keeps records added before the load");
+    }
+    T_END();
+
+    T_CASE("concurrent add/save/load/probe on one instance (TSan target)");
+    {
+        ConfigDatabase d; setup(d);
+        std::vector<std::string> us;
+        for (int i = 1; i <= 20; i++) us.push_back(vless(i));
+        d.addConfigs(std::set<std::string>(us.begin(), us.end()));
+        std::atomic<bool> stop{false};
+        std::atomic<int> bad{0};
+        std::vector<std::thread> ts;
+        ts.emplace_back([&] { while (!stop) { if (d.saveToDisk(P("tsan.tsv")) < 0) bad++; d.saveLiveToDisk(P("tsan_live.tsv")); } });
+        ts.emplace_back([&] { while (!stop) { d.loadFromDisk(P("tsan.tsv")); d.loadLiveFromDisk(P("tsan_live.tsv")); } });
+        ts.emplace_back([&] { for (int i = 0; i < 300; i++) d.applyProbeResult(passFor(us[i % 20], NOW + i)); });
+        ts.emplace_back([&] { for (int i = 0; i < 300; i++) { d.getUntestedBatch(5); d.getAliveRecords(); d.updateHealth(us[i % 20], i % 3 != 0, 10); } });
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        stop = true;
+        for (auto& t : ts) t.join();
+        ConfigDatabase x; setup(x);
+        CHECK(bad == 0 && x.loadFromDisk(P("tsan.tsv")) == 20 && x.lastLoadReport().rejected == 0, "file valid, nothing lost");
     }
     T_END();
 

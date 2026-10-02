@@ -127,6 +127,37 @@ bool truthy(const std::string& v) {
 }
 
 
+bool isInsecureKey(const std::string& k) {
+    std::string n;
+    for (char c : k) if (c != '-' && c != '_') n.push_back(char(std::tolower((unsigned char)c)));
+    return n == "insecure" || n == "allowinsecure" || n == "skipcertverify";
+}
+
+// Strict JSON scalar token: true/false/null or a JSON number.
+bool isJsonBareScalar(const std::string& v) {
+    if (v == "true" || v == "false" || v == "null") return true;
+    size_t i = 0, n = v.size();
+    if (i < n && v[i] == '-') i++;
+    if (i >= n) return false;
+    if (v[i] == '0') i++;
+    else if (v[i] >= '1' && v[i] <= '9') { while (i < n && std::isdigit((unsigned char)v[i])) i++; }
+    else return false;
+    if (i < n && v[i] == '.') {
+        i++;
+        size_t st = i;
+        while (i < n && std::isdigit((unsigned char)v[i])) i++;
+        if (i == st) return false;
+    }
+    if (i < n && (v[i] == 'e' || v[i] == 'E')) {
+        i++;
+        if (i < n && (v[i] == '+' || v[i] == '-')) i++;
+        size_t st = i;
+        while (i < n && std::isdigit((unsigned char)v[i])) i++;
+        if (i == st) return false;
+    }
+    return i == n;
+}
+
 // Percent-decoding of credentials, done exactly once; '+' is NOT a space; case preserved.
 std::string pctDecode(const std::string& in) {
     std::string o;
@@ -188,7 +219,7 @@ bool flatJson(const std::string& s, std::map<std::string, std::string>* out) {
             size_t st = i;
             while (i < s.size() && s[i] != ',' && s[i] != '}' && !std::isspace((unsigned char)s[i])) i++;
             v = s.substr(st, i - st);
-            if (v.empty() || v == "{" || v[0] == '[' || v[0] == '{') return false;
+            if (!isJsonBareScalar(v)) return false;
             if (v == "null") v.clear();
         }
         if (out->count(k)) return false;  // duplicate key: ambiguous
@@ -312,6 +343,20 @@ EndpointKey computeEndpointKey(const std::string& uri) {
     std::string host_in = pc.address;
     if (proto.empty()) return finish_raw();
     const bool is_vmess = (proto == "vmess");
+    std::map<std::string, std::string> vj;  // validated VMess JSON (single source of truth for its tuple)
+    if (is_vmess) {
+        std::string payload = utils::trim(uri).substr(8);
+        auto hp0 = payload.find('#');
+        if (hp0 != std::string::npos) payload = payload.substr(0, hp0);
+        if (!flatJson(utils::base64Decode(payload), &vj)) return finish_raw();
+        auto it_add = vj.find("add"), it_port = vj.find("port"), it_id = vj.find("id");
+        if (it_add == vj.end() || it_port == vj.end() || it_id == vj.end()) return finish_raw();
+        const std::string& pt = it_port->second;
+        if (pt.empty() || pt.size() > 5) return finish_raw();
+        for (char ch : pt) if (ch < '0' || ch > '9') return finish_raw();
+        host_in = it_add->second;
+        port = std::stoi(pt);
+    }
     if (!is_vmess) {
         // Strict authority parse (ss base64 form without '@' falls back to the shared parser).
         std::string h, pt;
@@ -328,7 +373,7 @@ EndpointKey computeEndpointKey(const std::string& uri) {
     if (port < 1 || port > 65535) return finish_raw();
 
     // Credential identity: percent-decoded once (case kept); UUID protocols fold case.
-    std::string cred = pc.uuid;
+    std::string cred = is_vmess ? vj["id"] : pc.uuid;
     if (proto == "vless" || proto == "trojan" || proto == "hysteria2" || proto == "tuic") cred = pctDecode(cred);
     if (proto == "vmess" || proto == "vless" || proto == "tuic") {
         std::string u;
@@ -346,11 +391,7 @@ EndpointKey computeEndpointKey(const std::string& uri) {
 
     if (is_vmess) {
         // Every connection-affecting JSON field is retained (the shared parser drops several).
-        std::string payload = utils::trim(uri).substr(8);
-        auto hp = payload.find('#');
-        if (hp != std::string::npos) payload = payload.substr(0, hp);
-        std::map<std::string, std::string> j;
-        if (!flatJson(utils::base64Decode(payload), &j)) return finish_raw();
+        const auto& j = vj;
         auto get = [&](const char* k) { auto it = j.find(k); return it == j.end() ? std::string() : it->second; };
         put_default("security", lowerAscii(get("tls")), "none");
         if (opts.count("security") && opts["security"] == "") opts.erase("security");
@@ -361,16 +402,15 @@ EndpointKey computeEndpointKey(const std::string& uri) {
         put("host", lowerAscii(get("host")));
         put("path", get("path"));
         put("fp", lowerAscii(get("fp")));
-        put("alpn", lowerAscii(get("alpn")));
+        put("alpn", get("alpn"));  // spelling preserved: never folded
         std::string aid = get("aid");
         if (!aid.empty() && aid != "0") opts["aid"] = aid;
-        for (const char* k : {"allowInsecure", "allowinsecure", "insecure"})
-            if (truthy(get(k))) opts["insecure"] = "1";
         static const std::set<std::string> handled = {"v", "ps", "add", "port", "id", "tls", "net", "type", "scy", "sni",
-                                                      "host", "path", "fp", "alpn", "aid", "allowInsecure",
-                                                      "allowinsecure", "insecure"};
-        for (const auto& [k, v] : j)
+                                                      "host", "path", "fp", "alpn", "aid"};
+        for (const auto& [k, v] : j) {
+            if (isInsecureKey(k)) { if (truthy(v)) opts["insecure"] = "1"; continue; }
             if (!handled.count(k) && !v.empty()) opts["j." + k] = v;
+        }
     } else {
         const bool is_tls_default = (proto == "trojan" || proto == "hysteria2" || proto == "tuic");
         put_default("security", lowerAscii(pc.security), is_tls_default ? "tls" : "none");
@@ -412,7 +452,7 @@ EndpointKey computeEndpointKey(const std::string& uri) {
                 std::string v = eq == std::string::npos ? "" : urlDec(pair.substr(eq + 1));
                 std::string kl = lowerAscii(k);
                 if (consumed.count(k) || kl == "ps" || kl == "remark" || kl == "remarks" || kl == "name") continue;
-                if (kl == "insecure" || kl == "allowinsecure") {
+                if (isInsecureKey(k)) {
                     if (truthy(v)) opts["insecure"] = "1";
                     continue;
                 }
@@ -421,7 +461,6 @@ EndpointKey computeEndpointKey(const std::string& uri) {
                     if (!hv.empty() && hv != "none") opts["headertype"] = hv;
                     continue;
                 }
-                if (kl == "alpn") v = lowerAscii(v);
                 opts["q." + k] = v;
             }
         }

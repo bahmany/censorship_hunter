@@ -9,7 +9,10 @@
 #include <chrono>
 #include <mutex>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
+#include <functional>
+#include <map>
 #include <sstream>
 
 #ifdef _WIN32
@@ -17,6 +20,10 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/file.h>
+#include <cerrno>
+#include <climits>
+#include <cstdlib>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -114,7 +121,13 @@ bool writeFileAtomic(const std::string& path, const std::string& data, std::stri
     std::string dir = utils::dirName(path);
     if (dir.empty()) dir = ".";
     int dfd = ::open(dir.c_str(), O_RDONLY);
-    if (dfd >= 0) { (void)fsync(dfd); ::close(dfd); }
+    if (dfd < 0) { *err = "cannot open directory for fsync: " + dir; return false; }
+    if (fsync(dfd) != 0 && errno != EINVAL && errno != ENOTSUP) {
+        ::close(dfd);
+        *err = "directory fsync failed: " + dir;
+        return false;
+    }
+    ::close(dfd);
 #endif
     return true;
 }
@@ -209,7 +222,121 @@ bool validateV4Content(const std::string& content, const char* header, size_t ex
     return true;
 }
 
+// ── Single-writer guard: one exclusive lock file per data directory, held for the process
+// lifetime. In-process instances share the process-level lock (they are serialized by
+// fileTxMutex); a second process is refused and must run read-only. ──
+std::mutex& dirLockRegistryMutex() { static std::mutex m; return m; }
+
+bool acquireDirLock(const std::string& dir_in, std::string* err) {
+    std::string dir = dir_in.empty() ? "." : dir_in;
+#ifndef _WIN32
+    char buf[PATH_MAX];
+    if (::realpath(dir.c_str(), buf)) dir = buf;
+#endif
+    static std::map<std::string, intptr_t> held;
+    std::lock_guard<std::mutex> g(dirLockRegistryMutex());
+    if (held.count(dir)) return true;
+    const std::string lp = dir + "/.hunter_db.lock";
+#ifdef _WIN32
+    HANDLE h = CreateFileW(widen(lp).c_str(), GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                           OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    OVERLAPPED ov = {};
+    if (h == INVALID_HANDLE_VALUE ||
+        !LockFileEx(h, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0, 1, 0, &ov)) {
+        if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+        *err = "another Hunter instance owns data directory " + dir + " (read-only mode)";
+        return false;
+    }
+    held[dir] = (intptr_t)h;
+#else
+    int fd = ::open(lp.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) { *err = "cannot open lock file " + lp; return false; }
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        ::close(fd);
+        *err = "another Hunter instance owns data directory " + dir + " (read-only mode)";
+        return false;
+    }
+    held[dir] = fd;
+#endif
+    return true;
+}
+
+int countRejectedV4(const std::string& data, const HealthThresholds& th) {
+    int bad = 0;
+    auto lines = bodyLines(data);
+    for (size_t i = 1; i < lines.size(); i++) {
+        if (lines[i][0] == '#') continue;
+        ConfigHealthRecord r;
+        std::string e;
+        if (!parseRecordV4(lines[i], th, &r, &e)) bad++;
+    }
+    return bad;
+}
+
 }  // namespace
+
+bool ConfigDatabase::readOnly() const { std::lock_guard<std::mutex> l(mutex_); return read_only_; }
+std::string ConfigDatabase::readOnlyReason() const { std::lock_guard<std::mutex> l(mutex_); return read_only_reason_; }
+void ConfigDatabase::clearReadOnly() { std::lock_guard<std::mutex> l(mutex_); read_only_ = false; read_only_reason_.clear(); }
+void ConfigDatabase::setReadOnlyLocked(const std::string& why) const {
+    if (!read_only_) read_only_reason_ = why;
+    read_only_ = true;
+}
+
+// Caller holds mutex_ and fileTxMutex().
+bool ConfigDatabase::acquireWriteAccessLocked(const std::string& filepath, std::string* err) const {
+    if (read_only_) { *err = "read-only mode: " + read_only_reason_; return false; }
+    try { utils::mkdirRecursive(utils::dirName(filepath)); } catch (...) {}
+    std::string d = utils::dirName(filepath);
+    std::string lerr;
+    if (!acquireDirLock(d, &lerr)) { setReadOnlyLocked(lerr); *err = "read-only mode: " + lerr; return false; }
+    return true;
+}
+
+// Inspect the bytes currently at the destination before replacing them. Never destructive:
+// unknown/different layouts are refused; anything the new file would not preserve is backed up first.
+bool ConfigDatabase::checkDestinationLocked(const std::string& filepath, bool is_live, std::string* err) const {
+    std::string existing;
+    if (!fileExists(filepath)) return true;
+    if (!readWholeFile(filepath, &existing)) {
+        *err = "cannot read existing file; refusing to replace it";
+        if (!is_live) setReadOnlyLocked(*err);
+        return false;
+    }
+    if (existing.empty() || existing.find_first_not_of(" \t\r\n") == std::string::npos) return true;
+    const char* prefix = is_live ? "#HUNTER_LIVE_CACHE_V" : "#HUNTER_CONFIG_DB_V";
+    const int cur = is_live ? 3 : 4;
+    const std::string first = firstLine(existing);
+    const int v = headerVersion(first, prefix);
+    auto fail = [&](const std::string& why) {
+        *err = why;
+        if (!is_live) setReadOnlyLocked(why);
+        return false;
+    };
+    std::string used;
+    if (v < 1 || v > cur) {
+        if (first.compare(0, std::strlen(prefix) - 1, std::string(prefix).substr(0, std::strlen(prefix) - 1)) == 0)
+            return fail("refusing to overwrite unsupported file version: " + first);
+        // Unrecognized non-empty content: keep it before replacing.
+        if (!makeBackup(filepath + ".unknown.bak", existing, &used, err)) return fail("backup of unrecognized file failed: " + *err);
+        return true;
+    }
+    if (is_live && v < 3) return true;  // derived cache; older layouts are safely regenerated
+    if (v < cur) {
+        if (!makeBackup(filepath + ".v" + std::to_string(v) + ".bak", existing, &used, err))
+            return fail("backup of old-format file failed: " + *err);
+        return true;
+    }
+    // Current version: the column layout must be exactly ours.
+    auto lines = bodyLines(existing);
+    if (lines.empty() || lines[0] != v4ColumnsLine())
+        return fail("refusing to overwrite file with a different column layout");
+    if (!is_live && std::hash<std::string>{}(existing) != last_written_hash_ && countRejectedV4(existing, th_) > 0) {
+        if (!makeBackup(filepath + ".v4.bak", existing, &used, err))
+            return fail("rows that cannot be parsed could not be backed up: " + *err);
+    }
+    return true;
+}
 
 ConfigDatabase::LoadReport ConfigDatabase::lastLoadReport() const {
     std::lock_guard<std::mutex> lock(mutex_);
@@ -226,20 +353,8 @@ int ConfigDatabase::saveToDisk(const std::string& filepath) const {
     std::lock_guard<std::mutex> txl(fileTxMutex());
     auto& err = const_cast<std::string&>(save_error_);
     err.clear();
-
-    // Never clobber an unknown/newer file; keep a backup of any older format.
-    std::string existing;
-    if (readWholeFile(filepath, &existing)) {
-        const std::string first = firstLine(existing);
-        if (first.compare(0, 18, "#HUNTER_CONFIG_DB_") == 0) {
-            int v = headerVersion(first, "#HUNTER_CONFIG_DB_V");
-            if (v < 1 || v > 4) { err = "refusing to overwrite unsupported config DB version: " + first; return -1; }
-            if (v < 4) {
-                std::string used;
-                if (!makeBackup(filepath + ".v" + std::to_string(v) + ".bak", existing, &used, &err)) return -1;
-            }
-        }
-    }
+    if (!acquireWriteAccessLocked(filepath, &err)) return -1;
+    if (!checkDestinationLocked(filepath, false, &err)) return -1;
 
     const double now = clock_();
     std::vector<const ConfigHealthRecord*> recs;
@@ -247,6 +362,7 @@ int ConfigDatabase::saveToDisk(const std::string& filepath) const {
     const std::string content = buildV4Content(kDbHeaderV4, recs, now, th_);
     if (!validateV4Content(content, kDbHeaderV4, recs.size(), th_, &err)) { err = "save refused: " + err; return -1; }
     if (!writeFileAtomic(filepath, content, &err)) return -1;
+    last_written_hash_ = std::hash<std::string>{}(content);
     return static_cast<int>(recs.size());
 }
 
@@ -255,14 +371,8 @@ int ConfigDatabase::saveLiveToDisk(const std::string& filepath) const {
     std::lock_guard<std::mutex> txl(fileTxMutex());
     auto& err = const_cast<std::string&>(save_error_);
     err.clear();
-    std::string existing;
-    if (readWholeFile(filepath, &existing)) {
-        const std::string first = firstLine(existing);
-        if (first.compare(0, 20, "#HUNTER_LIVE_CACHE_V") == 0) {
-            int v = headerVersion(first, "#HUNTER_LIVE_CACHE_V");
-            if (v < 1 || v > 3) { err = "refusing to overwrite unsupported live cache version: " + first; return -1; }
-        }
-    }
+    if (!acquireWriteAccessLocked(filepath, &err)) return -1;
+    if (!checkDestinationLocked(filepath, true, &err)) return -1;
     const double now = clock_();
     std::vector<const ConfigHealthRecord*> recs;
     for (const auto& [k, rec] : db_) {
@@ -281,26 +391,34 @@ int ConfigDatabase::saveLiveToDisk(const std::string& filepath) const {
 }
 
 int ConfigDatabase::loadFromDisk(const std::string& filepath) {
+    // One transaction: DB mutex, then path mutex, THEN read - the snapshot cannot go stale
+    // between reading and any rewrite (migration) that follows.
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> txl(fileTxMutex());
     LoadReport rep;
     std::string data;
     if (!readWholeFile(filepath, &data)) {
-        std::lock_guard<std::mutex> lock(mutex_);
         rep.error = "cannot read " + filepath;
         load_report_ = rep;
         return 0;
     }
+    {
+        std::string lerr;
+        if (!read_only_ && !acquireDirLock(utils::dirName(filepath), &lerr)) {
+            setReadOnlyLocked(lerr);
+        }
+        if (read_only_) rep.warning = "read-only mode: " + read_only_reason_;
+    }
     const std::string first = firstLine(data);
     const int ver = headerVersion(first, "#HUNTER_CONFIG_DB_V");
     if (ver < 1 || ver > 4) {
-        std::lock_guard<std::mutex> lock(mutex_);
         rep.error = first.compare(0, 19, "#HUNTER_CONFIG_DB_V") == 0 ? "unsupported config DB version: " + first
                                                                       : "not a config DB file";
+        if (first.compare(0, 19, "#HUNTER_CONFIG_DB_V") == 0) setReadOnlyLocked(rep.error);
         load_report_ = rep;
         return 0;
     }
     rep.source_version = ver;
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::lock_guard<std::mutex> txl(fileTxMutex());
     auto lines = bodyLines(data);
     size_t start = 0;
     std::vector<ConfigHealthRecord> parsed;
@@ -308,6 +426,7 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     if (ver == 4) {
         if (lines.empty() || lines[0] != v4ColumnsLine()) {
             rep.error = "V4 column header missing or different";
+            setReadOnlyLocked(rep.error);
             load_report_ = rep;
             return 0;
         }
@@ -330,8 +449,10 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
         if (rep.rejected > 0) {
             // A later save would drop the rejected rows: keep the current file bytes first.
             std::string err;
-            if (!makeBackup(filepath + ".v4.bak", data, &rep.backup_path, &err))
+            if (!makeBackup(filepath + ".v4.bak", data, &rep.backup_path, &err)) {
                 rep.error = "rejected rows not backed up: " + err;
+                setReadOnlyLocked(rep.error);  // fail closed: no later save may drop them
+            }
         }
         load_report_ = rep;
         return rep.loaded;
@@ -357,12 +478,15 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     rep.ok = true;
 
     // Rewrite as V4: validate the whole new file first, keep the original as .v<N>.bak.
+    // The new file holds the union of everything in memory (never drops records added since).
     std::vector<const ConfigHealthRecord*> recs;
-    for (const auto& [k, r] : migrated) recs.push_back(&r);
+    for (const auto& [k, r] : db_) if (!r.uri.empty()) recs.push_back(&r);
     const double now = clock_();
     const std::string content = buildV4Content(kDbHeaderV4, recs, now, th_);
     std::string err;
-    if (rep.rejected > 0) {
+    if (read_only_) {
+        rep.error = "migration not written: read-only mode: " + read_only_reason_;
+    } else if (rep.rejected > 0) {
         // Rewriting would silently drop the rejected rows: leave the original file untouched.
         rep.error = "migration not written: " + std::to_string(rep.rejected) +
                     " row(s) could not be parsed; original kept";
@@ -373,7 +497,7 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
         if (!makeBackup(filepath + ".v" + std::to_string(ver) + ".bak", data, &bak, &err))
             rep.error = "migration not written (backup failed): " + err;
         else if (!writeFileAtomic(filepath, content, &err)) rep.error = "migration not written: " + err;
-        else { rep.migrated = true; rep.backup_path = bak; }
+        else { rep.migrated = true; rep.backup_path = bak; last_written_hash_ = std::hash<std::string>{}(content); }
     }
     load_report_ = rep;
     return rep.loaded;
@@ -383,6 +507,7 @@ int ConfigDatabase::loadLiveFromDisk(const std::string& filepath) {
     LoadReport rep;
     std::string data;
     std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex> txl(fileTxMutex());
     if (!readWholeFile(filepath, &data)) { rep.error = "cannot read " + filepath; load_report_ = rep; return 0; }
     const std::string first = firstLine(data);
     const int ver = headerVersion(first, "#HUNTER_LIVE_CACHE_V");

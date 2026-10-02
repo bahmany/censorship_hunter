@@ -78,9 +78,16 @@ public:
         bool migrated = false;      // legacy file rewritten as V4
         std::string backup_path;
         std::string error;          // visible failure reason (unknown version, I/O, ...)
+        std::string warning;        // e.g. another instance owns the data directory (read-only)
     };
     LoadReport lastLoadReport() const;
     std::string lastSaveError() const;
+
+    /// Read-only mode: set (sticky) when another process owns the data directory, the on-disk
+    /// layout is unsupported, or a protective backup failed. All saves are refused while set.
+    bool readOnly() const;
+    std::string readOnlyReason() const;
+    void clearReadOnly();  // explicit operator resolution
 
     /**
      * @brief Legacy adapter for pre-V4 callers (removed once A2 rewires them):
@@ -271,6 +278,13 @@ private:
     HealthThresholds th_;
     LoadReport load_report_;
     std::string save_error_;
+    mutable bool read_only_ = false;
+    mutable std::string read_only_reason_;
+    mutable size_t last_written_hash_ = 0;  // hash of the bytes this instance last published (DB file)
+
+    bool acquireWriteAccessLocked(const std::string& filepath, std::string* err) const;
+    bool checkDestinationLocked(const std::string& filepath, bool is_live, std::string* err) const;
+    void setReadOnlyLocked(const std::string& why) const;
 
     void evictStale();
     ApplyEffect applyLocked(ConfigHealthRecord& rec, const ProbeResult& r);

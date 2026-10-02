@@ -448,5 +448,25 @@ int main() {
     }
     T_END();
 
+    T_CASE("R5 failure timing cannot cross a network generation or a restart");
+    {
+        HealthEvidence network, restart;
+        applyProbe(network, fail(100.0), TH); applyProbe(network, fail(115.0), TH);
+        ProbeResult g = fail(200.0); g.generation = 2;
+        applyProbe(network, g, TH);
+        CHECK(network.state != HealthState::Dead && network.failure_streak == 1, "new network needs a new attributed streak");
+        applyProbe(restart, fail(100.0), TH); applyProbe(restart, fail(115.0), TH);
+        resetSessionEvidence(restart);
+        applyProbe(restart, fail(200.0), TH);
+        CHECK(restart.state != HealthState::Dead && restart.failure_streak == 1, "restart cannot complete a pre-restart streak");
+        std::string why;
+        CHECK(evidenceConsistent(network, TH, &why) && evidenceConsistent(restart, TH, &why), why);
+        // within one session+generation death still works
+        HealthEvidence ok;
+        for (double t : {100.0, 115.0, 130.0}) applyProbe(ok, fail(t), TH);
+        CHECK(ok.state == HealthState::Dead, "same session/generation still reaches Dead");
+    }
+    T_END();
+
     return T_SUMMARY();
 }

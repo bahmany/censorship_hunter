@@ -144,5 +144,28 @@ int main() {
     CHECK(!computeEndpointKey("vmess://" + utils::base64Encode("{\"add\":\"h\",\"port\":1,\"id\":\"x\",\"o\":{\"n\":1}}")).valid, "nested JSON -> exact-byte fallback");
     T_END();
 
+    T_CASE("R6/R7 VMess strict parsing, ALPN spelling, insecure aliases");
+    {
+        auto vm2 = [](const std::string& port, const std::string& extra = "") {
+            return "vmess://" + utils::base64Encode("{\"add\":\"example.com\",\"port\":" + port +
+                ",\"id\":\"11111111-2222-3333-4444-555555555555\",\"net\":\"tcp\",\"tls\":\"tls\"" + extra + "}");
+        };
+        auto valid = computeEndpointKey(vm2("443"));
+        auto junk = computeEndpointKey(vm2("\"443junk\""));
+        CHECK(valid.valid && valid.port == 443, "baseline");
+        CHECK(!junk.valid && junk.key != valid.key, "string port with junk -> exact-byte fallback, no collision");
+        CHECK(!computeEndpointKey(vm2("443junk")).valid, "invalid bare JSON number rejected");
+        CHECK(!computeEndpointKey(vm2("0")).valid && !computeEndpointKey(vm2("70000")).valid && !computeEndpointKey(vm2("-1")).valid, "port range");
+        CHECK(!computeEndpointKey(vm2("443.5")).valid && !computeEndpointKey(vm2("4e2")).valid, "non-integer port rejected");
+        CHECK(computeEndpointKey(vm2("\"443\"")).key == valid.key, "numeric string port equals number port");
+        CHECK(computeEndpointKey(vm2("443", ",\"alpn\":\"X-Proto\"")).key != computeEndpointKey(vm2("443", ",\"alpn\":\"x-proto\"")).key, "ALPN spelling preserved");
+        for (const char* k : {"skip-cert-verify", "skip_cert_verify", "allowInsecure", "insecure", "AllowInsecure"})
+            CHECK(computeEndpointKey(vm2("443", std::string(",\"") + k + "\":true")).insecure_tls, std::string("insecure alias ") + k);
+        CHECK(!computeEndpointKey(vm2("443", ",\"skip-cert-verify\":false")).insecure_tls, "false is not insecure");
+        CHECK(computeEndpointKey(std::string("trojan://pw@example.com:443?skip-cert-verify=1")).insecure_tls, "URI query alias");
+        CHECK(!computeEndpointKey(vm2("443", ",\"x\":1.}")).valid, "malformed number rejected");
+    }
+    T_END();
+
     return T_SUMMARY();
 }
