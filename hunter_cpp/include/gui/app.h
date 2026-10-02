@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <condition_variable>
+#include <map>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -11,8 +12,10 @@
 #include <unordered_map>
 #include <vector>
 
+#include "core/health_score.h"
 #include "core/models.h"
 #include "core/updater.h"
+#include "geo/country_query.h"
 #include "core/utils.h"  // for utils::LogRingBuffer
 
 struct GLFWwindow;
@@ -21,6 +24,7 @@ struct ImVec4;
 namespace hunter {
 
 class HunterOrchestrator;
+namespace geo { class CountryService; class CountryTargetState; }
 
 namespace gui {
 
@@ -69,8 +73,13 @@ private:
     void snapshotWorker();
     void startSnapshotWorker();
     void stopSnapshotWorker();
+    void countryWorker();       // server-country fill + (optional) DoH, off the GUI thread
+    void baselineWorker();      // local connectivity overlay (M5), off the GUI thread
     const ParsedConfig& parsedFor(const std::string& uri);
     void rebuildVisibleRowsIfDirty(int sort_col, bool sort_asc);
+    void markViewDirty();       // filter/search/view changed: worker re-queries immediately
+    void applyExitTarget(const std::string& iso, bool strict);
+    void saveConfigNow();
 
     // ─── Modern UI rendering ───
     void applyModernTheme();
@@ -86,6 +95,7 @@ private:
     // Legacy rendering (used within tabs)
     void renderHeader();
     void renderControls();
+    void renderFilterBar();
     void renderTable();
     void renderLogPanel();
     void renderQrPopup();
@@ -124,13 +134,37 @@ private:
     // frames long enough that the window stopped answering _NET_WM_PING, and
     // KWin killed the app as unresponsive. A background thread produces the
     // snapshot instead; the render thread only swaps a pointer.
+    /// One table row: the record plus everything the render thread needs, computed by the worker.
+    struct UiRow {
+        ConfigHealthRecord rec;
+        HealthEvaluation ev;
+        std::string protocol, address, ps;   // parsed once by the worker
+        int port = 0;
+    };
     struct UiSnapshot {
-        std::vector<ConfigHealthRecord> alive;
+        std::vector<UiRow> rows;             // already filtered by the view spec, ranked, capped
         int total = 0;
         int alive_count = 0;
         int tested = 0;
         float avg_latency_ms = 0.0f;
+        int stable = 0, healthy = 0, degraded = 0, unstable = 0, dead = 0, unknown = 0;
+        int matched = 0;                     // rows matching the view spec before the row cap
+        std::map<std::string, int> exit_counts, server_counts;   // across the whole DB
+        double scan_ms = 0.0;
+        uint64_t spec_version = 0;
     };
+
+    /// What the table shows; written by the render thread, read by the snapshot worker.
+    struct ViewSpec {
+        bool all_view = false;               // false: live configs only; true: "All configs" (Unknown/Dead too)
+        geo::CountryMode mode = geo::CountryMode::All;
+        geo::CountryChoice choice;
+        std::string query;
+        uint64_t version = 1;
+    };
+    ViewSpec view_spec_;                     // guarded by view_mutex_
+    std::mutex view_mutex_;
+    std::atomic<bool> view_dirty_{false};
 
     std::thread snapshot_thread_;
     std::atomic<bool> snapshot_stop_{false};
@@ -140,16 +174,21 @@ private:
     std::shared_ptr<const UiSnapshot> applied_snapshot_;  // last one the UI took
     static constexpr double kSnapshotIntervalSeconds = 1.0;
 
-    std::vector<ConfigHealthRecord> snapshot_;
+    std::vector<UiRow> snapshot_;
+    std::map<std::string, int> cached_exit_counts_, cached_server_counts_;
+    int cached_matched_ = 0;
+    int cached_stable_ = 0, cached_healthy_ = 0, cached_dead_ = 0, cached_unknown_ = 0;
+    double cached_scan_ms_ = 0.0;
     int cached_total_ = 0;
     int cached_alive_ = 0;
     int cached_tested_ = 0;
     float cached_avg_latency_ms_ = 0.0f;
     double last_refresh_time_ = -1.0;
     static constexpr double kRefreshIntervalSeconds = 0.5;
-    static constexpr int kMaxAliveRows = 500;
+    static constexpr int kMaxLiveRows = 500;
+    static constexpr int kMaxAllRows = 3000;
 
-    std::vector<const ConfigHealthRecord*> visible_rows_;
+    std::vector<const UiRow*> visible_rows_;
     bool rows_dirty_ = true;
     std::string last_filter_applied_;
 
@@ -158,6 +197,14 @@ private:
     std::string last_clicked_uri_;
 
     char filter_text_[256] = {0};
+    int view_all_ui_ = 0;           // 0 = Live, 1 = All configs
+    int country_mode_ui_ = 0;       // geo::CountryMode
+    std::string country_choice_ui_; // "" any, "?" unknown, "~" mixed, else ISO
+    char target_input_[8] = {0};
+    bool target_strict_ui_ = false;
+    bool baseline_enabled_ui_ = true;
+    bool doh_enabled_ui_ = false;
+    bool user_sorted_ = false;
     int sort_column_ = -1;
     bool sort_ascending_ = true;
 
@@ -180,6 +227,15 @@ private:
     enum class Tab { Dashboard, Configs, Settings, About };
     Tab active_tab_ = Tab::Dashboard;
     bool theme_applied_ = false;
+
+    // ─── Country service (C2) ───
+    std::shared_ptr<geo::CountryService> country_service_;
+    std::shared_ptr<geo::CountryTargetState> target_state_;
+    std::thread country_thread_;
+    std::thread baseline_thread_;
+    std::atomic<int> baseline_state_{0};   // 0 idle/unknown, 1 online, 2 offline, 3 indeterminate, 4 disabled
+    std::atomic<double> baseline_at_{0.0};
+    std::atomic<int> country_filled_{0};
 
     // ─── Update panel state ───
     core::SelfUpdateManager::UpdateState last_update_state_{core::SelfUpdateManager::UpdateState::Idle};

@@ -98,6 +98,25 @@ public:
     std::string mihomoPath() const { return getString("mihomo_path", "/app/bin/mihomo"); }
     std::string torPath() const { return getString("tor_path", "/app/bin/tor"); }
 #endif
+    // ─── Stage 4 / C2: country targeting + direct baseline (persisted in runtime/hunter_config.json) ───
+
+    /// ISO-3166 alpha-2 exit-country target ("" = none). Persisted. Batch B's failover consumes this.
+    std::string exitCountryTarget() const;
+    /// Normalizes (trim + upper-case, must be [A-Z]{2} or empty); returns false and keeps the old value if invalid.
+    bool setExitCountryTarget(const std::string& iso);
+    /// Strict: recommendations/failover may only use a FRESH MEASURED exit in the target; never silently switch outside it.
+    bool exitCountryStrict() const { return getBool("exit_country_strict", false); }
+    void setExitCountryStrict(bool on) { set("exit_country_strict", on); }
+    /// Share of each discovery batch reserved for Unknown-country exploration (clamped to [0.2, 0.9]).
+    float countryExplorationRatio() const;
+    /// Optional verified-DoH resolution of domain server endpoints (off by default: leaks hostnames to the DoH provider).
+    bool countryDohEnabled() const { return getBool("country_doh_enabled", false); }
+    /// M5: direct (non-proxied) connectivity baseline probes. Default on; user may disable for privacy.
+    bool directBaselineEnabled() const { return getBool("direct_baseline_enabled", true); }
+    /// Exit-country freshness (D4: 30 min) and server cache TTL caps, seconds.
+    int exitCountryFreshSeconds() const { return getInt("exit_country_fresh_s", 1800); }
+    int dohMaxTtlSeconds() const { return getInt("country_doh_max_ttl_s", 3600); }
+
     std::vector<std::string> telegramTargets() const { return getStringList("targets"); }
 
     /**

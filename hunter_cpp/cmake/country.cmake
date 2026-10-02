@@ -76,6 +76,9 @@ endif()
 # Add country database source to hunter_core
 target_sources(hunter_core PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/geo/country_database.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/geo/country_query.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/geo/country_service.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/network/country_provider.cpp
 )
 
 # Test executable for offline country database
@@ -87,3 +90,11 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 target_link_libraries(test_geo PRIVATE hunter_core)
 add_test(NAME test_geo COMMAND test_geo)
+
+# Stage 4 C2: country service / query parser / targeting (fake DoH + fake transport, no public network)
+add_executable(test_country_service tests/test_country_service.cpp)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_link_options(test_country_service PRIVATE -static-libgcc -static-libstdc++)
+endif()
+target_link_libraries(test_country_service PRIVATE hunter_core)
+add_test(NAME test_country_service COMMAND test_country_service)

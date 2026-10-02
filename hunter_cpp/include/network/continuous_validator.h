@@ -59,6 +59,20 @@ public:
     };
     bool applyCountryResult(const std::string& endpoint_key, const CountryUpdate& update);
 
+    /**
+     * @brief (C2) Visit every record under the DB lock (read-only). Keep the callback cheap and
+     *        never call back into this database from it.
+     */
+    void forEachRecord(const std::function<void(const ConfigHealthRecord&)>& fn) const;
+
+    /**
+     * @brief (C2) Optional hook that reorders/trims the candidate pool of getUntestedBatch()
+     *        (country-targeted discovery). Runs under the DB lock; must be pure and fast.
+     *        pool arrives in base-priority order; the hook leaves at most batch_size records.
+     */
+    using BatchPrioritizer = std::function<void(std::vector<ConfigHealthRecord>& pool, int batch_size)>;
+    void setBatchPrioritizer(BatchPrioritizer fn);
+
     /** @brief Records whose stability is Stable, ranked by the shared evaluator. */
     std::vector<ConfigHealthRecord> getRecommendedRecords(int max_count = 50);
     HealthEvaluation evaluate(const ConfigHealthRecord& rec) const;
@@ -275,6 +289,7 @@ private:
     std::map<std::string, ConfigHealthRecord> db_;  // keyed by EndpointKeyV1
     mutable std::mutex mutex_;
     ClockFn clock_;
+    BatchPrioritizer batch_prioritizer_;   // guarded by mutex_ (C2)
     HealthThresholds th_;
     LoadReport load_report_;
     std::string save_error_;
