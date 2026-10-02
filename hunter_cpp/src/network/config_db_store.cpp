@@ -10,6 +10,7 @@
 #include <mutex>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <functional>
 #include <map>
@@ -49,7 +50,8 @@ std::wstring widen(const std::string& u8) {
 
 bool readWholeFile(const std::string& path, std::string* out) {
 #ifdef _WIN32
-    std::ifstream ifs(widen(path), std::ios::binary);
+    // MSVC accepts std::wstring here; portable form is std::filesystem::path
+    std::ifstream ifs(std::filesystem::path(widen(path)), std::ios::binary);
 #else
     std::ifstream ifs(path, std::ios::binary);
 #endif

@@ -64,7 +64,7 @@ if(HUNTER_EMBED_ENGINES)
             ${HUNTER_EMBED_OUT_DIR}/engine_embedded.S
             ${HUNTER_EMBED_OUT_DIR}/engine_meta.json
         COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_EMBED_OUT_DIR}
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
+        COMMAND python3 -X utf8 ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
                 --bin ${HUNTER_EMBED_BIN_DIR}
                 --outdir ${HUNTER_EMBED_OUT_DIR}
                 --platform ${_embed_platform}
@@ -141,7 +141,7 @@ if(HUNTER_EMBED_CONFIGS)
             ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.S
             ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_meta.json
         COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_CONFIG_EMBED_OUT_DIR}
-        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
+        COMMAND python3 -X utf8 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
                 --bundle ${HUNTER_CONFIG_BUNDLE}
                 --outdir ${HUNTER_CONFIG_EMBED_OUT_DIR}
                 --platform ${_cfg_embed_platform}

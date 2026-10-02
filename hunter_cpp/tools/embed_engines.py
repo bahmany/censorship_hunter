@@ -195,7 +195,7 @@ def main():
         header_lines.append("")
 
     header_lines += ["#ifdef __cplusplus", "}", "#endif", ""]
-    (out_dir / "engine_embedded.h").write_text("\n".join(header_lines))
+    (out_dir / "engine_embedded.h").write_text("\n".join(header_lines), encoding="utf-8")
 
     # ─── Generate engine_embedded.S (.incbin — efficient binary embedding) ───
     # Self-contained: no #include needed (all values known at generation time).
@@ -250,7 +250,7 @@ def main():
             asm_lines.append(f"    .quad 0")
             asm_lines.append("")
 
-    (out_dir / "engine_embedded.S").write_text("\n".join(asm_lines))
+    (out_dir / "engine_embedded.S").write_text("\n".join(asm_lines), encoding="utf-8")
 
     # ─── Generate engine_meta.json (for runtime manifest + AV transparency) ───
     meta = {
@@ -270,7 +270,7 @@ def main():
             for e in engines
         },
     }
-    (out_dir / "engine_meta.json").write_text(json.dumps(meta, indent=2))
+    (out_dir / "engine_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     print(f"[embed] wrote engine_embedded.h, engine_embedded.S, engine_meta.json to {out_dir}")
     print(f"[embed] HAS_ENGINES={1 if have_any else 0}")

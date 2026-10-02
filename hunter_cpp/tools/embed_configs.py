@@ -99,7 +99,7 @@ def main():
         "#endif",
         "",
     ]
-    (out_dir / "config_embedded.h").write_text("\n".join(header_lines))
+    (out_dir / "config_embedded.h").write_text("\n".join(header_lines), encoding="utf-8")
 
     # Compute metadata + compress.
     orig_size = 0
@@ -165,7 +165,7 @@ def main():
         asm_lines.append("kConfigsZstLen:")
         asm_lines.append("    .quad 0")
     asm_lines.append("")
-    (out_dir / "config_embedded.S").write_text("\n".join(asm_lines))
+    (out_dir / "config_embedded.S").write_text("\n".join(asm_lines), encoding="utf-8")
 
     # ─── Generate config_meta.json ───
     meta = {
@@ -179,7 +179,7 @@ def main():
         "sha256": sha256,
         "source": "Downloaded at build time from 25+ public GitHub sources via tools/download_configs.py",
     }
-    (out_dir / "config_meta.json").write_text(json.dumps(meta, indent=2))
+    (out_dir / "config_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     print(f"[cfg-embed] wrote config_embedded.h, config_embedded.S, config_meta.json to {out_dir}")
     print(f"[cfg-embed] HAS_CONFIGS={1 if have_bundle else 0}")
