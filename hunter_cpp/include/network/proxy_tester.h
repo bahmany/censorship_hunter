@@ -79,6 +79,18 @@ public:
      */
     void setMihomoPath(const std::string& path) { mihomo_path_ = path; }
 
+    /**
+     * @brief Check if Gemini (Google AI API) is accessible through a proxy.
+     *        Starts the proxy engine, makes an HTTPS request to
+     *        generativelanguage.googleapis.com through the SOCKS5 proxy.
+     *        Any HTTP response (even 401/403) means the IP is NOT blocked.
+     *        Connection failure/timeout means the IP IS blocked.
+     * @param config_uri The proxy config URI to test through
+     * @param timeout_seconds Timeout for the check
+     * @return -1 = unknown/error, 0 = blocked, 1 = accessible
+     */
+    int checkGeminiAccess(const std::string& config_uri, int timeout_seconds = 15);
+
 private:
     std::string xray_path_;
     std::string singbox_path_;

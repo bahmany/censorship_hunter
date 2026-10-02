@@ -16,15 +16,9 @@
 #include "network/continuous_validator.h"
 #include "network/aggressive_harvester.h"
 #include "network/flexible_fetcher.h"
-#include "proxy/load_balancer.h"
-#include "proxy/runtime_engine_manager.h"
-#include "proxy/xray_manager.h"
-#include "testing/benchmark.h"
-#include "security/dpi_evasion.h"
-#include "security/obfuscation.h"
-#include "telegram/bot_reporter.h"
 #include "cache/smart_cache.h"
 #include "orchestrator/runtime_cleanup_manager.h"
+#include "proxy/proxy_server_manager.h"
 
 namespace hunter {
 
@@ -32,11 +26,11 @@ namespace hunter {
 namespace orchestrator { class ThreadManager; }
 
 /**
- * @brief Main Hunter orchestrator — coordinates the full autonomous workflow
- * 
- * Manages the complete lifecycle: scraping configs from multiple sources,
- * benchmarking them, feeding working configs to the load balancer,
- * publishing results to Telegram, and maintaining persistent caches.
+ * @brief Main Hunter orchestrator — coordinates the fetch/test workflow
+ *
+ * Manages the full lifecycle: scraping configs from multiple provider
+ * sources, testing them for liveness across threads, and maintaining the
+ * persistent health database that the GUI reads from.
  */
 class HunterOrchestrator {
 public:
@@ -49,7 +43,7 @@ public:
     // ─── Lifecycle ───
 
     /**
-     * @brief Start the orchestrator (blocking — runs ThreadManager + dashboard)
+     * @brief Start the orchestrator (blocking — runs ThreadManager)
      */
     void start();
 
@@ -61,7 +55,7 @@ public:
     // ─── Core Cycle ───
 
     /**
-     * @brief Run one complete hunter cycle (scrape → benchmark → balance → publish)
+     * @brief Run one complete hunter cycle (scrape → validate → tier)
      * @return true on success
      */
     bool runCycle();
@@ -83,11 +77,6 @@ public:
      * @return true if a working config was found
      */
     bool testCachedConfigs();
-
-    /**
-     * @brief Kill processes occupying required ports
-     */
-    void killPortOccupants();
 
     /**
      * @brief Load configs from bundle files when GitHub is inaccessible
@@ -135,14 +124,8 @@ public:
     network::HttpClient& httpClient() { return http_client_; }
     network::ConfigFetcher& configFetcher() { return config_fetcher_; }
     network::ConfigDatabase* configDb() { return config_db_.get(); }
-    proxy::MultiProxyServer* balancer() { return balancer_.get(); }
-    proxy::MultiProxyServer* geminiBalancer() { return gemini_balancer_.get(); }
-    proxy::XRayManager& xrayManager() { return xray_manager_; }
-    proxy::RuntimeEngineManager& runtimeEngineManager() { return runtime_engine_manager_; }
-    testing::ProxyBenchmark& benchmarker() { return benchmarker_; }
-    security::DpiEvasionOrchestrator* dpiEvasion() { return dpi_evasion_.get(); }
-    telegram::BotReporter* botReporter() { return bot_reporter_.get(); }
     cache::SmartCache* cache() { return cache_.get(); }
+    proxy::ProxyServerManager& proxyServerManager() { return proxy_server_manager_; }
 
     // ─── State ───
 
@@ -177,42 +160,9 @@ public:
     void addManualConfigs(const std::vector<std::string>& uris);
     std::string triggerRuntimeCleanup();
 
-    // ─── Dashboard ───
+    // ─── Dashboard (terminal, optional — GUI reads configDb() directly) ───
     void printStartupBanner();
     void printDashboard();
-    void writeStatusFile(const std::string& phase = "", int last_tested = 0, int last_passed = 0);
-
-    // ─── Real-time UI Communication (stdin/stdout JSON lines) ───
-    /** Process a single JSON command line received from stdin or another local UI bridge */
-    void processStdinCommand(const std::string& json_line);
-    /** Process a realtime JSON command and return a JSON result payload */
-    std::string processRealtimeCommand(const std::string& json_line);
-    /** Emit ##STATUS## JSON line to stdout for realtime consumers */
-    void emitStatusJson(const std::string& phase = "running");
-    /** Build the full status snapshot JSON used by websocket monitor + file state */
-    std::string buildStatusJson(const std::string& phase = "", int last_tested = 0, int last_passed = 0);
-
-    // ─── Port Provisioning (2901-2999) ───
-    void provisionPorts();
-    void stopProvisionedPorts();
-    void refreshProvisionedPorts();
-    std::string recheckLiveProvisionedPorts();
-    struct PortSlot {
-        int port = 0;          // SOCKS port
-        int http_port = 0;     // HTTP port (same as port in mixed mode)
-        std::string uri;
-        std::string engine_used;
-        int pid = -1;
-        bool alive = false;
-        bool tcp_alive = false;
-        bool socks_ready = false;
-        bool http_ready = false;
-        float latency_ms = 0.0f;
-        double last_health_check = 0.0;
-        double last_probe_ts = 0.0;
-        int consecutive_failures = 0;
-    };
-    std::vector<PortSlot> getProvisionedPorts() const;
 
     /**
      * @brief Download configs from multiple sources with proxy fallback chain
@@ -231,17 +181,10 @@ private:
     std::unique_ptr<network::FlexibleFetcher> flexible_fetcher_;
     std::unique_ptr<network::ConfigDatabase> config_db_;
     std::unique_ptr<network::ContinuousValidator> continuous_validator_;
-    proxy::XRayManager xray_manager_;
-    proxy::RuntimeEngineManager runtime_engine_manager_;
-    testing::ProxyBenchmark benchmarker_;
-    std::unique_ptr<proxy::MultiProxyServer> balancer_;
-    std::unique_ptr<proxy::MultiProxyServer> gemini_balancer_;
-    std::unique_ptr<security::DpiEvasionOrchestrator> dpi_evasion_;
-    std::unique_ptr<security::ObfuscationEngine> obfuscation_;
-    std::unique_ptr<telegram::BotReporter> bot_reporter_;
     std::unique_ptr<cache::SmartCache> cache_;
     std::unique_ptr<orchestrator::ThreadManager> thread_manager_;
     std::unique_ptr<orchestrator::RuntimeCleanupManager> cleanup_manager_;
+    proxy::ProxyServerManager proxy_server_manager_;
 
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> paused_{false};
@@ -268,26 +211,13 @@ private:
     mutable std::mutex status_mutex_;
     double start_time_ = 0.0;
 
-    // Port provisioning (2901-2999)
-    static constexpr int PROVISION_PORT_BASE = 2901;
-    static constexpr int PROVISION_PORT_MAX = 2999;
-    static constexpr int PROVISION_PORT_COUNT = PROVISION_PORT_MAX - PROVISION_PORT_BASE + 1;
-    std::vector<PortSlot> provisioned_ports_;
-    mutable std::mutex provision_mutex_;
-
     // Private methods
     void initComponents();
-    void loadBalancerCache(const std::string& name, proxy::MultiProxyServer* bal);
-    void saveBalancerCache(const std::string& name,
-                           const std::vector<std::pair<std::string, float>>& configs);
-    std::string balancerCachePath(const std::string& name) const;
     void saveToFiles(const std::vector<BenchResult>& gold,
                      const std::vector<BenchResult>& silver);
     int appendUniqueLines(const std::string& filepath,
                           const std::vector<std::string>& lines);
     int computeAdaptiveSleep();
-    void replaceProvisionedPortsLocked(const std::vector<int>& dead_indices, double now,
-                                       const std::set<std::string>& excluded_uris = {});
 };
 
 } // namespace hunter

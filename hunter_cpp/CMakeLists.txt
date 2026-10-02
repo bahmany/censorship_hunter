@@ -1,32 +1,163 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(hunter_cpp VERSION 1.5.0 LANGUAGES C CXX)
+project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-if(WIN32)
-    # Avoid cc1plus out-of-memory on some machines by forcing single compile job.
-    set_property(GLOBAL PROPERTY JOB_POOLS compile_pool=1)
-    set(CMAKE_JOB_POOL_COMPILE compile_pool)
-endif()
+# Enable assembly language for .incbin-based engine embedding.
+enable_language(ASM)
 
 find_package(Threads REQUIRED)
-
-# Find zlib
-if(WIN32)
-    set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
-endif()
 find_package(ZLIB REQUIRED)
+find_package(CURL REQUIRED)
+find_package(OpenGL REQUIRED)
 
-# Find libcurl
-if(NOT WIN32)
-    find_package(CURL REQUIRED)
-endif()
+include(FindPkgConfig)
+pkg_check_modules(GLFW REQUIRED glfw3)
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR})
+
+# ─── Embedded Engine Support ───
+# The single-file build compresses xray + sing-box with zstd and embeds them
+# via .incbin (assembler). This is controlled by HUNTER_EMBED_ENGINES (ON/OFF).
+# When ON, embed_engines.py runs at build time to generate:
+#   ${CMAKE_BINARY_DIR}/embedded/engine_embedded.h  (declarations + metadata)
+#   ${CMAKE_BINARY_DIR}/embedded/engine_embedded.S  (.incbin blob)
+#   ${CMAKE_BINARY_DIR}/embedded/*.zst              (compressed payloads)
+# When OFF or bin/ has no engines, a stub header is generated and the binary
+# falls back to classic bin/xray, bin/sing-box lookup at runtime.
+option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" OFF)
+set(HUNTER_EMBED_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin" CACHE PATH "Directory containing engine binaries to embed")
+set(HUNTER_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded" CACHE PATH "Output dir for generated embed files")
+
+if(HUNTER_EMBED_ENGINES)
+    # Determine target platform for .S section directives.
+    if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        set(_embed_platform "windows")
+    else()
+        set(_embed_platform "linux")
+    endif()
+
+    # Run embed_engines.py to generate header + .S + compressed blobs.
+    add_custom_command(
+        OUTPUT
+            ${HUNTER_EMBED_OUT_DIR}/engine_embedded.h
+            ${HUNTER_EMBED_OUT_DIR}/engine_embedded.S
+            ${HUNTER_EMBED_OUT_DIR}/engine_meta.json
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_EMBED_OUT_DIR}
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
+                --bin ${HUNTER_EMBED_BIN_DIR}
+                --outdir ${HUNTER_EMBED_OUT_DIR}
+                --platform ${_embed_platform}
+        DEPENDS ${HUNTER_EMBED_BIN_DIR}/xray ${HUNTER_EMBED_BIN_DIR}/sing-box
+                ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
+        COMMENT "Embedding proxy engines (xray, sing-box) via zstd + .incbin"
+        VERBATIM
+    )
+
+    # Compile the generated .S (assembler with .incbin) into an object library.
+    add_library(engine_embedded_obj OBJECT ${HUNTER_EMBED_OUT_DIR}/engine_embedded.S)
+    target_include_directories(engine_embedded_obj PRIVATE ${HUNTER_EMBED_OUT_DIR})
+
+    # Propagate the generated header include dir to consumers.
+    set(HUNTER_EMBED_INCLUDE_DIR ${HUNTER_EMBED_OUT_DIR})
+    set(HUNTER_EMBED_OBJECT $<TARGET_OBJECTS:engine_embedded_obj>)
+else()
+    # Stub: no embedded engines — runtime falls back to bin/ lookup.
+    # Generate a minimal header so engine_embed.cpp compiles without payloads.
+    file(MAKE_DIRECTORY ${HUNTER_EMBED_OUT_DIR})
+    file(WRITE ${HUNTER_EMBED_OUT_DIR}/engine_embedded.h
+"// Stub — embedded engines disabled (HUNTER_EMBED_ENGINES=OFF).\n"
+"// Runtime falls back to bin/xray, bin/sing-box lookup.\n\n"
+"#pragma once\n"
+"#define HUNTER_EMBED_HAS_ENGINES 0\n"
+"#define HUNTER_EMBED_USE_ZSTD 0\n"
+)
+    set(HUNTER_EMBED_INCLUDE_DIR ${HUNTER_EMBED_OUT_DIR})
+    set(HUNTER_EMBED_OBJECT "")
+endif()
+
+# ─── Embedded Configs Support ───
+# The single-file build downloads the latest proxy configs from 25+ public
+# GitHub sources at BUILD TIME, compresses the deduplicated bundle with zstd,
+# and embeds it via .incbin so the binary ships with a full working config
+# set on first launch. Controlled by HUNTER_EMBED_CONFIGS (ON/OFF).
+option(HUNTER_EMBED_CONFIGS "Download + embed proxy configs into the binary (single-file mode)" OFF)
+option(HUNTER_DOWNLOAD_CONFIGS "Download fresh configs at build time (requires network)" ON)
+set(HUNTER_CONFIG_BUNDLE "${CMAKE_BINARY_DIR}/configs_bundle.txt" CACHE PATH "Path to config bundle to embed")
+set(HUNTER_CONFIG_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded_configs" CACHE PATH "Output dir for config embed files")
+set(HUNTER_CONFIG_DOWNLOAD_TIMEOUT "30" CACHE STRING "Per-source download timeout (seconds)")
+set(HUNTER_CONFIG_DOWNLOAD_WORKERS "16" CACHE STRING "Parallel download workers")
+set(HUNTER_CONFIG_MIN_CONFIGS "100" CACHE STRING "Minimum configs required for a successful build")
+
+if(HUNTER_EMBED_CONFIGS)
+    # Determine target platform for .S section directives.
+    if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
+        set(_cfg_embed_platform "windows")
+    else()
+        set(_cfg_embed_platform "linux")
+    endif()
+
+    # Step 1: Download fresh configs (unless HUNTER_DOWNLOAD_CONFIGS=OFF or
+    # a pre-built bundle is supplied via HUNTER_CONFIG_BUNDLE).
+    if(HUNTER_DOWNLOAD_CONFIGS)
+        add_custom_command(
+            OUTPUT ${HUNTER_CONFIG_BUNDLE}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}"
+            COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/download_configs.py
+                    --outfile ${HUNTER_CONFIG_BUNDLE}
+                    --timeout ${HUNTER_CONFIG_DOWNLOAD_TIMEOUT}
+                    --workers ${HUNTER_CONFIG_DOWNLOAD_WORKERS}
+                    --min-configs ${HUNTER_CONFIG_MIN_CONFIGS}
+            DEPENDS ${CMAKE_SOURCE_DIR}/tools/download_configs.py
+            COMMENT "Downloading latest proxy configs from 25+ public sources"
+            VERBATIM
+        )
+    endif()
+
+    # Step 2: Compress + generate .incbin assembler + header.
+    add_custom_command(
+        OUTPUT
+            ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.h
+            ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.S
+            ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_meta.json
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_CONFIG_EMBED_OUT_DIR}
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
+                --bundle ${HUNTER_CONFIG_BUNDLE}
+                --outdir ${HUNTER_CONFIG_EMBED_OUT_DIR}
+                --platform ${_cfg_embed_platform}
+        DEPENDS ${HUNTER_CONFIG_BUNDLE}
+                ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
+        COMMENT "Embedding config bundle via zstd + .incbin"
+        VERBATIM
+    )
+
+    # Compile the generated .S into an object library.
+    add_library(config_embedded_obj OBJECT ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.S)
+    target_include_directories(config_embedded_obj PRIVATE ${HUNTER_CONFIG_EMBED_OUT_DIR})
+
+    set(HUNTER_CONFIG_EMBED_INCLUDE_DIR ${HUNTER_CONFIG_EMBED_OUT_DIR})
+    set(HUNTER_CONFIG_EMBED_OBJECT $<TARGET_OBJECTS:config_embedded_obj>)
+else()
+    # Stub: no embedded configs — runtime falls back to live scraping.
+    file(MAKE_DIRECTORY ${HUNTER_CONFIG_EMBED_OUT_DIR})
+    file(WRITE ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.h
+"// Stub — embedded configs disabled (HUNTER_EMBED_CONFIGS=OFF).\n"
+"// Runtime falls back to live scraping.\n\n"
+"#pragma once\n"
+"#define HUNTER_EMBED_HAS_CONFIGS 0\n"
+"#define HUNTER_EMBED_CONFIGS_USE_ZSTD 0\n"
+)
+    set(HUNTER_CONFIG_EMBED_INCLUDE_DIR ${HUNTER_CONFIG_EMBED_OUT_DIR})
+    set(HUNTER_CONFIG_EMBED_OBJECT "")
+endif()
+
+# ─── Vendored zstd decoder (amalgamated, decompress-only) ───
+set(ZSTD_DIR ${CMAKE_SOURCE_DIR}/third_party/zstd)
+set(ZSTD_SOURCES ${ZSTD_DIR}/zstddeclib.c)
 
 # ─── Core Library Sources ───
 set(CORE_SOURCES
@@ -35,6 +166,9 @@ set(CORE_SOURCES
     src/core/utils.cpp
     src/core/task_manager.cpp
     src/core/seed_data.cpp
+    src/core/engine_embed.cpp
+    src/core/config_embed.cpp
+    src/core/updater.cpp
 )
 
 # ─── Network Library Sources ───
@@ -50,35 +184,14 @@ set(NETWORK_SOURCES
 )
 
 # ─── Proxy Library Sources ───
+# Only XRayManager survives — it provides the static config-generation
+# helpers ProxyTester uses to spawn temporary test processes. Everything
+# else in proxy/ (load balancer, gateway, session router, traffic
+# observer, upstream tunnels, generated-config hosting) served live
+# client traffic and has been removed.
 set(PROXY_SOURCES
-    src/proxy/load_balancer.cpp
-    src/proxy/load_balancer_impl.cpp
-    src/proxy/runtime_engine_manager.cpp
     src/proxy/xray_manager.cpp
-    src/proxy/proxy_gateway.cpp
-    src/proxy/proxy_hosting_manager.cpp
-    src/proxy/session_router.cpp
-    src/proxy/traffic_observer.cpp
-    src/proxy/upstream_tunnel_manager.cpp
-    src/proxy/generated_config_manager.cpp
-)
-
-# ─── Testing Library Sources ───
-set(TESTING_SOURCES
-    src/testing/benchmark.cpp
-)
-
-# ─── Security Library Sources ───
-set(SECURITY_SOURCES
-    src/security/dpi_evasion.cpp
-    src/security/switch_bypass.cpp
-    src/security/obfuscation.cpp
-    src/security/packet_bypass.cpp
-)
-
-# ─── Telegram Library Sources ───
-set(TELEGRAM_SOURCES
-    src/telegram/bot_reporter.cpp
+    src/proxy/proxy_server_manager.cpp
 )
 
 # ─── Cache Library Sources ───
@@ -93,138 +206,106 @@ set(ORCHESTRATOR_SOURCES
     src/orchestrator/runtime_cleanup_manager.cpp
 )
 
-# ─── Realtime Bridge Sources ───
-set(REALTIME_SOURCES
-    src/realtime/websocket_bridge.cpp
-)
-
-# ─── Web Dashboard Sources ───
 # Create hunter core static library
 add_library(hunter_core STATIC
     ${CORE_SOURCES}
     ${NETWORK_SOURCES}
     ${PROXY_SOURCES}
-    ${TESTING_SOURCES}
-    ${SECURITY_SOURCES}
-    ${TELEGRAM_SOURCES}
     ${CACHE_SOURCES}
     ${ORCHESTRATOR_SOURCES}
-    ${REALTIME_SOURCES}
+    ${ZSTD_SOURCES}
+    ${HUNTER_EMBED_OBJECT}
+    ${HUNTER_CONFIG_EMBED_OBJECT}
 )
 
 target_link_libraries(hunter_core
     PUBLIC
         Threads::Threads
         ${ZLIB_LIBRARIES}
+        CURL::libcurl
 )
 
 target_include_directories(hunter_core PUBLIC
     ${ZLIB_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIRS}
+    ${ZSTD_DIR}
 )
 
-if(WIN32)
-    # Use MSYS2 UCRT static libcurl to avoid shipping DLLs
-    get_filename_component(_msys_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
-    set(_msys_lib_dir "${_msys_bin_dir}/../lib")
-    target_include_directories(hunter_core PUBLIC "${_msys_bin_dir}/../include")
-    target_link_libraries(hunter_core PUBLIC
-        "${_msys_lib_dir}/libcurl.a"
-        "${_msys_lib_dir}/libssl.a"
-        "${_msys_lib_dir}/libcrypto.a"
-        "${_msys_lib_dir}/libssh2.a"
-        "${_msys_lib_dir}/libnghttp2.a"
-        "${_msys_lib_dir}/libnghttp3.a"
-        "${_msys_lib_dir}/libpsl.a"
-        "${_msys_lib_dir}/libidn2.a"
-        "${_msys_lib_dir}/libunistring.a"
-        "${_msys_lib_dir}/libiconv.a"
-        "${_msys_lib_dir}/libbrotlidec.a"
-        "${_msys_lib_dir}/libbrotlicommon.a"
-        "${_msys_lib_dir}/libzstd.a"
-        "${_msys_lib_dir}/libz.a"
-        wldap32
-        bcrypt
-        advapi32
-        crypt32
-        gdi32
-        ws2_32
-        winhttp
-        wininet
-        iphlpapi
-        icmp
-    )
-    target_compile_definitions(hunter_core PUBLIC CURL_STATICLIB)
-else()
-    target_link_libraries(hunter_core PUBLIC CURL::libcurl)
-    target_include_directories(hunter_core PUBLIC ${CURL_INCLUDE_DIRS})
-endif()
+# Add embedded header include dir (always — stub or real, engine_embed.cpp needs it).
+target_include_directories(hunter_core PUBLIC ${HUNTER_EMBED_INCLUDE_DIR})
+
+# Add embedded config header include dir (always — stub or real, config_embed.cpp needs it).
+target_include_directories(hunter_core PUBLIC ${HUNTER_CONFIG_EMBED_INCLUDE_DIR})
 
 # Static link C++ runtime
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
 
-# Unicode support (Windows only)
-if(WIN32)
-    add_definitions(-DUNICODE -D_UNICODE)
+# ─── Dear ImGui (vendored) + GLFW/OpenGL2 backend ───
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl2.cpp
+)
+
+# ─── QR Code generator (vendored, Nayuki public-domain) ───
+set(QR_DIR ${CMAKE_SOURCE_DIR}/third_party/qrcodegen)
+set(QR_SOURCES
+    ${QR_DIR}/qrcodegen.cpp
+)
+
+# ─── GUI executable ───
+add_executable(hunter
+    src/gui/main.cpp
+    src/gui/app.cpp
+    src/gui/single_instance.cpp
+    ${IMGUI_SOURCES}
+    ${QR_SOURCES}
+)
+
+# ─── Application icon ───
+# Embed the icon + version info into the binary on Windows via resources.rc.
+# On Linux/macOS, the icon is set at runtime via glfwSetWindowIcon() (see
+# app.cpp) and a .desktop file is installed for desktop integration.
+set(HUNTER_ICON_PNG "${CMAKE_SOURCE_DIR}/hunter_icon.png")
+set(HUNTER_ICON_ICO "${CMAKE_SOURCE_DIR}/hunter.ico")
+if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Windows")
+    # MSVC / MinGW resource file for Windows (.ico + version info + manifest)
+    set(HUNTER_RC_FILE "${CMAKE_SOURCE_DIR}/resources.rc")
+    target_sources(hunter PRIVATE ${HUNTER_RC_FILE})
 endif()
 
-# Windows GUI executable (Windows only)
-if(WIN32)
-    add_executable(huntercensor
-        src/win32/win_main.cpp
-        src/win32/imgui_app.cpp
-        src/win32/imgui_sources_page.cpp
-        src/win32/font_awesome.cpp
-        src/win32/qr_code.cpp
-        src/win32/resource.rc
-        third_party/imgui/imgui.cpp
-        third_party/imgui/imgui_draw.cpp
-        third_party/imgui/imgui_tables.cpp
-        third_party/imgui/imgui_widgets.cpp
-        third_party/imgui/backends/imgui_impl_win32.cpp
-        third_party/imgui/backends/imgui_impl_dx9.cpp
-    )
-    target_include_directories(huntercensor PRIVATE
-        ${CMAKE_SOURCE_DIR}/third_party/imgui
-        ${CMAKE_SOURCE_DIR}/third_party/imgui/backends
-    )
-    target_link_options(huntercensor PRIVATE -static -mwindows -municode)
-    target_link_libraries(huntercensor PRIVATE 
-        hunter_core 
-        comctl32 
-        shell32 
-        dwmapi 
-        uxtheme
-        d3d9
-    )
-    set_target_properties(huntercensor PROPERTIES
-        WIN32_EXECUTABLE TRUE
-    )
+target_include_directories(hunter PRIVATE
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+    ${QR_DIR}
+    ${GLFW_INCLUDE_DIRS}
+)
+target_link_libraries(hunter PRIVATE
+    hunter_core
+    ${GLFW_LIBRARIES}
+    OpenGL::GL
+)
+target_link_options(hunter PRIVATE -static-libgcc -static-libstdc++ ${GLFW_LDFLAGS})
 
-    set(_hunter_deploy_dir "${CMAKE_SOURCE_DIR}/../bin")
+# Copy the PNG icon next to the binary so glfwSetWindowIcon() can load it
+# at runtime on Linux (the icon is also embedded in the .ico/.rc on Windows).
+add_custom_command(TARGET hunter POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${HUNTER_ICON_PNG}" "$<TARGET_FILE_DIR:hunter>/hunter_icon.png"
+)
 
-    add_custom_command(TARGET huntercensor POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${_hunter_deploy_dir}"
-        COMMAND powershell -NoProfile -Command "Copy-Item -Force -ErrorAction SilentlyContinue -LiteralPath '$<TARGET_FILE:huntercensor>' -Destination '${_hunter_deploy_dir}/$<TARGET_FILE_NAME:huntercensor>'"
-    )
+set(_hunter_deploy_dir "${CMAKE_SOURCE_DIR}/../bin")
 
-    install(TARGETS huntercensor
-        RUNTIME DESTINATION bin
-    )
-else()
-    # Linux CLI executable with WebSocket support
-    add_executable(hunter_backend
-        src/linux/main.cpp
-    )
-    target_link_libraries(hunter_backend PRIVATE hunter_core)
-    target_link_options(hunter_backend PRIVATE -static-libgcc -static-libstdc++)
-    
-    set(_hunter_deploy_dir "${CMAKE_SOURCE_DIR}/../bin")
-    
-    add_custom_command(TARGET hunter_backend POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "${_hunter_deploy_dir}"
-        COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:hunter_backend>" "${_hunter_deploy_dir}/hunter_backend"
-    )
-endif()
+add_custom_command(TARGET hunter POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_hunter_deploy_dir}"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:hunter>" "${_hunter_deploy_dir}/hunter"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${HUNTER_ICON_PNG}" "${_hunter_deploy_dir}/hunter_icon.png"
+)
 
 # Test executable
 add_executable(hunter_tests
@@ -233,11 +314,34 @@ add_executable(hunter_tests
 target_link_options(hunter_tests PRIVATE -static-libgcc -static-libstdc++)
 target_link_libraries(hunter_tests PRIVATE hunter_core)
 
+# Engine embed test executable
+add_executable(test_embed
+    tests/test_embed.cpp
+)
+target_link_options(test_embed PRIVATE -static-libgcc -static-libstdc++)
+target_link_libraries(test_embed PRIVATE hunter_core)
+
 # Install targets
+install(TARGETS hunter
+    RUNTIME DESTINATION bin
+)
 install(TARGETS hunter_core
     ARCHIVE DESTINATION lib
 )
 
-install(DIRECTORY include/ DESTINATION include
-    PATTERN "web" EXCLUDE
-)
+install(DIRECTORY include/ DESTINATION include)
+
+# ─── Linux desktop integration ───
+# Install the .desktop file and icon so the app appears in application menus
+# with the proper icon on Linux desktop environments (GNOME, KDE, etc.).
+if(UNIX AND NOT APPLE)
+    install(FILES "${CMAKE_SOURCE_DIR}/hunter.desktop"
+            DESTINATION share/applications)
+    install(FILES "${HUNTER_ICON_PNG}"
+            DESTINATION share/icons/hicolor/256x256/apps
+            RENAME hunter.png)
+    # Also install a 48x48 icon for smaller displays.
+    install(FILES "${HUNTER_ICON_PNG}"
+            DESTINATION share/icons/hicolor/48x48/apps
+            RENAME hunter.png)
+endif()

@@ -1,5 +1,7 @@
 #include "orchestrator/orchestrator.h"
 #include "core/config.h"
+#include "core/constants.h"
+#include "core/updater.h"
 #include "core/utils.h"
 #include "realtime/websocket_bridge.h"
 #include "proxy/proxy_gateway.h"
@@ -418,6 +420,10 @@ int main(int argc, char* argv[]) {
     }, orch_args_ptr);
     pthread_attr_destroy(&orch_attr);
 
+    // Start auto-update checker (background thread, fully automatic)
+    std::cout << "[Main] Starting auto-update checker (v" << core::SelfUpdateManager::currentVersion() << ")..." << std::endl;
+    core::SelfUpdateManager::instance().startAutoCheck(21600, 15);
+
     // Main loop - keep alive; status broadcasts handled by WebSocketBridge::monitorPublishLoop
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -425,6 +431,7 @@ int main(int argc, char* argv[]) {
 
     // Cleanup
     std::cout << "Shutting down..." << std::endl;
+    core::SelfUpdateManager::instance().stopAutoCheck();
     
     if (g_orchestrator) {
         g_orchestrator->stop();

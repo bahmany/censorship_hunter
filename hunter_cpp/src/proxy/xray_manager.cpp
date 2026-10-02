@@ -1,5 +1,6 @@
 #include "proxy/xray_manager.h"
 #include "core/utils.h"
+#include "core/engine_embed.h"
 
 #include <fstream>
 #include <sstream>
@@ -23,15 +24,47 @@ namespace proxy {
 
 namespace {
 
-bool hasGeositeData() {
+[[maybe_unused]] bool hasGeositeData() {
     return utils::fileExists("bin/geosite.dat");
 }
 
 } // namespace
 
 XRayManager::XRayManager() {
-    xray_path_ = "bin/xray.exe";
     temp_dir_ = "runtime/xray_tmp";
+
+    // Priority 1: Embedded or externally-placed engine (single-file build / Android).
+    // ensureExtracted() handles both .incbin extraction and external dir lookup.
+    embed::ensureExtracted();
+    std::string embedded = embed::xrayPath();
+    if (!embedded.empty() && utils::fileExists(embedded)) {
+        xray_path_ = embedded;
+        return;
+    }
+
+    // Priority 2: HUNTER_XRAY_PATH env override.
+    const char* env_xray = std::getenv("HUNTER_XRAY_PATH");
+    if (env_xray && *env_xray && utils::fileExists(env_xray)) {
+        xray_path_ = env_xray;
+        return;
+    }
+
+#ifdef _WIN32
+    // Priority 3: bin/xray.exe (classic portable layout)
+    xray_path_ = "bin/xray.exe";
+    if (!utils::fileExists(xray_path_) && utils::fileExists("xray.exe")) xray_path_ = "xray.exe";
+#else
+    // Priority 3: bin/xray (project root CWD), then xray (bin/ CWD), then /app/bin/xray
+    if (utils::fileExists("bin/xray")) {
+        xray_path_ = "bin/xray";
+    } else if (utils::fileExists("xray")) {
+        xray_path_ = "xray";
+    } else if (utils::fileExists("/app/bin/xray")) {
+        xray_path_ = "/app/bin/xray";
+    } else {
+        xray_path_ = "bin/xray"; // default fallback
+    }
+#endif
 }
 
 XRayManager::~XRayManager() {
@@ -201,7 +234,7 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     // Apply TLS fragmentation for Iranian DPI bypass
     // This splits ClientHello into small chunks to evade SNI-based filtering
     const bool is_tls = (parsed.security == "tls");
-    const bool is_reality = (parsed.security == "reality");
+    [[maybe_unused]] const bool is_reality = (parsed.security == "reality");
     
     // Inject fragment settings into the outbound's streamSettings
     if (is_tls && outbound.find("\"streamSettings\"") != std::string::npos) {
@@ -264,6 +297,60 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     ss << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"strategy\":{\"type\":\"leastPing\"}}]}";
     ss << ",\"observatory\":{\"subjectSelector\":[\"proxy\",\"socks5-fb-0\",\"socks5-fb-1\",\"socks5-fb-2\",\"socks5-fb-3\",\"socks5-fb-4\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}";
     ss << "}\n";
+    return ss.str();
+}
+
+std::string XRayManager::generateTestConfig(const ParsedConfig& parsed, int socks_port) {
+    // ─── Lean test config ───
+    // Used by ProxyTester for liveness checks. Unlike generateConfig
+    // (which targets the live proxy), this strips out:
+    //   - The 5 SOCKS5-fallback outbounds (172.20.14.34:3100-3104)
+    //   - The leastPing balancer + observatory
+    // The balancer/observatory was the #1 cause of false "dead" verdicts:
+    // the observatory probes on a 30s interval, so during a 5-10s test
+    // window it often hadn't classified the proxy outbound as healthy,
+    // and leastPing routed the test download to a dead SOCKS5-fallback
+    // instead of the actual proxy under test.
+    //
+    // Result: a direct inbound → proxy outbound path with no indirection.
+    std::string outbound = parsed.toXrayOutboundJson(socks_port);
+    if (outbound.empty()) return "";
+
+    // Apply TLS fragmentation (same DPI bypass as live config)
+    if (parsed.security == "tls" && outbound.find("\"streamSettings\"") != std::string::npos) {
+        size_t tls_pos = outbound.find("\"tlsSettings\"");
+        if (tls_pos != std::string::npos) {
+            size_t brace_pos = outbound.find("{", tls_pos);
+            if (brace_pos != std::string::npos) {
+                outbound.insert(brace_pos + 1,
+                    "\"fragment\":{\"packets\":\"tlshello\",\"length\":\"50-100\",\"interval\":\"30-50\"},");
+            }
+        }
+    }
+
+    std::ostringstream ss;
+    ss << "{\n"
+       << "  \"log\":{\"loglevel\":\"warning\"},\n"
+       << "  \"dns\":{\"servers\":[\"1.1.1.1\",\"8.8.8.8\"],\"queryStrategy\":\"UseIPv4\"},\n"
+       << "  \"inbounds\":[{"
+       <<     "\"tag\":\"test-in\","
+       <<     "\"port\":" << socks_port << ","
+       <<     "\"listen\":\"127.0.0.1\","
+       <<     "\"protocol\":\"socks\","
+       <<     "\"settings\":{\"udp\":true},"
+       <<     "\"sniffing\":{\"enabled\":true,\"destOverride\":[\"http\",\"tls\",\"quic\"],\"routeOnly\":true}"
+       <<   "}],\n"
+       << "  \"outbounds\":[" << outbound
+       << ",{\"protocol\":\"freedom\",\"tag\":\"direct\",\"settings\":{\"domainStrategy\":\"UseIPv4\"}}"
+       << ",{\"protocol\":\"dns\",\"tag\":\"dns-out\"}"
+       << ",{\"protocol\":\"blackhole\",\"tag\":\"blackhole\",\"settings\":{\"response\":{\"type\":\"none\"}}}"
+       << "],\n"
+       << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"final\":\"proxy\",\"rules\":["
+       <<     "{\"type\":\"field\",\"inboundTag\":[\"test-in\"],\"port\":53,\"outboundTag\":\"dns-out\"},"
+       <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},"
+       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"}"
+       <<   "]}\n"
+       << "}\n";
     return ss.str();
 }
 

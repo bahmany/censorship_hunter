@@ -25,6 +25,9 @@
 #include <fcntl.h>
 #include <sys/select.h>
 #include <sys/sysinfo.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
 #endif
 
 #ifdef _WIN32
@@ -293,7 +296,7 @@ SOCKET createTcpSocket(const std::string& host, int port, double timeout_sec) {
     ensureSocketLayer();
 #endif
     SOCKET fd=socket(AF_INET,SOCK_STREAM,0);
-    if(fd<0) return INVALID_SOCKET;
+    if(fd==INVALID_SOCKET) return INVALID_SOCKET;
     
     // Set non-blocking
 #ifdef _WIN32
@@ -466,6 +469,28 @@ bool isPortAlive(int port, int timeout_ms) {
     return ok;
 }
 
+bool isPortFree(int port) {
+#ifdef _WIN32
+    ensureSocketLayer();
+#endif
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0) return false;
+    // Allow rapid reuse (SO_REUSEADDR) to detect TIME_WAIT ports
+    int yes = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons((uint16_t)port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bool free = bind(fd, (sockaddr*)&addr, sizeof(addr)) == 0;
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+    return free;
+}
+
 bool waitForPortAlive(int port, int timeout_ms, int probe_interval_ms) {
     if (timeout_ms <= 0) return isPortAlive(port, 200);
     if (probe_interval_ms <= 0) probe_interval_ms = 100;
@@ -585,6 +610,119 @@ int getCpuCount() {
     return n>0?n:4;
 }
 
+float getCpuPercent() {
+#ifdef _WIN32
+    // Windows: use GetSystemTimes for a rough estimate
+    static FILETIME prev_idle = {}, prev_kernel = {}, prev_user = {};
+    FILETIME cur_idle, cur_kernel, cur_user;
+    if (GetSystemTimes(&cur_idle, &cur_kernel, &cur_user)) {
+        auto diff = [](const FILETIME& a, const FILETIME& b) -> uint64_t {
+            uint64_t aa = (uint64_t)a.dwHighDateTime << 32 | a.dwLowDateTime;
+            uint64_t bb = (uint64_t)b.dwHighDateTime << 32 | b.dwLowDateTime;
+            return aa > bb ? aa - bb : 0;
+        };
+        uint64_t idle_d = diff(cur_idle, prev_idle);
+        uint64_t kernel_d = diff(cur_kernel, prev_kernel);
+        uint64_t user_d = diff(cur_user, prev_user);
+        uint64_t total_d = kernel_d + user_d;
+        prev_idle = cur_idle; prev_kernel = cur_kernel; prev_user = cur_user;
+        if (total_d > 0) {
+            return (float)((1.0 - (double)idle_d / (double)total_d) * 100.0);
+        }
+    }
+    return 0.0f;
+#else
+    // Linux: read /proc/stat
+    // Format: cpu  user nice system idle iowait irq softirq steal guest guest_nice
+    static uint64_t prev_total = 0, prev_idle = 0;
+    std::ifstream f("/proc/stat");
+    if (!f) return 0.0f;
+    std::string label;
+    uint64_t user, nice, system, idle, iowait, irq, softirq, steal;
+    f >> label >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal;
+    uint64_t total = user + nice + system + idle + iowait + irq + softirq + steal;
+    uint64_t total_d = total > prev_total ? total - prev_total : 0;
+    uint64_t idle_d = idle > prev_idle ? idle - prev_idle : 0;
+    prev_total = total;
+    prev_idle = idle;
+    if (total_d > 0) {
+        return (float)((1.0 - (double)idle_d / (double)total_d) * 100.0);
+    }
+    return 0.0f;
+#endif
+}
+
+// ─── Bounded process kill + reap ───
+// The single biggest cause of the Linux hang was waitpid(pid, NULL, 0)
+// after kill(pid, SIGTERM). If the child (xray/sing-box/mihomo) ignores
+// SIGTERM or is stuck in an uninterruptible system call, waitpid blocks
+// forever, permanently losing the IO pool thread that ran the test.
+// Over ~1 hour enough threads get stuck that the pool is exhausted and
+// the whole system hangs. killAndWait NEVER blocks indefinitely.
+
+bool killAndWait(int pid, int grace_ms) {
+    if (pid <= 0) return true;
+#ifdef _WIN32
+    HANDLE hProc = OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!hProc) return true;  // already gone or no access
+    TerminateProcess(hProc, 0);
+    // Bounded wait — 3 seconds max, then close handle regardless.
+    DWORD wait_result = WaitForSingleObject(hProc, std::max(grace_ms, 100));
+    CloseHandle(hProc);
+    return true;
+#else
+    // Check if already dead first (non-blocking)
+    int status = 0;
+    if (waitpid(pid, &status, WNOHANG) == pid) return true;
+    if (waitpid(pid, &status, WNOHANG) == -1 && errno == ECHILD) return true;
+
+    // Send SIGTERM
+    if (kill(pid, SIGTERM) != 0 && errno == ESRCH) return true;
+
+    // Poll for up to grace_ms for graceful exit
+    const int poll_interval_ms = 50;
+    int waited = 0;
+    while (waited < grace_ms) {
+        int s = 0;
+        pid_t w = waitpid(pid, &s, WNOHANG);
+        if (w == pid) return true;
+        if (w == -1 && errno == ECHILD) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(poll_interval_ms));
+        waited += poll_interval_ms;
+    }
+
+    // Escalate to SIGKILL
+    if (kill(pid, SIGKILL) != 0 && errno == ESRCH) return true;
+
+    // Final bounded reap — poll for up to 1 second after SIGKILL.
+    // SIGKILL is unblockable, so the process will die very quickly.
+    for (int i = 0; i < 20; i++) {
+        int s = 0;
+        pid_t w = waitpid(pid, &s, WNOHANG);
+        if (w == pid) return true;
+        if (w == -1 && errno == ECHILD) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    // Process is still alive after SIGKILL (e.g. stuck in D state / uninterruptible
+    // sleep). We can't reap it, but we must NOT block. Leave it as a zombie —
+    // it will be reaped later by reapZombies() or when this process exits.
+    return false;
+#endif
+}
+
+void reapZombies() {
+#ifndef _WIN32
+    // Reap any dead children non-blockingly. This cleans up zombies left
+    // by killAndWait when a process was stuck in uninterruptible sleep.
+    while (true) {
+        int status = 0;
+        pid_t w = waitpid(-1, &status, WNOHANG);
+        if (w <= 0) break;  // no more zombies (0 = none ready, -1 = error/none)
+    }
+#endif
+}
+
 // ─── JsonBuilder ───
 JsonBuilder& JsonBuilder::add(const std::string& key, const std::string& value) {
     std::string escaped;
@@ -691,7 +829,9 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     
     long http_code = 0;
     curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-    curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD, &prog.total_bytes);
+    curl_off_t dl_size = 0;
+    curl_easy_getinfo(curl, CURLINFO_SIZE_DOWNLOAD_T, &dl_size);
+    prog.total_bytes = static_cast<double>(dl_size);
     curl_easy_cleanup(curl);
     
     double elapsed = std::chrono::duration<double>(end - prog.start).count();
@@ -741,7 +881,6 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     }
     // HTTP 204 No Content = connectivity check passed (generate_204 endpoints)
     if (http_code == 204 || (http_code >= 200 && http_code < 300 && prog.total_bytes == 0)) {
-        double latency = (elapsed > 0.001) ? (1.0 / elapsed) : 1.0f;
         return (elapsed > 0.001) ? (float)(1.0 / elapsed) : 1.0f; // Return latency-based score
     }
     if (prog.total_bytes < 100) {

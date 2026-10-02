@@ -31,7 +31,7 @@ constexpr int SCANNER_INTERVAL_S = 1800;       // 30 min
 constexpr int PUBLISHER_INTERVAL_S = 1800;     // 30 min
 constexpr int BALANCER_CHECK_INTERVAL_S = 60;  // 1 min
 constexpr int HEALTH_MONITOR_INTERVAL_S = 30;  // 30 sec
-constexpr int VALIDATOR_INTERVAL_S = 30;       // 30 sec
+constexpr int VALIDATOR_INTERVAL_S = 5;        // 5 sec — fast cycling with TCP pre-screen
 constexpr int HARVESTER_INTERVAL_S = 2700;     // 45 min
 constexpr int GITHUB_BG_INTERVAL_S = 1800;     // 30 min
 constexpr int IRAN_ASSETS_INTERVAL_S = 3600;   // 60 min
@@ -43,10 +43,10 @@ constexpr int HARVESTER_INITIAL_DELAY_S = 900;
 constexpr int DEFAULT_MAX_CONFIGS = 1000;
 constexpr int DEFAULT_MAX_WORKERS = 12;
 constexpr int DEFAULT_SCAN_LIMIT = 50;
-constexpr int DEFAULT_GITHUB_BG_CAP = 150000;
-constexpr int DEFAULT_BG_VALIDATION_BATCH = 120;
+constexpr int DEFAULT_GITHUB_BG_CAP = 600000;
+constexpr int DEFAULT_BG_VALIDATION_BATCH = 300;
 constexpr int DEFAULT_TELEGRAM_PUBLISH_MAX_LINES = 50;
-constexpr int CONFIG_DB_MAX_SIZE = 150000;
+constexpr int CONFIG_DB_MAX_SIZE = 600000;
 constexpr int BALANCER_MAX_BACKENDS = 20;
 
 // ─── Config Tiers ───

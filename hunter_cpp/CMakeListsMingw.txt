@@ -1,0 +1,338 @@
+cmake_minimum_required(VERSION 3.16)
+
+set(CMAKE_RC_COMPILER x86_64-w64-mingw32-windres)
+project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX ASM RC)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Enable assembly language for .incbin-based engine + config embedding.
+enable_language(ASM)
+
+find_package(Threads REQUIRED)
+
+# Cross-compiled dependencies
+set(CROSS_PREFIX /home/mohammad/Documents/projects/censorship_hunter/cross_build/mingw/install)
+
+# zlib
+set(ZLIB_INCLUDE_DIR ${CROSS_PREFIX}/include)
+set(ZLIB_LIBRARY ${CROSS_PREFIX}/lib/libzlibstatic.a)
+set(ZLIB_LIBRARIES ${ZLIB_LIBRARY})
+set(ZLIB_FOUND TRUE)
+
+# curl (static)
+set(CURL_INCLUDE_DIR ${CROSS_PREFIX}/include)
+set(CURL_LIBRARY ${CROSS_PREFIX}/lib/libcurl.a)
+set(CURL_FOUND TRUE)
+
+# GLFW
+set(glfw3_DIR ${CROSS_PREFIX}/lib/cmake/glfw3)
+find_package(glfw3 REQUIRED)
+
+# Include directories
+include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR})
+
+# ─── Embedded Engine Support (xray + sing-box) ───
+option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" OFF)
+set(HUNTER_EMBED_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin/windows" CACHE PATH "Directory containing Windows engine binaries to embed")
+set(HUNTER_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded" CACHE PATH "Output dir for generated engine embed files")
+
+if(HUNTER_EMBED_ENGINES)
+    add_custom_command(
+        OUTPUT
+            ${HUNTER_EMBED_OUT_DIR}/engine_embedded.h
+            ${HUNTER_EMBED_OUT_DIR}/engine_embedded.S
+            ${HUNTER_EMBED_OUT_DIR}/engine_meta.json
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_EMBED_OUT_DIR}
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
+                --bin ${HUNTER_EMBED_BIN_DIR}
+                --outdir ${HUNTER_EMBED_OUT_DIR}
+                --platform windows
+        DEPENDS ${HUNTER_EMBED_BIN_DIR}/xray.exe ${HUNTER_EMBED_BIN_DIR}/sing-box.exe
+                ${CMAKE_SOURCE_DIR}/tools/embed_engines.py
+        COMMENT "Embedding proxy engines (xray.exe, sing-box.exe) via zstd + .incbin"
+        VERBATIM
+    )
+    add_library(engine_embedded_obj OBJECT ${HUNTER_EMBED_OUT_DIR}/engine_embedded.S)
+    target_include_directories(engine_embedded_obj PRIVATE ${HUNTER_EMBED_OUT_DIR})
+    set(HUNTER_EMBED_INCLUDE_DIR ${HUNTER_EMBED_OUT_DIR})
+    set(HUNTER_EMBED_OBJECT $<TARGET_OBJECTS:engine_embedded_obj>)
+else()
+    file(MAKE_DIRECTORY ${HUNTER_EMBED_OUT_DIR})
+    file(WRITE ${HUNTER_EMBED_OUT_DIR}/engine_embedded.h
+"// Stub — embedded engines disabled (HUNTER_EMBED_ENGINES=OFF).\n"
+"// Runtime falls back to bin/xray.exe, bin/sing-box.exe lookup.\n\n"
+"#pragma once\n"
+"#define HUNTER_EMBED_HAS_ENGINES 0\n"
+"#define HUNTER_EMBED_USE_ZSTD 0\n"
+)
+    set(HUNTER_EMBED_INCLUDE_DIR ${HUNTER_EMBED_OUT_DIR})
+    set(HUNTER_EMBED_OBJECT "")
+endif()
+
+# ─── Embedded Configs Support ───
+option(HUNTER_EMBED_CONFIGS "Download + embed proxy configs into the binary (single-file mode)" OFF)
+option(HUNTER_DOWNLOAD_CONFIGS "Download fresh configs at build time (requires network)" ON)
+set(HUNTER_CONFIG_BUNDLE "${CMAKE_BINARY_DIR}/configs_bundle.txt" CACHE PATH "Path to config bundle to embed")
+set(HUNTER_CONFIG_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded_configs" CACHE PATH "Output dir for config embed files")
+set(HUNTER_CONFIG_DOWNLOAD_TIMEOUT "30" CACHE STRING "Per-source download timeout (seconds)")
+set(HUNTER_CONFIG_DOWNLOAD_WORKERS "16" CACHE STRING "Parallel download workers")
+set(HUNTER_CONFIG_MIN_CONFIGS "100" CACHE STRING "Minimum configs required for a successful build")
+
+if(HUNTER_EMBED_CONFIGS)
+    if(HUNTER_DOWNLOAD_CONFIGS)
+        add_custom_command(
+            OUTPUT ${HUNTER_CONFIG_BUNDLE}
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}"
+            COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/download_configs.py
+                    --outfile ${HUNTER_CONFIG_BUNDLE}
+                    --timeout ${HUNTER_CONFIG_DOWNLOAD_TIMEOUT}
+                    --workers ${HUNTER_CONFIG_DOWNLOAD_WORKERS}
+                    --min-configs ${HUNTER_CONFIG_MIN_CONFIGS}
+            DEPENDS ${CMAKE_SOURCE_DIR}/tools/download_configs.py
+            COMMENT "Downloading latest proxy configs from 25+ public sources"
+            VERBATIM
+        )
+    endif()
+
+    add_custom_command(
+        OUTPUT
+            ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.h
+            ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.S
+            ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_meta.json
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_CONFIG_EMBED_OUT_DIR}
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
+                --bundle ${HUNTER_CONFIG_BUNDLE}
+                --outdir ${HUNTER_CONFIG_EMBED_OUT_DIR}
+                --platform windows
+        DEPENDS ${HUNTER_CONFIG_BUNDLE}
+                ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
+        COMMENT "Embedding config bundle via zstd + .incbin"
+        VERBATIM
+    )
+
+    add_library(config_embedded_obj OBJECT ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.S)
+    target_include_directories(config_embedded_obj PRIVATE ${HUNTER_CONFIG_EMBED_OUT_DIR})
+    set(HUNTER_CONFIG_EMBED_INCLUDE_DIR ${HUNTER_CONFIG_EMBED_OUT_DIR})
+    set(HUNTER_CONFIG_EMBED_OBJECT $<TARGET_OBJECTS:config_embedded_obj>)
+else()
+    file(MAKE_DIRECTORY ${HUNTER_CONFIG_EMBED_OUT_DIR})
+    file(WRITE ${HUNTER_CONFIG_EMBED_OUT_DIR}/config_embedded.h
+"// Stub — embedded configs disabled (HUNTER_EMBED_CONFIGS=OFF).\n"
+"// Runtime falls back to live scraping.\n\n"
+"#pragma once\n"
+"#define HUNTER_EMBED_HAS_CONFIGS 0\n"
+"#define HUNTER_EMBED_CONFIGS_USE_ZSTD 0\n"
+)
+    set(HUNTER_CONFIG_EMBED_INCLUDE_DIR ${HUNTER_CONFIG_EMBED_OUT_DIR})
+    set(HUNTER_CONFIG_EMBED_OBJECT "")
+endif()
+
+# ─── Software-OpenGL fallback (Windows-only) ───
+# Some real Windows machines have no working hardware OpenGL driver (VMs with
+# a 2D-only display adapter, some RDP sessions, old GPUs) — GLFW fails outright
+# and the GUI can never open. When ON, embeds Mesa's opengl32.dll +
+# libgallium_wgl.dll (see tools/embed_gl_fallback.py); the app extracts them
+# next to itself and relaunches with software rendering ONLY if hardware
+# OpenGL actually fails — hardware-capable machines are completely unaffected.
+option(HUNTER_EMBED_GL_FALLBACK "Embed a software-OpenGL fallback (Mesa) for machines with no hardware OpenGL" OFF)
+set(HUNTER_GL_FALLBACK_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin/windows/gl_fallback" CACHE PATH "Directory containing opengl32.dll + libgallium_wgl.dll to embed")
+set(HUNTER_GL_FALLBACK_OUT_DIR "${CMAKE_BINARY_DIR}/embedded_gl_fallback" CACHE PATH "Output dir for generated GL fallback embed files")
+
+if(HUNTER_EMBED_GL_FALLBACK)
+    add_custom_command(
+        OUTPUT
+            ${HUNTER_GL_FALLBACK_OUT_DIR}/gl_fallback_embedded.h
+            ${HUNTER_GL_FALLBACK_OUT_DIR}/gl_fallback_embedded.S
+            ${HUNTER_GL_FALLBACK_OUT_DIR}/gl_fallback_meta.json
+        COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_GL_FALLBACK_OUT_DIR}
+        COMMAND python3 ${CMAKE_SOURCE_DIR}/tools/embed_gl_fallback.py
+                --bin ${HUNTER_GL_FALLBACK_BIN_DIR}
+                --outdir ${HUNTER_GL_FALLBACK_OUT_DIR}
+        DEPENDS ${HUNTER_GL_FALLBACK_BIN_DIR}/opengl32.dll ${HUNTER_GL_FALLBACK_BIN_DIR}/libgallium_wgl.dll
+                ${CMAKE_SOURCE_DIR}/tools/embed_gl_fallback.py
+        COMMENT "Embedding software-OpenGL fallback (Mesa) via zstd + .incbin"
+        VERBATIM
+    )
+    add_library(gl_fallback_embedded_obj OBJECT ${HUNTER_GL_FALLBACK_OUT_DIR}/gl_fallback_embedded.S)
+    target_include_directories(gl_fallback_embedded_obj PRIVATE ${HUNTER_GL_FALLBACK_OUT_DIR})
+    set(HUNTER_GL_FALLBACK_INCLUDE_DIR ${HUNTER_GL_FALLBACK_OUT_DIR})
+    set(HUNTER_GL_FALLBACK_OBJECT $<TARGET_OBJECTS:gl_fallback_embedded_obj>)
+else()
+    file(MAKE_DIRECTORY ${HUNTER_GL_FALLBACK_OUT_DIR})
+    file(WRITE ${HUNTER_GL_FALLBACK_OUT_DIR}/gl_fallback_embedded.h
+"// Stub — GL fallback disabled (HUNTER_EMBED_GL_FALLBACK=OFF).\n\n"
+"#pragma once\n"
+"#define HUNTER_GL_FALLBACK_EMBEDDED 0\n"
+)
+    set(HUNTER_GL_FALLBACK_INCLUDE_DIR ${HUNTER_GL_FALLBACK_OUT_DIR})
+    set(HUNTER_GL_FALLBACK_OBJECT "")
+endif()
+
+# ─── Vendored zstd decoder (amalgamated, decompress-only) ───
+set(ZSTD_DIR ${CMAKE_SOURCE_DIR}/third_party/zstd)
+set(ZSTD_SOURCES ${ZSTD_DIR}/zstddeclib.c)
+
+# ─── Core Library Sources ───
+set(CORE_SOURCES
+    src/core/config.cpp
+    src/core/models.cpp
+    src/core/utils.cpp
+    src/core/task_manager.cpp
+    src/core/seed_data.cpp
+    src/core/engine_embed.cpp
+    src/core/config_embed.cpp
+    src/core/gl_fallback_embed_win.cpp
+    src/core/updater.cpp
+)
+
+# ─── Network Library Sources ───
+set(NETWORK_SOURCES
+    src/network/http_client.cpp
+    src/network/uri_parser.cpp
+    src/network/config_fetcher.cpp
+    src/network/continuous_validator.cpp
+    src/network/proxy_tester.cpp
+    src/network/aggressive_harvester.cpp
+    src/network/flexible_fetcher.cpp
+    src/network/sys_proxy.cpp
+)
+
+# ─── Proxy Library Sources ───
+set(PROXY_SOURCES
+    src/proxy/xray_manager.cpp
+    src/proxy/proxy_server_manager.cpp
+)
+
+# ─── Cache Library Sources ───
+set(CACHE_SOURCES
+    src/cache/smart_cache.cpp
+)
+
+# ─── Orchestrator Library Sources ───
+set(ORCHESTRATOR_SOURCES
+    src/orchestrator/thread_manager.cpp
+    src/orchestrator/orchestrator.cpp
+    src/orchestrator/runtime_cleanup_manager.cpp
+)
+
+# Create hunter core static library
+add_library(hunter_core STATIC
+    ${CORE_SOURCES}
+    ${NETWORK_SOURCES}
+    ${PROXY_SOURCES}
+    ${CACHE_SOURCES}
+    ${ORCHESTRATOR_SOURCES}
+    ${ZSTD_SOURCES}
+    ${HUNTER_EMBED_OBJECT}
+    ${HUNTER_CONFIG_EMBED_OBJECT}
+    ${HUNTER_GL_FALLBACK_OBJECT}
+)
+
+target_link_libraries(hunter_core
+    PUBLIC
+        Threads::Threads
+        ${CURL_LIBRARY}
+        ${ZLIB_LIBRARIES}
+        ws2_32
+        advapi32
+        user32
+        winmm
+        wininet
+        crypt32
+        bcrypt
+)
+
+target_include_directories(hunter_core PUBLIC
+    ${ZLIB_INCLUDE_DIRS}
+    ${CURL_INCLUDE_DIR}
+    ${ZSTD_DIR}
+)
+
+# Static libcurl on MinGW: without CURL_STATICLIB, curl.h declares dllimport
+# and the linker fails on unresolved __imp_curl_* symbols.
+target_compile_definitions(hunter_core PUBLIC CURL_STATICLIB)
+
+# Add embedded header include dir (always — stub or real, engine_embed.cpp needs it).
+target_include_directories(hunter_core PUBLIC ${HUNTER_EMBED_INCLUDE_DIR})
+
+# Add embedded config header include dir (always — stub or real, config_embed.cpp needs it).
+target_include_directories(hunter_core PUBLIC ${HUNTER_CONFIG_EMBED_INCLUDE_DIR})
+
+# Add GL fallback header include dir (always — stub or real, gl_fallback_embed_win.cpp needs it).
+target_include_directories(hunter_core PUBLIC ${HUNTER_GL_FALLBACK_INCLUDE_DIR})
+
+# ─── Dear ImGui (vendored) + GLFW/OpenGL2 backend ───
+set(IMGUI_DIR ${CMAKE_SOURCE_DIR}/third_party/imgui)
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_glfw.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl2.cpp
+)
+
+# ─── QR Code generator (vendored, Nayuki public-domain) ───
+set(QR_DIR ${CMAKE_SOURCE_DIR}/third_party/qrcodegen)
+set(QR_SOURCES
+    ${QR_DIR}/qrcodegen.cpp
+)
+
+# ─── GUI executable ───
+add_executable(hunter WIN32
+    src/gui/main.cpp
+    src/gui/app.cpp
+    src/gui/single_instance.cpp
+    ${IMGUI_SOURCES}
+    ${QR_SOURCES}
+    resources.rc
+)
+target_include_directories(hunter PRIVATE
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+    ${QR_DIR}
+)
+
+target_link_libraries(hunter PRIVATE
+    hunter_core
+    glfw
+    opengl32
+    gdi32
+    ws2_32
+    advapi32
+    user32
+    shell32
+    ole32
+    oleaut32
+    uuid
+    imm32
+    comdlg32
+    setupapi
+    ntdll
+    winmm
+)
+
+# Static linking
+# Subsystem/OS version bumped from the MinGW default (5.2, Windows XP x64 /
+# Server 2003 era) to 6.0 (Vista+) — an anomalously old target version is
+# itself a minor static-anomaly signal, and 6.0 is a safe floor for Windows
+# 11 while still being permissive.
+target_link_options(hunter PRIVATE
+    -static
+    -static-libgcc
+    -static-libstdc++
+    -mwindows
+    -Wl,--major-subsystem-version,6
+    -Wl,--minor-subsystem-version,0
+    -Wl,--major-os-version,6
+    -Wl,--minor-os-version,0
+)
+
+set(_hunter_deploy_dir "${CMAKE_SOURCE_DIR}/../bin/windows")
+
+add_custom_command(TARGET hunter POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory "${_hunter_deploy_dir}"
+    COMMAND ${CMAKE_COMMAND} -E copy "$<TARGET_FILE:hunter>" "${_hunter_deploy_dir}/hunter.exe"
+)

@@ -4,17 +4,20 @@
 #include "core/constants.h"
 #include "core/task_manager.h"
 #include "core/win_compat.h"
+#include "core/engine_embed.h"
+#include "core/config_embed.h"
 #include "network/proxy_tester.h"
 #include "network/sys_proxy.h"
-#include "realtime/websocket_bridge.h"
 
 #include <iostream>
 #include <iomanip>
 #include <algorithm>
 #include <cctype>
+#include <cstdlib>
 #include <set>
 #include <sstream>
 #include <chrono>
+#include <future>
 #include <thread>
 #include <filesystem>
 #include <fstream>
@@ -52,7 +55,7 @@ std::string jsonEscape(const std::string& value) {
     return escaped;
 }
 
-std::string jsonStringArray(const std::vector<std::string>& values) {
+[[maybe_unused]] std::string jsonStringArray(const std::vector<std::string>& values) {
     std::ostringstream out;
     out << "[";
     bool first = true;
@@ -122,7 +125,7 @@ void dedupeBenchResultsByEndpoint(std::vector<BenchResult>& results) {
     results.swap(deduped);
 }
 
-int reserveTemporaryListenPort() {
+[[maybe_unused]] int reserveTemporaryListenPort() {
     static std::mutex port_mutex;
     static int next_port = 21000;
     std::lock_guard<std::mutex> lock(port_mutex);
@@ -136,7 +139,7 @@ int reserveTemporaryListenPort() {
     return 0;
 }
 
-float testProvisionedPortDownload(int port, int timeout_seconds) {
+[[maybe_unused]] float testProvisionedPortDownload(int port, int timeout_seconds) {
     const int quick_timeout = std::max(3, std::min(timeout_seconds, 8));
     const int download_timeout = std::max(8, timeout_seconds);
     float speed = -1.0f;
@@ -186,7 +189,7 @@ bool isImportableProxyUri(const std::string& uri) {
     return true;
 }
 
-bool loadImportCandidates(const std::string& file_path, std::set<std::string>& valid_configs, int& invalid_count) {
+[[maybe_unused]] bool loadImportCandidates(const std::string& file_path, std::set<std::string>& valid_configs, int& invalid_count) {
     std::ifstream input(file_path, std::ios::binary);
     if (!input.is_open()) return false;
 
@@ -256,9 +259,7 @@ std::set<std::string> extractDownloadConfigs(const std::string& content, int* in
 
 HunterOrchestrator::HunterOrchestrator(HunterConfig& config)
     : config_(config),
-      config_fetcher_(http_client_),
-      xray_manager_(),
-      benchmarker_(xray_manager_) {
+      config_fetcher_(http_client_) {
     // HTTP client auto-initializes CURL in its constructor
     initComponents();
     std::cout << "Hunter Orchestrator initialized successfully" << std::endl;
@@ -270,12 +271,6 @@ HunterOrchestrator::~HunterOrchestrator() {
 }
 
 void HunterOrchestrator::initComponents() {
-    // XRay path
-    xray_manager_.setXRayPath(config_.xrayPath());
-    runtime_engine_manager_.setXRayPath(config_.xrayPath());
-    runtime_engine_manager_.setSingBoxPath(config_.singBoxPath());
-    runtime_engine_manager_.setMihomoPath(config_.mihomoPath());
-
     // Config database
     config_db_ = std::make_unique<network::ConfigDatabase>(constants::CONFIG_DB_MAX_SIZE);
     
@@ -285,6 +280,24 @@ void HunterOrchestrator::initComponents() {
         int db_loaded = config_db_->loadFromDisk(db_path);
         if (db_loaded > 0) {
             std::cout << "[Startup] Restored " << db_loaded << " configs from disk database" << std::endl;
+            // If DB exceeds the max size limit (e.g. limit was lowered),
+            // evict dead/stale configs immediately to free RAM.
+            int evicted = config_db_->evictDead();
+            if (evicted > 0) {
+                std::cout << "[Startup] Evicted " << evicted << " stale configs (DB trimmed to limit)" << std::endl;
+            }
+        }
+    }
+
+    // Load live connections cache — alive configs from previous runs.
+    // These are merged into the DB and given priority for revalidation.
+    {
+        std::string live_path = "runtime/HUNTER_live_cache.tsv";
+        int live_loaded = config_db_->loadLiveFromDisk(live_path);
+        if (live_loaded > 0) {
+            std::cout << "[Startup] Restored " << live_loaded << " live connections from cache" << std::endl;
+            utils::LogRingBuffer::instance().push(
+                "[Startup] Restored " + std::to_string(live_loaded) + " live connections from cache");
         }
     }
 
@@ -293,48 +306,6 @@ void HunterOrchestrator::initComponents() {
 
     // Flexible fetcher
     flexible_fetcher_ = std::make_unique<network::FlexibleFetcher>(config_fetcher_);
-
-    // Load balancer
-    balancer_ = std::make_unique<proxy::MultiProxyServer>(config_.multiproxyPort());
-    gemini_balancer_ = std::make_unique<proxy::MultiProxyServer>(config_.geminiPort());
-    balancer_->setXRayPath(config_.xrayPath());
-    balancer_->setSingBoxPath(config_.singBoxPath());
-    balancer_->setMihomoPath(config_.mihomoPath());
-    gemini_balancer_->setXRayPath(config_.xrayPath());
-    gemini_balancer_->setSingBoxPath(config_.singBoxPath());
-    gemini_balancer_->setMihomoPath(config_.mihomoPath());
-    auto engine_hint_cb = [this](const std::string& uri) -> std::string {
-        if (config_db_) {
-            const std::string db_hint = config_db_->getPreferredEngine(uri);
-            if (!db_hint.empty()) return db_hint;
-        }
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        auto it = cached_engine_hints_.find(uri);
-        return it != cached_engine_hints_.end() ? it->second : "";
-    };
-    balancer_->setEngineHintCallback(engine_hint_cb);
-    gemini_balancer_->setEngineHintCallback(engine_hint_cb);
-
-    // Load balancer caches
-    loadBalancerCache("HUNTER_balancer_cache.json", balancer_.get());
-    loadBalancerCache("HUNTER_gemini_balancer_cache.json", gemini_balancer_.get());
-
-    // DPI evasion
-    try {
-        dpi_evasion_ = std::make_unique<security::DpiEvasionOrchestrator>();
-    } catch (...) {}
-
-    // Obfuscation engine
-    obfuscation_ = std::make_unique<security::ObfuscationEngine>();
-
-    // Telegram bot reporter
-    std::string bot_token = HunterConfig::getEnv("TELEGRAM_BOT_TOKEN");
-    std::string chat_id = HunterConfig::getEnv("CHAT_ID",
-                          HunterConfig::getEnv("TELEGRAM_GROUP_ID"));
-    if (!bot_token.empty() && !chat_id.empty()) {
-        bot_reporter_ = std::make_unique<telegram::BotReporter>();
-        bot_reporter_->configure(bot_token, chat_id);
-    }
 
     // Smart cache
     std::string cache_dir = utils::dirName(config_.stateFile());
@@ -356,27 +327,40 @@ void HunterOrchestrator::start() {
     std::string runtime_dir = utils::dirName(config_.stateFile());
     if (runtime_dir.empty()) runtime_dir = "runtime";
     const std::string stop_flag = runtime_dir + "/stop.flag";
-    const std::string cmd_file = runtime_dir + "/hunter_command.json";
 
-    // ═══ PHASE -1: Kill processes occupying required ports ═══
-    killPortOccupants();
+    // ═══ PHASE 0a: Kill orphaned test processes from previous runs ═══
+    // When the app is killed (e.g. pkill -9), child xray/sing-box processes
+    // become orphans and keep holding ports + RAM. Kill them before starting.
+    {
+        int killed = 0;
+        // pkill -f "temp_xray_test|temp_singbox_test|temp_mihomo_test|proxy_server"
+        // We use the system call since we need pattern matching on the cmdline.
+        int rc = std::system("pkill -9 -f 'temp_xray_test' 2>/dev/null; "
+                             "pkill -9 -f 'temp_singbox_test' 2>/dev/null; "
+                             "pkill -9 -f 'temp_mihomo_test' 2>/dev/null; "
+                             "pkill -9 -f 'proxy_server_' 2>/dev/null");
+        (void)rc;  // pkill returns non-zero if no processes matched
+        std::cout << "[Startup] Cleaned up orphaned test processes" << std::endl;
+        utils::LogRingBuffer::instance().push(
+            "[Startup] Cleaned up orphaned test processes (" + std::to_string(killed) + ")");
+    }
 
-    // ═══ PHASE -0.5: Runtime cleanup — remove stale temp files ═══
+    // ═══ PHASE 0: Runtime cleanup — remove stale temp files ═══
     if (cleanup_manager_) {
         std::cout << "[Startup] Running runtime cleanup..." << std::endl;
         auto cleanup_stats = cleanup_manager_->runCleanup();
         std::cout << "[Startup] Cleanup: deleted " << cleanup_stats.files_deleted
                   << " files, freed " << (cleanup_stats.bytes_freed / 1024) << " KB" << std::endl;
-        cleanup_manager_->startPeriodicCleanup(3600); // hourly
+        cleanup_manager_->startPeriodicCleanup(300); // every 5 min — temp files expire after 1h
     }
 
-    // ═══ PHASE 0: Load initial configs into database ═══
+    // ═══ PHASE 1: Load initial configs into database ═══
     std::cout << "[Startup] Loading initial configurations..." << std::endl;
-    
+
     // Always load raw config files as seed data
     int initial_loaded = loadRawConfigFiles();
     std::cout << "[Startup] Loaded " << initial_loaded << " initial configs from raw files" << std::endl;
-    
+
     // Also load from all_cache.txt if exists
     std::string all_cache_file = "runtime/HUNTER_all_cache.txt";
     if (utils::fileExists(all_cache_file)) {
@@ -393,105 +377,41 @@ void HunterOrchestrator::start() {
             std::cout << "[Startup] Loaded " << cache_loaded << " configs from cache file" << std::endl;
         }
     }
-    
+
     // If database is still empty, try bundle configs
     if (config_db_ && config_db_->size() == 0) {
         std::cout << "[Startup] Database still empty, loading bundle configs..." << std::endl;
         int bundle_loaded = loadBundleConfigs();
         std::cout << "[Startup] Loaded " << bundle_loaded << " configs from bundle files" << std::endl;
     }
-    
-    // Write initial status file so UI sees real data immediately
-    writeStatusFile("startup");
 
-    // ═══ PHASE 1: Detect censorship ═══
+    // ═══ PHASE 1b: Load embedded configs (single-file build) ═══
+    // The single-file build bakes a freshly-downloaded config bundle into
+    // the executable at build time. Load it into the database so the user
+    // has immediate proxy candidates on first launch — before any network
+    // scraping begins. This is additive: it merges with anything already
+    // loaded from disk cache above.
+    if (hunter::embed::hasEmbeddedConfigs()) {
+        std::cout << "[Startup] Loading embedded config bundle..." << std::endl;
+        const auto& embedded = hunter::embed::configs();
+        if (!embedded.empty()) {
+            std::set<std::string> embedded_set(embedded.begin(), embedded.end());
+            int embedded_loaded = config_db_->addConfigs(embedded_set, "embedded");
+            std::cout << "[Startup] Loaded " << embedded_loaded << " configs from embedded bundle ("
+                      << embedded.size() << " total)" << std::endl;
+            utils::LogRingBuffer::instance().push(
+                "[Startup] Loaded " + std::to_string(embedded_loaded) +
+                " configs from embedded bundle");
+        } else {
+            std::cout << "[Startup] Embedded config bundle is empty" << std::endl;
+        }
+    } else {
+        std::cout << "[Startup] No embedded config bundle (live scraping will populate DB)" << std::endl;
+    }
+
+    // ═══ PHASE 2: Detect censorship (informational) ═══
     bool is_censored = detectCensorship();
-    writeStatusFile(is_censored ? "censored" : "open");
-    
-    // NOTE: Do NOT block startup with long emergency bootstrap.
-    // Start workers first (Phase 4), then test cached configs in background.
-    // This ensures the UI gets status updates and validation starts quickly.
-
-    // ═══ PHASE 1: Immediate connectivity from cached configs ═══
-    std::vector<std::pair<std::string, float>> main_cached_configs;
-    std::vector<std::pair<std::string, float>> gemini_cached_configs;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        auto main_cached = cached_configs_.find("HUNTER_balancer_cache.json");
-        if (main_cached != cached_configs_.end()) main_cached_configs = main_cached->second;
-        auto gemini_cached = cached_configs_.find("HUNTER_gemini_balancer_cache.json");
-        if (gemini_cached != cached_configs_.end()) gemini_cached_configs = gemini_cached->second;
-    }
-
-    // Also load working configs from SmartCache as fallback
-    std::vector<std::pair<std::string, float>> fallback_configs;
-    if (cache_) {
-        auto working = cache_->loadCachedConfigs(200, true);
-        for (auto& uri : working) {
-            if (!uri.empty() && uri.find("://") != std::string::npos) {
-                fallback_configs.emplace_back(uri, 500.0f);
-            }
-        }
-    }
-
-    // Start main balancer with cached configs
-    if (balancer_) {
-        if (!main_cached_configs.empty()) {
-            if (balancer_->start(main_cached_configs)) {
-                std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
-                          << " <- " << main_cached_configs.size() << " cached configs" << std::endl;
-            } else {
-                utils::LogRingBuffer::instance().push(
-                    "[Startup] Main balancer failed on port " + std::to_string(config_.multiproxyPort()));
-            }
-        } else if (!fallback_configs.empty()) {
-            if (balancer_->start(fallback_configs)) {
-                std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
-                          << " <- " << fallback_configs.size() << " fallback configs" << std::endl;
-            } else {
-                utils::LogRingBuffer::instance().push(
-                    "[Startup] Main balancer failed on port " + std::to_string(config_.multiproxyPort()));
-            }
-        } else {
-            balancer_->start();
-            std::cout << "[Startup] Main balancer :" << config_.multiproxyPort()
-                      << " (empty, waiting for first scan)" << std::endl;
-        }
-    }
-
-    // Start gemini balancer with cached configs
-    if (gemini_balancer_) {
-        if (!gemini_cached_configs.empty()) {
-            if (gemini_balancer_->start(gemini_cached_configs)) {
-                std::cout << "[Startup] Gemini balancer :" << config_.geminiPort()
-                          << " <- " << gemini_cached_configs.size() << " cached configs" << std::endl;
-            } else {
-                utils::LogRingBuffer::instance().push(
-                    "[Startup] Gemini balancer failed on port " + std::to_string(config_.geminiPort()));
-            }
-        } else if (!fallback_configs.empty()) {
-            int half = std::max(1, (int)fallback_configs.size() / 2);
-            std::vector<std::pair<std::string, float>> gemini_fb(
-                fallback_configs.begin() + half, fallback_configs.end());
-            if (!gemini_fb.empty()) {
-                if (!gemini_balancer_->start(gemini_fb)) {
-                    utils::LogRingBuffer::instance().push(
-                        "[Startup] Gemini balancer failed on port " + std::to_string(config_.geminiPort()));
-                }
-            }
-            else gemini_balancer_->start();
-        } else {
-            gemini_balancer_->start();
-        }
-    }
-
-    // ═══ PHASE 1b: Provision individual ports 2901-2999 ═══
-    provisionPorts();
-
-    // ═══ PHASE 2: Start DPI evasion engines ═══
-    if (dpi_evasion_) {
-        try { dpi_evasion_->start(); } catch (...) {}
-    }
+    std::cout << "[Startup] Direct connectivity: " << (is_censored ? "CENSORED" : "OPEN") << std::endl;
 
     // ═══ PHASE 3: Print startup banner ═══
     printStartupBanner();
@@ -503,57 +423,6 @@ void HunterOrchestrator::start() {
     thread_manager_ = std::make_unique<orchestrator::ThreadManager>(this);
     thread_manager_->startAll();
     std::cout << "[Startup] All worker threads started" << std::endl;
-    writeStatusFile("running");
-
-    // ═══ PHASE 4b: Emergency bootstrap (non-blocking, runs alongside workers) ═══
-    if (is_censored) {
-        std::cout << "[Censorship] Starting emergency bootstrap alongside workers..." << std::endl;
-        // Quick test: try 3 small parallel batches (total ~60 configs)
-        // Workers are already running so validator will also be testing
-        for (int attempt = 0; attempt < 3 && !stop_requested_.load(); attempt++) {
-            if (utils::fileExists(stop_flag)) {
-                try { std::filesystem::remove(stop_flag); } catch (...) {}
-                std::cout << "\n[Hunter] stop.flag detected, shutting down..." << std::endl;
-                stop();
-                break;
-            }
-            if (utils::fileExists(cmd_file)) {
-                try {
-                    std::string cmd_json = utils::loadJsonFile(cmd_file);
-                    std::filesystem::remove(cmd_file);
-                    processStdinCommand(cmd_json);
-                } catch (...) {}
-                if (stop_requested_.load()) break;
-            }
-            auto healthy = config_db_ ? config_db_->getHealthyConfigs(5) : std::vector<std::pair<std::string,float>>{};
-            if (!healthy.empty()) {
-                std::cout << "[Emergency] Found " << healthy.size() << " working configs from validator" << std::endl;
-                if (balancer_) {
-                    balancer_->updateAvailableConfigs(healthy, true);
-                    saveBalancerCache("HUNTER_balancer_cache.json", healthy);
-                }
-                break;
-            }
-            for (int wait_step = 0; wait_step < 50 && !stop_requested_.load(); ++wait_step) {
-                if (utils::fileExists(stop_flag)) {
-                    try { std::filesystem::remove(stop_flag); } catch (...) {}
-                    std::cout << "\n[Hunter] stop.flag detected, shutting down..." << std::endl;
-                    stop();
-                    break;
-                }
-                if (utils::fileExists(cmd_file)) {
-                    try {
-                        std::string cmd_json = utils::loadJsonFile(cmd_file);
-                        std::filesystem::remove(cmd_file);
-                        processStdinCommand(cmd_json);
-                    } catch (...) {}
-                    if (stop_requested_.load()) break;
-                }
-                std::this_thread::sleep_for(std::chrono::milliseconds(200));
-            }
-            writeStatusFile("bootstrap");
-        }
-    }
 
     // Apply initial speed profile from hardware (overridable via HUNTER_SPEED_PROFILE env var)
     {
@@ -562,7 +431,7 @@ void HunterOrchestrator::start() {
         std::string profile;
         if (env_profile && *env_profile) {
             profile = std::string(env_profile);
-        } else if (hw.ram_percent >= 85.0f) {
+        } else if (hw.ram_free_gb < 2.0f) {
             profile = "low";
         } else if (hw.cpu_count <= 2) {
             profile = "low";
@@ -574,8 +443,7 @@ void HunterOrchestrator::start() {
         applyAutoProfile(profile);
     }
 
-    // ═══ PHASE 5: Main loop with real-time status emission ═══
-    int provision_tick = 0;
+    // ═══ PHASE 5: Main loop ═══
     int dashboard_tick = 0;
     int db_save_tick = 0;
     while (!stop_requested_.load() && thread_manager_ && thread_manager_->isRunning()) {
@@ -586,20 +454,6 @@ void HunterOrchestrator::start() {
             break;
         }
 
-        if (utils::fileExists(cmd_file)) {
-            try {
-                std::string cmd_json = utils::loadJsonFile(cmd_file);
-                std::filesystem::remove(cmd_file);
-                processStdinCommand(cmd_json);
-            } catch (...) {}
-            if (stop_requested_.load()) break;
-        }
-
-        // Emit real-time status to stdout (##STATUS## line every 2s)
-        std::string current_phase = paused_.load() ? "paused" : "running";
-        emitStatusJson(current_phase);
-
-        // Pause loop: still emit status but skip dashboard/provision
         if (paused_.load()) {
             std::this_thread::sleep_for(std::chrono::seconds(2));
             continue;
@@ -611,25 +465,31 @@ void HunterOrchestrator::start() {
             printDashboard();
         }
 
-        // Dead proxy detection + replacement every ~30s
-        if (++provision_tick >= 15) {
-            provision_tick = 0;
-            try { refreshProvisionedPorts(); } catch (...) {}
-        }
-
         // Persist ConfigDB to disk every ~60s
         if (++db_save_tick >= 30) {
             db_save_tick = 0;
             if (config_db_) {
                 try {
                     int saved = config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
+                    // Also save live connections cache (alive configs only).
+                    // This is a small file that survives restarts.
+                    int live_saved = config_db_->saveLiveToDisk("runtime/HUNTER_live_cache.tsv");
                     if (saved > 0) {
                         utils::LogRingBuffer::instance().push(
-                            "[DB] Persisted " + std::to_string(saved) + " configs to disk");
+                            "[DB] Persisted " + std::to_string(saved) + " configs to disk" +
+                            (live_saved > 0 ? " (" + std::to_string(live_saved) + " live)" : ""));
                     }
                 } catch (...) {}
             }
         }
+
+        // Reap zombie child processes non-blockingly. Proxy engine subprocesses
+        // (xray/sing-box/mihomo) are killed with killAndWait, but if a process
+        // is stuck in uninterruptible sleep (D state), it can't be reaped
+        // immediately and becomes a zombie until reaped. Over hours, zombies
+        // accumulate and consume PID table entries. This periodic reap cleans
+        // them up without blocking the main loop.
+        utils::reapZombies();
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
@@ -649,30 +509,29 @@ void HunterOrchestrator::stop() {
             download_thread_.join();
         }
     }
-    
-    // Persist ConfigDB before shutdown
+
+    // Persist ConfigDB and live cache before shutdown
     if (config_db_) {
         try {
             int saved = config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
-            std::cout << "[Shutdown] Saved " << saved << " configs to disk" << std::endl;
+            int live_saved = config_db_->saveLiveToDisk("runtime/HUNTER_live_cache.tsv");
+            std::cout << "[Shutdown] Saved " << saved << " configs to disk ("
+                      << live_saved << " live)" << std::endl;
         } catch (...) {}
     }
-    
+
     // Stop cleanup manager periodic thread
     if (cleanup_manager_) {
         cleanup_manager_->stopPeriodicCleanup();
     }
 
+    // Stop all running proxy servers (release ports 3110-3120)
+    proxy_server_manager_.stopAll();
+
     if (thread_manager_) {
         thread_manager_->stopAll();
         thread_manager_.reset();
     }
-    stopProvisionedPorts();
-    if (dpi_evasion_) dpi_evasion_->stop();
-    if (balancer_) balancer_->stop();
-    if (gemini_balancer_) gemini_balancer_->stop();
-    runtime_engine_manager_.stopAll();
-    xray_manager_.stopAll();
 }
 
 // ─── Pause / Resume ───
@@ -756,22 +615,7 @@ int HunterOrchestrator::clearAliveConfigs() {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         last_good_configs_.clear();
-        cached_configs_["HUNTER_balancer_cache.json"].clear();
-        cached_configs_["HUNTER_gemini_balancer_cache.json"].clear();
     }
-
-    if (balancer_) {
-        balancer_->clearForcedBackend();
-        balancer_->updateAvailableConfigs({}, true);
-    }
-    if (gemini_balancer_) {
-        gemini_balancer_->clearForcedBackend();
-        gemini_balancer_->updateAvailableConfigs({}, true);
-    }
-
-    stopProvisionedPorts();
-    saveBalancerCache("HUNTER_balancer_cache.json", {});
-    saveBalancerCache("HUNTER_gemini_balancer_cache.json", {});
 
     try {
         const std::string gold_path = config_.goldFile();
@@ -785,8 +629,7 @@ int HunterOrchestrator::clearAliveConfigs() {
     } catch (...) {}
 
     utils::LogRingBuffer::instance().push(
-        "[Cmd] Cleared alive configs: db=" + std::to_string(removed) +
-        " and reset balancer/runtime live caches");
+        "[Cmd] Cleared alive configs: db=" + std::to_string(removed));
     return removed;
 }
 
@@ -829,48 +672,6 @@ int HunterOrchestrator::removeConfigs(const std::set<std::string>& uris) {
         }
     }
 
-    auto filterBalancerPool = [&](proxy::MultiProxyServer* bal, const std::string& cache_name) {
-        if (!bal) return;
-        const auto pool = bal->getAvailableConfigsList();
-        std::vector<std::pair<std::string, float>> filtered;
-        filtered.reserve(pool.size());
-        for (const auto& entry : pool) {
-            if (uris.find(entry.uri) == uris.end()) {
-                filtered.emplace_back(entry.uri, entry.latency);
-            }
-        }
-        bal->updateAvailableConfigs(filtered, true);
-        {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            cached_configs_[cache_name] = filtered;
-        }
-        saveBalancerCache(cache_name, filtered);
-    };
-    filterBalancerPool(balancer_.get(), "HUNTER_balancer_cache.json");
-    filterBalancerPool(gemini_balancer_.get(), "HUNTER_gemini_balancer_cache.json");
-
-    bool touched_ports = false;
-    {
-        std::lock_guard<std::mutex> lock(provision_mutex_);
-        for (auto& slot : provisioned_ports_) {
-            if (slot.uri.empty() || uris.find(slot.uri) == uris.end()) continue;
-            if (slot.pid > 0) runtime_engine_manager_.stopProcess(slot.pid);
-            slot.uri.clear();
-            slot.engine_used.clear();
-            slot.pid = -1;
-            slot.alive = false;
-            slot.tcp_alive = false;
-            slot.socks_ready = false;
-            slot.http_ready = false;
-            slot.latency_ms = 0.0f;
-            slot.consecutive_failures = 0;
-            touched_ports = true;
-        }
-    }
-    if (touched_ports) {
-        provisionPorts();
-    }
-
     utils::LogRingBuffer::instance().push(
         "[Cmd] Removed " + std::to_string(removed) + " configs from DB/runtime artifacts");
     return removed;
@@ -904,773 +705,6 @@ std::string HunterOrchestrator::triggerRuntimeCleanup() {
 
 // ─── Real-time UI Communication ───
 
-std::string HunterOrchestrator::processRealtimeCommand(const std::string& json_line) {
-    const double received_ts = utils::nowTimestamp();
-    const double received_ts_ms = received_ts * 1000.0;
-    auto decodeJsonString = [](const std::string& encoded) -> std::string {
-        std::string out;
-        out.reserve(encoded.size());
-        bool escape = false;
-        for (size_t i = 0; i < encoded.size(); ++i) {
-            const char ch = encoded[i];
-            if (!escape) {
-                if (ch == '\\') {
-                    escape = true;
-                } else {
-                    out.push_back(ch);
-                }
-                continue;
-            }
-
-            switch (ch) {
-                case '\\': out.push_back('\\'); break;
-                case '"': out.push_back('"'); break;
-                case 'n': out.push_back('\n'); break;
-                case 'r': out.push_back('\r'); break;
-                case 't': out.push_back('\t'); break;
-                default: out.push_back(ch); break;
-            }
-            escape = false;
-        }
-        if (escape) out.push_back('\\');
-        return out;
-    };
-    auto extractString = [&](const std::string& key) -> std::string {
-        const std::string needle = "\"" + key + "\"";
-        auto key_pos = json_line.find(needle);
-        if (key_pos == std::string::npos) return "";
-        auto colon = json_line.find(':', key_pos + needle.size());
-        if (colon == std::string::npos) return "";
-        size_t pos = colon + 1;
-        while (pos < json_line.size() && std::isspace(static_cast<unsigned char>(json_line[pos]))) pos++;
-        auto first_quote = json_line.find('"', pos);
-        if (first_quote == std::string::npos) return "";
-        std::string encoded;
-        bool escape = false;
-        for (size_t i = first_quote + 1; i < json_line.size(); ++i) {
-            const char ch = json_line[i];
-            if (!escape && ch == '"') {
-                return decodeJsonString(encoded);
-            }
-            encoded.push_back(ch);
-            if (!escape && ch == '\\') escape = true;
-            else escape = false;
-        }
-        return "";
-    };
-    auto extractInt = [&](const std::string& key, int def) -> int {
-        const std::string needle = "\"" + key + "\"";
-        auto key_pos = json_line.find(needle);
-        if (key_pos == std::string::npos) return def;
-        auto colon = json_line.find(':', key_pos + needle.size());
-        if (colon == std::string::npos) return def;
-        size_t pos = colon + 1;
-        while (pos < json_line.size() && std::isspace(static_cast<unsigned char>(json_line[pos]))) pos++;
-        return std::atoi(json_line.c_str() + pos);
-    };
-    auto extractBool = [&](const std::string& key, bool def) -> bool {
-        const std::string needle = "\"" + key + "\"";
-        auto key_pos = json_line.find(needle);
-        if (key_pos == std::string::npos) return def;
-        auto colon = json_line.find(':', key_pos + needle.size());
-        if (colon == std::string::npos) return def;
-        size_t pos = colon + 1;
-        while (pos < json_line.size() && std::isspace(static_cast<unsigned char>(json_line[pos]))) pos++;
-        if (json_line.compare(pos, 4, "true") == 0) return true;
-        if (json_line.compare(pos, 5, "false") == 0) return false;
-        return def;
-    };
-
-    auto hasKey = [&](const std::string& key) -> bool {
-        return json_line.find("\"" + key + "\"") != std::string::npos;
-    };
-    auto splitTextLines = [](const std::string& raw) -> std::vector<std::string> {
-        std::vector<std::string> out;
-        std::istringstream ss(raw);
-        std::string line;
-        while (std::getline(ss, line)) {
-            std::string trimmed = utils::trim(line);
-            if (!trimmed.empty()) out.push_back(trimmed);
-        }
-        return out;
-    };
-    auto applyRuntimeEnginePaths = [this]() {
-        xray_manager_.setXRayPath(config_.xrayPath());
-        runtime_engine_manager_.setXRayPath(config_.xrayPath());
-        runtime_engine_manager_.setSingBoxPath(config_.singBoxPath());
-        runtime_engine_manager_.setMihomoPath(config_.mihomoPath());
-        if (balancer_) {
-            balancer_->setXRayPath(config_.xrayPath());
-            balancer_->setSingBoxPath(config_.singBoxPath());
-            balancer_->setMihomoPath(config_.mihomoPath());
-        }
-        if (gemini_balancer_) {
-            gemini_balancer_->setXRayPath(config_.xrayPath());
-            gemini_balancer_->setSingBoxPath(config_.singBoxPath());
-            gemini_balancer_->setMihomoPath(config_.mihomoPath());
-        }
-    };
-
-    const std::string request_id = extractString("request_id");
-    const bool quiet = extractBool("quiet", false);
-    std::string command = extractString("command");
-    if (command.empty()) {
-        if (json_line.find("\"pause\"") != std::string::npos) command = "pause";
-        else if (json_line.find("\"resume\"") != std::string::npos) command = "resume";
-        else if (json_line.find("\"speed_profile\"") != std::string::npos) command = "speed_profile";
-        else if (json_line.find("\"set_speed\"") != std::string::npos) command = "set_speed";
-        else if (json_line.find("\"set_threads\"") != std::string::npos) command = "set_threads";
-        else if (json_line.find("\"set_timeout\"") != std::string::npos) command = "set_timeout";
-        else if (json_line.find("\"clear_old\"") != std::string::npos) command = "clear_old";
-        else if (json_line.find("\"clear_alive\"") != std::string::npos) command = "clear_alive";
-        else if (json_line.find("\"remove_configs\"") != std::string::npos) command = "remove_configs";
-        else if (json_line.find("\"add_configs\"") != std::string::npos) command = "add_configs";
-        else if (json_line.find("\"import_config_file\"") != std::string::npos) command = "import_config_file";
-        else if (json_line.find("\"export_config_db\"") != std::string::npos) command = "export_config_db";
-        else if (json_line.find("\"run_cycle\"") != std::string::npos) command = "run_cycle";
-        else if (json_line.find("\"refresh_ports\"") != std::string::npos) command = "refresh_ports";
-        else if (json_line.find("\"recheck_live_ports\"") != std::string::npos) command = "recheck_live_ports";
-        else if (json_line.find("\"reprovision_ports\"") != std::string::npos) command = "reprovision_ports";
-        else if (json_line.find("\"load_raw_files\"") != std::string::npos) command = "load_raw_files";
-        else if (json_line.find("\"load_bundle_files\"") != std::string::npos) command = "load_bundle_files";
-        else if (json_line.find("\"detect_censorship\"") != std::string::npos) command = "detect_censorship";
-        else if (json_line.find("\"update_runtime_settings\"") != std::string::npos) command = "update_runtime_settings";
-        else if (json_line.find("\"edge_router_bypass\"") != std::string::npos) command = "edge_router_bypass";
-        else if (json_line.find("\"download_configs\"") != std::string::npos) command = "download_configs";
-        else if (json_line.find("\"stop\"") != std::string::npos) command = "stop";
-        else if (json_line.find("\"get_status\"") != std::string::npos) command = "get_status";
-        else if (json_line.find("\"ping\"") != std::string::npos) command = "ping";
-        else if (json_line.find("\"gateway_status\"") != std::string::npos) command = "gateway_status";
-    }
-
-    bool ok = true;
-    std::string message = "ok";
-    std::string data_json;
-
-    try {
-        if (command == "start") {
-            resume();
-            message = "started";
-        } else if (command == "pause") {
-            pause();
-            message = "paused";
-        } else if (command == "resume") {
-            resume();
-            message = "resumed";
-        } else if (command == "speed_profile") {
-            std::string value = extractString("value");
-            if (value.empty()) value = "medium";
-            applyAutoProfile(value);
-            message = "speed_profile_applied";
-        } else if (command == "set_speed") {
-            int threads = extractInt("threads", speed_max_threads_.load());
-            int timeout = extractInt("timeout", speed_test_timeout_.load());
-            int chunk = extractInt("chunk_size", threads);
-            if (threads < 1 || threads > 50) {
-                ok = false;
-                message = "invalid_threads";
-            } else if (timeout < 1 || timeout > 10) {
-                ok = false;
-                message = "invalid_timeout";
-            } else {
-                if (chunk < 1) chunk = threads;
-                chunk = std::max(1, std::min(50, chunk));
-                speed_max_threads_ = threads;
-                speed_test_timeout_ = timeout;
-                speed_chunk_size_ = chunk;
-                std::lock_guard<std::mutex> lock(speed_mutex_);
-                speed_profile_name_ = "custom";
-                message = "speed_updated";
-            }
-        } else if (command == "set_threads") {
-            int val = extractInt("value", speed_max_threads_.load());
-            if (val >= 1 && val <= 50) {
-                speed_max_threads_ = val;
-                speed_chunk_size_ = std::max(1, std::min(50, val));
-                std::lock_guard<std::mutex> lock(speed_mutex_);
-                speed_profile_name_ = "custom";
-                message = "threads_updated";
-            } else {
-                ok = false;
-                message = "invalid_threads";
-            }
-        } else if (command == "set_timeout") {
-            int val = extractInt("value", speed_test_timeout_.load());
-            if (val >= 1 && val <= 10) {
-                speed_test_timeout_ = val;
-                std::lock_guard<std::mutex> lock(speed_mutex_);
-                speed_profile_name_ = "custom";
-                message = "timeout_updated";
-            } else {
-                ok = false;
-                message = "invalid_timeout";
-            }
-        } else if (command == "clear_old") {
-            int hours = extractInt("hours", 168);
-            if (hours < 1) hours = 1;
-            int removed = clearOldConfigs(hours);
-            message = "cleared_" + std::to_string(removed);
-        } else if (command == "clear_alive") {
-            int removed = clearAliveConfigs();
-            message = "alive_cleared_" + std::to_string(removed);
-        } else if (command == "remove_configs") {
-            const std::vector<std::string> uris_list = splitTextLines(extractString("uris_text"));
-            const std::set<std::string> uris(uris_list.begin(), uris_list.end());
-            int removed = removeConfigs(uris);
-            message = "removed_" + std::to_string(removed);
-        } else if (command == "add_configs") {
-            const std::string configs = extractString("configs");
-            if (!configs.empty()) {
-                addManualConfigs(utils::split(configs, '\n'));
-                message = "configs_added";
-            } else {
-                ok = false;
-                message = "invalid_configs_payload";
-            }
-        } else if (command == "import_config_file") {
-            const std::string import_path = utils::trim(extractString("path"));
-            if (import_path.empty()) {
-                ok = false;
-                message = "invalid_import_path";
-            } else if (!config_db_) {
-                ok = false;
-                message = "config_db_unavailable";
-            } else {
-                std::set<std::string> valid_configs;
-                int invalid_count = 0;
-                if (!loadImportCandidates(import_path, valid_configs, invalid_count)) {
-                    ok = false;
-                    message = "import_file_not_found";
-                } else if (valid_configs.empty()) {
-                    ok = false;
-                    message = invalid_count > 0 ? "no_valid_configs_in_file" : "empty_import_file";
-                } else {
-                    // Process in batches of 5000 to prevent timeout on large imports
-                    constexpr int IMPORT_BATCH = 5000;
-                    int total_added = 0;
-                    int total_promoted = 0;
-                    
-                    if ((int)valid_configs.size() <= IMPORT_BATCH) {
-                        int promoted = 0;
-                        total_added = config_db_->addConfigsWithPriority(valid_configs, "user_import", &promoted);
-                        total_promoted = promoted;
-                    } else {
-                        // Split into batches
-                        std::set<std::string> batch;
-                        int batch_num = 0;
-                        for (auto it = valid_configs.begin(); it != valid_configs.end(); ++it) {
-                            batch.insert(*it);
-                            if ((int)batch.size() >= IMPORT_BATCH || std::next(it) == valid_configs.end()) {
-                                int promoted = 0;
-                                int added = config_db_->addConfigsWithPriority(batch, "user_import", &promoted);
-                                total_added += added;
-                                total_promoted += promoted;
-                                batch_num++;
-                                utils::LogRingBuffer::instance().push(
-                                    "[Import] Batch " + std::to_string(batch_num) + ": +" +
-                                    std::to_string(added) + " new, " + std::to_string(promoted) + " promoted");
-                                batch.clear();
-                            }
-                        }
-                    }
-                    
-                    utils::LogRingBuffer::instance().push(
-                        "[Import] File " + import_path + ": added " + std::to_string(total_added) +
-                        ", promoted " + std::to_string(total_promoted) +
-                        ", invalid " + std::to_string(invalid_count) +
-                        " (total parsed: " + std::to_string(valid_configs.size()) + ")");
-                    message = "imported " + std::to_string(total_added) + " new, reprioritized " +
-                              std::to_string(total_promoted) + " existing, invalid " + std::to_string(invalid_count);
-                }
-            }
-        } else if (command == "export_config_db") {
-            if (!config_db_) {
-                ok = false;
-                message = "config_db_unavailable";
-            } else {
-                std::string export_path = utils::trim(extractString("path"));
-                std::string base = utils::dirName(config_.stateFile());
-                if (base.empty()) base = "runtime";
-                if (export_path.empty()) export_path = base + "/HUNTER_config_db_export.txt";
-                const std::set<std::string> all_uris = config_db_->getAllUris();
-                const std::vector<std::string> lines(all_uris.begin(), all_uris.end());
-                if (utils::writeLines(export_path, lines)) {
-                    utils::LogRingBuffer::instance().push(
-                        "[Export] Wrote " + std::to_string(lines.size()) + " configs to " + export_path);
-                    message = "exported " + std::to_string(lines.size()) + " configs to " + export_path;
-                } else {
-                    ok = false;
-                    message = "export_failed";
-                }
-            }
-        } else if (command == "run_cycle") {
-            message = runCycle() ? "cycle_completed" : "cycle_skipped";
-        } else if (command == "refresh_ports") {
-            refreshProvisionedPorts();
-            message = "ports_refreshed";
-        } else if (command == "recheck_live_ports") {
-            data_json = recheckLiveProvisionedPorts();
-            message = "live_recheck_completed";
-        } else if (command == "reprovision_ports") {
-            stopProvisionedPorts();
-            provisionPorts();
-            message = "ports_reprovisioned";
-        } else if (command == "load_raw_files") {
-            message = "raw_loaded_" + std::to_string(loadRawConfigFiles());
-        } else if (command == "load_bundle_files") {
-            message = "bundle_loaded_" + std::to_string(loadBundleConfigs());
-        } else if (command == "detect_censorship" || command == "probe_censorship") {
-            if (dpi_evasion_) {
-                auto pr = dpi_evasion_->probeWithDetails();
-                auto& m = pr.metrics;
-                std::ostringstream dd;
-                dd << "{\"censored\":" << (m.network_type == "censored" ? "true" : "false")
-                   << ",\"cdn_reachable\":" << (m.cdn_reachable ? "true" : "false")
-                   << ",\"google_reachable\":" << (m.google_reachable ? "true" : "false")
-                   << ",\"telegram_reachable\":" << (m.telegram_reachable ? "true" : "false")
-                   << ",\"pressure\":\"" << jsonEscape(m.pressure_level) << "\""
-                   << ",\"strategy\":\"" << jsonEscape(m.strategy) << "\""
-                   << ",\"network_type\":\"" << jsonEscape(m.network_type) << "\""
-                   << ",\"recommended_strategy\":\"" << jsonEscape(pr.recommended_strategy) << "\""
-                   << ",\"total_duration_ms\":" << pr.total_duration_ms
-                   << ",\"probe_steps\":[";
-                for (size_t i = 0; i < pr.steps.size(); i++) {
-                    auto& s = pr.steps[i];
-                    if (i > 0) dd << ",";
-                    dd << "{\"target\":\"" << jsonEscape(s.target) << "\""
-                       << ",\"category\":\"" << jsonEscape(s.category) << "\""
-                       << ",\"method\":\"" << jsonEscape(s.method) << "\""
-                       << ",\"success\":" << (s.success ? "true" : "false")
-                       << ",\"latency_ms\":" << s.latency_ms
-                       << ",\"detail\":\"" << jsonEscape(s.detail) << "\"}";
-                }
-                dd << "]}";
-                data_json = dd.str();
-                message = m.network_type == "censored" ? "censored" : "open";
-            } else {
-                bool c = detectCensorship();
-                message = c ? "censored" : "open";
-                data_json = "{\"censored\":" + std::string(c ? "true" : "false") + ",\"probe_steps\":[]}";
-            }
-        } else if (command == "discover_exit_ip") {
-            if (dpi_evasion_) {
-                auto emit_discovery_event = [&](const std::string& line) {
-                    utils::JsonBuilder progress_json;
-                    progress_json.add("command", "discover_exit_ip")
-                                 .add("line", line)
-                                 .add("ts", utils::nowTimestamp());
-                    realtime::broadcastGlobalMonitorEvent("discovery_log", progress_json.build());
-                };
-                emit_discovery_event("[DISCOVERY] discover_exit_ip command accepted");
-                auto dr = dpi_evasion_->discoverExitIp(emit_discovery_event);
-                std::ostringstream dd;
-                dd << "{\"default_gateway\":\"" << jsonEscape(dr.default_gateway) << "\""
-                   << ",\"gateway_mac\":\"" << jsonEscape(dr.gateway_mac) << "\""
-                   << ",\"local_ip\":\"" << jsonEscape(dr.local_ip) << "\""
-                   << ",\"public_ip\":\"" << jsonEscape(dr.public_ip) << "\""
-                   << ",\"isp_info\":\"" << jsonEscape(dr.isp_info) << "\""
-                   << ",\"suggested_exit_ip\":\"" << jsonEscape(dr.suggested_exit_ip) << "\""
-                   << ",\"suggested_iface\":\"" << jsonEscape(dr.suggested_iface) << "\""
-                   << ",\"total_duration_ms\":" << dr.total_duration_ms
-                   << ",\"trace_hops\":[";
-                for (size_t i = 0; i < dr.trace_hops.size(); i++) {
-                    auto& h = dr.trace_hops[i];
-                    if (i > 0) dd << ",";
-                    dd << "{\"ttl\":" << h.ttl
-                       << ",\"ip\":\"" << jsonEscape(h.ip) << "\""
-                       << ",\"latency_ms\":" << h.latency_ms
-                       << ",\"is_domestic\":" << (h.is_domestic ? "true" : "false")
-                       << "}";
-                }
-                dd << "]}";
-                data_json = dd.str();
-                message = dr.suggested_exit_ip;
-                emit_discovery_event("[DISCOVERY] discover_exit_ip command finished");
-            } else {
-                ok = false;
-                message = "dpi_evasion_not_initialized";
-            }
-        } else if (command == "update_runtime_settings") {
-            bool any_change = false;
-            bool engine_paths_changed = false;
-            bool restart_required = false;
-
-            if (hasKey("xray_path")) {
-                const std::string value = utils::trim(extractString("xray_path"));
-                if (value.empty()) {
-                    ok = false;
-                    message = "invalid_xray_path";
-                } else {
-                    engine_paths_changed = engine_paths_changed || value != config_.xrayPath();
-                    config_.set("xray_path", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("singbox_path")) {
-                const std::string value = utils::trim(extractString("singbox_path"));
-                if (value.empty()) {
-                    ok = false;
-                    message = "invalid_singbox_path";
-                } else {
-                    engine_paths_changed = engine_paths_changed || value != config_.singBoxPath();
-                    config_.set("singbox_path", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("mihomo_path")) {
-                const std::string value = utils::trim(extractString("mihomo_path"));
-                if (value.empty()) {
-                    ok = false;
-                    message = "invalid_mihomo_path";
-                } else {
-                    engine_paths_changed = engine_paths_changed || value != config_.mihomoPath();
-                    config_.set("mihomo_path", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("tor_path")) {
-                const std::string value = utils::trim(extractString("tor_path"));
-                if (value.empty()) {
-                    ok = false;
-                    message = "invalid_tor_path";
-                } else {
-                    config_.set("tor_path", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("max_total")) {
-                const int value = extractInt("max_total", config_.maxTotal());
-                if (value < 1 || value > 100000) {
-                    ok = false;
-                    message = "invalid_max_total";
-                } else {
-                    config_.set("max_total", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("max_workers")) {
-                const int value = extractInt("max_workers", config_.maxWorkers());
-                if (value < 1 || value > 256) {
-                    ok = false;
-                    message = "invalid_max_workers";
-                } else {
-                    config_.set("max_workers", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("scan_limit")) {
-                const int value = extractInt("scan_limit", config_.scanLimit());
-                if (value < 1 || value > 10000) {
-                    ok = false;
-                    message = "invalid_scan_limit";
-                } else {
-                    config_.set("scan_limit", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("sleep_seconds")) {
-                const int value = extractInt("sleep_seconds", config_.sleepSeconds());
-                if (value < 1 || value > 86400) {
-                    ok = false;
-                    message = "invalid_sleep_seconds";
-                } else {
-                    config_.set("sleep_seconds", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("multiproxy_port")) {
-                const int value = extractInt("multiproxy_port", config_.multiproxyPort());
-                if (value < 1 || value > 65535) {
-                    ok = false;
-                    message = "invalid_multiproxy_port";
-                } else {
-                    restart_required = restart_required || value != config_.multiproxyPort();
-                    config_.set("multiproxy_port", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("gemini_port")) {
-                const int value = extractInt("gemini_port", config_.geminiPort());
-                if (value < 1 || value > 65535) {
-                    ok = false;
-                    message = "invalid_gemini_port";
-                } else {
-                    restart_required = restart_required || value != config_.geminiPort();
-                    config_.set("gemini_port", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("telegram_enabled")) {
-                config_.set("telegram_enabled", extractBool("telegram_enabled", config_.getBool("telegram_enabled", false)));
-                any_change = true;
-            }
-            if (ok && hasKey("telegram_api_id")) {
-                config_.set("telegram_api_id", extractString("telegram_api_id"));
-                any_change = true;
-            }
-            if (ok && hasKey("telegram_api_hash")) {
-                config_.set("telegram_api_hash", extractString("telegram_api_hash"));
-                any_change = true;
-            }
-            if (ok && hasKey("telegram_phone")) {
-                config_.set("telegram_phone", extractString("telegram_phone"));
-                any_change = true;
-            }
-            if (ok && hasKey("telegram_limit")) {
-                const int value = extractInt("telegram_limit", config_.telegramLimit());
-                if (value < 0 || value > 10000) {
-                    ok = false;
-                    message = "invalid_telegram_limit";
-                } else {
-                    config_.set("telegram_limit", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("telegram_timeout_ms")) {
-                const int value = extractInt("telegram_timeout_ms", config_.getInt("telegram_timeout_ms", 12000));
-                if (value < 1000 || value > 120000) {
-                    ok = false;
-                    message = "invalid_telegram_timeout_ms";
-                } else {
-                    config_.set("telegram_timeout_ms", value);
-                    any_change = true;
-                }
-            }
-            if (ok && hasKey("targets_text")) {
-                const std::vector<std::string> targets = splitTextLines(extractString("targets_text"));
-                std::ostringstream raw;
-                raw << "[";
-                bool first = true;
-                for (const auto& item : targets) {
-                    if (!first) raw << ",";
-                    first = false;
-                    raw << "\"" << item << "\"";
-                }
-                raw << "]";
-                config_.set("targets", raw.str());
-                any_change = true;
-            }
-            if (ok && hasKey("github_urls_text")) {
-                config_.setGithubUrls(splitTextLines(extractString("github_urls_text")));
-                any_change = true;
-            }
-            if (ok && engine_paths_changed) {
-                applyRuntimeEnginePaths();
-                if (balancer_) {
-                    const auto pool = balancer_->getAvailableConfigsList();
-                    std::vector<std::pair<std::string, float>> configs;
-                    configs.reserve(pool.size());
-                    for (const auto& entry : pool) configs.emplace_back(entry.uri, entry.latency);
-                    balancer_->updateAvailableConfigs(configs, true);
-                }
-                if (gemini_balancer_) {
-                    const auto pool = gemini_balancer_->getAvailableConfigsList();
-                    std::vector<std::pair<std::string, float>> configs;
-                    configs.reserve(pool.size());
-                    for (const auto& entry : pool) configs.emplace_back(entry.uri, entry.latency);
-                    gemini_balancer_->updateAvailableConfigs(configs, true);
-                }
-                stopProvisionedPorts();
-                provisionPorts();
-            }
-            if (ok) {
-                message = restart_required
-                    ? (any_change ? "runtime_settings_applied_restart_required_for_ports" : "restart_required_for_ports")
-                    : (any_change ? "runtime_settings_applied" : "no_runtime_changes");
-            }
-        } else if (command == "edge_router_bypass") {
-            std::string target_mac = extractString("target_mac");
-            std::string exit_ip = extractString("exit_ip");
-            std::string iface = extractString("interface");
-            if (iface.empty()) iface = "eth0";
-
-            if (target_mac.empty() || exit_ip.empty()) {
-                ok = false;
-                message = "target_mac and exit_ip required";
-            } else {
-                if (dpi_evasion_) {
-                    bool success = dpi_evasion_->attemptEdgeRouterBypass(target_mac, exit_ip, iface);
-                    message = success ? "edge_router_bypass_active" : "edge_router_bypass_failed";
-                    utils::JsonBuilder dj;
-                    dj.add("active", dpi_evasion_->isEdgeRouterBypassActive())
-                      .add("status", dpi_evasion_->getEdgeRouterBypassStatus());
-                    data_json = dj.build();
-                } else {
-                    ok = false;
-                    message = "dpi_evasion_not_initialized";
-                }
-            }
-        } else if (command == "stop") {
-            stop_requested_ = true;
-            message = "stop_requested";
-        } else if (command == "get_status") {
-            message = "status";
-        } else if (command == "ping") {
-            message = "pong";
-        } else if (command == "gateway_status") {
-            int balancer_backends = 0;
-            int balancer_healthy = 0;
-            if (balancer_) {
-                auto backends = balancer_->getAllBackends();
-                balancer_backends = static_cast<int>(backends.size());
-                balancer_healthy = static_cast<int>(
-                    std::count_if(backends.begin(), backends.end(),
-                        [](const auto& b) {
-                            return b.state == BackendState::HEALTHY;
-                        }));
-            }
-            std::ostringstream gd;
-            gd << "{\"balancer_port\":" << (balancer_ ? balancer_->port() : 0)
-               << ",\"balancer_backends\":" << balancer_backends
-               << ",\"balancer_healthy\":" << balancer_healthy
-               << ",\"gemini_port\":" << (gemini_balancer_ ? gemini_balancer_->port() : 0)
-               << "}";
-            data_json = gd.str();
-            message = "gateway_status";
-        } else if (command == "runtime_cleanup") {
-            data_json = triggerRuntimeCleanup();
-            message = "cleanup_done";
-        } else if (command == "download_configs") {
-            // Extract sources array and proxy setting
-            std::vector<std::string> sources;
-            std::string proxy = extractString("proxy");
-
-            // Parse sources array from JSON
-            size_t sources_start = json_line.find("\"sources\":[");
-            if (sources_start != std::string::npos) {
-                sources_start = json_line.find('[', sources_start) + 1;
-                size_t sources_end = json_line.find(']', sources_start);
-                if (sources_end != std::string::npos) {
-                    std::string sources_str = json_line.substr(sources_start, sources_end - sources_start);
-                    std::istringstream ss(sources_str);
-                    std::string source;
-                    while (std::getline(ss, source, ',')) {
-                        source = utils::trim(source);
-                        if (source.size() >= 2 && source.front() == '"' && source.back() == '"') {
-                            source = source.substr(1, source.size() - 2);
-                        }
-                        if (!source.empty()) {
-                            sources.push_back(source);
-                        }
-                    }
-                }
-            }
-
-            if (sources.empty()) {
-                ok = false;
-                message = "no_sources_provided";
-            } else if (isDownloadInProgress()) {
-                ok = false;
-                message = "download_already_running";
-            } else {
-                // Start async download process
-                message = "download_started";
-                utils::JsonBuilder dj;
-                dj.add("sources_count", (int)sources.size())
-                  .add("proxy", proxy)
-                  .add("status", "started")
-                  .add("current_source", "")
-                  .add("progress", 0.0)
-                  .add("downloaded_count", 0)
-                  .add("total_count", (int)sources.size());
-                data_json = dj.build();
-
-                try {
-                    std::lock_guard<std::mutex> lk(download_thread_mutex_);
-                    if (download_thread_.joinable()) {
-                        download_thread_.join();
-                    }
-                    download_thread_ = std::thread([this, sources, proxy]() {
-                        try {
-                            (void)downloadConfigsAsync(sources, proxy);
-                        } catch (const std::exception& e) {
-                            utils::LogRingBuffer::instance().push(
-                                std::string("[Download] worker exception: ") + e.what());
-                        } catch (...) {
-                            utils::LogRingBuffer::instance().push("[Download] worker unknown exception");
-                        }
-                    });
-                } catch (const std::exception& e) {
-                    ok = false;
-                    message = std::string("thread_creation_failed: ") + e.what();
-                }
-            }
-        } else {
-            ok = false;
-            message = "unknown_command";
-        }
-    } catch (const std::exception& e) {
-        ok = false;
-        message = e.what();
-    } catch (...) {
-        ok = false;
-        message = "unknown_exception";
-    }
-
-    const double response_ts = utils::nowTimestamp();
-    const double response_ts_ms = response_ts * 1000.0;
-    utils::JsonBuilder jb;
-    jb.add("type", "command_result")
-      .add("ok", ok)
-      .add("request_id", request_id)
-      .add("command", command)
-      .add("quiet", quiet)
-      .add("message", message)
-      .add("received_ts", received_ts)
-      .add("received_ts_ms", received_ts_ms)
-      .add("response_ts", response_ts)
-      .add("response_ts_ms", response_ts_ms)
-      .addRaw("status", buildStatusJson(paused_.load() ? "paused" : "running"));
-    if (!data_json.empty()) {
-        jb.addRaw("data", data_json);
-    }
-    return jb.build();
-}
-
-void HunterOrchestrator::processStdinCommand(const std::string& json_line) {
-    try {
-        const std::string response = processRealtimeCommand(json_line);
-        if (!response.empty()) {
-            std::cout << "##CMD##" << response << std::endl;
-        }
-    } catch (...) {}
-}
-
-void HunterOrchestrator::emitStatusJson(const std::string& phase) {
-    // Reuse writeStatusFile logic but output to stdout with ##STATUS## prefix
-    writeStatusFile(phase);
-    // Also build a compact JSON and emit to stdout
-    int db_total=0, db_alive=0, db_tested=0;
-    if (config_db_) {
-        auto s = config_db_->getStats();
-        db_total = s.total; db_alive = s.alive; db_tested = s.tested_unique;
-    }
-    auto sp = getSpeedProfile();
-    double start_time = 0.0;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        start_time = start_time_;
-    }
-    double uptime = utils::nowTimestamp() - start_time;
-    const double ts = utils::nowTimestamp();
-    const double ts_ms = ts * 1000.0;
-    // Emit compact status line
-    std::ostringstream ss;
-    ss << "##STATUS##{\"ts\":" << ts
-       << ",\"ts_ms\":" << ts_ms
-       << ",\"phase\":\"" << phase
-       << "\",\"paused\":" << (paused_.load() ? "true" : "false")
-       << ",\"uptime_s\":" << (int)uptime
-       << ",\"db_total\":" << db_total
-       << ",\"db_alive\":" << db_alive
-       << ",\"db_tested\":" << db_tested
-       << ",\"speed_profile\":\"" << sp.profile_name << "\""
-       << ",\"speed_threads\":" << sp.max_threads
-       << ",\"speed_timeout\":" << sp.test_timeout_s
-       << "}";
-    std::cout << ss.str() << std::endl;
-}
-
 bool HunterOrchestrator::runCycle() {
     std::unique_lock<std::mutex> lock(cycle_lock_, std::try_to_lock);
     if (!lock.owns_lock()) {
@@ -1693,12 +727,17 @@ bool HunterOrchestrator::runCycle() {
     // Memory status
     auto hw = HunterTaskManager::instance().getHardware();
     { std::ostringstream _ls; _ls << "Memory status: " << hw.ram_percent << "% used ("
-              << hw.ram_used_gb << "GB / " << hw.ram_total_gb << "GB)";
+              << hw.ram_used_gb << "GB / " << hw.ram_total_gb << "GB, free=" << hw.ram_free_gb << "GB)";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
-    const bool degraded_mode = hw.ram_percent >= 90.0f;
+    // Degraded mode when free RAM is very low (< 1GB). Each xray/sing-box
+    // test process needs ~50-100MB, so we need at least 1GB free to run
+    // tests without risking OOM. This is based on FREE RAM, not total
+    // used RAM, so it won't trigger just because other system processes
+    // are using a lot of memory.
+    const bool degraded_mode = hw.ram_free_gb < 1.0f;
     if (degraded_mode) {
-        utils::LogRingBuffer::instance().push("[RunCycle] High RAM pressure, entering degraded cycle mode");
+        utils::LogRingBuffer::instance().push("[RunCycle] Low free RAM (<1GB), entering degraded cycle mode");
     }
 
     // Scrape configs
@@ -1822,9 +861,6 @@ bool HunterOrchestrator::runCycle() {
         const double now_ts = utils::nowTimestamp();
         if (last_github_success_ts <= 0.0 || (now_ts - last_github_success_ts) >= 3600.0) {
             std::vector<int> proxy_ports;
-            for (const auto& slot : getProvisionedPorts()) {
-                if (slot.alive && slot.socks_ready) proxy_ports.push_back(slot.port);
-            }
             const int github_cap = std::max(200, std::min(config_.maxTotal(), 5000));
             auto fetched = config_fetcher_.fetchGithubConfigs(config_.githubUrls(), proxy_ports, github_cap, 9, 40.0f);
             std::set<std::string> valid;
@@ -1844,35 +880,8 @@ bool HunterOrchestrator::runCycle() {
         }
     }
 
-    if (balancer_ && !all_configs.empty()) {
-        balancer_->updateAvailableConfigs(all_configs, true);
-        saveBalancerCache("HUNTER_balancer_cache.json", all_configs);
-    }
-
-    // Gemini balancer
-    if (gemini_balancer_ && !all_configs.empty()) {
-        int half = std::max(1, (int)all_configs.size() / 2);
-        std::vector<std::pair<std::string, float>> gemini_configs(
-            all_configs.begin() + half, all_configs.end());
-        if (!gemini_configs.empty()) {
-            gemini_balancer_->updateAvailableConfigs(gemini_configs, true);
-            saveBalancerCache("HUNTER_gemini_balancer_cache.json", gemini_configs);
-        }
-    }
-
-    // Refresh individual proxy ports 2901-2999
-    provisionPorts();
-
     // Save to files
     saveToFiles(tiered.gold, tiered.silver);
-
-    // Publish to Telegram
-    if (bot_reporter_ && bot_reporter_->isConfigured() && !all_configs.empty()) {
-        std::vector<std::string> uris;
-        for (auto& r : tiered.gold) uris.push_back(r.uri);
-        for (auto& r : tiered.silver) uris.push_back(r.uri);
-        bot_reporter_->reportConfigFiles(uris);
-    }
 
     double cycle_time = utils::nowTimestamp() - cycle_start;
     { std::ostringstream _ls; _ls << "Cycle #" << cycle_count_.load() << " completed in " << (int)cycle_time << "s";
@@ -1893,19 +902,19 @@ bool HunterOrchestrator::runCycle() {
 HunterOrchestrator::ScrapeResult HunterOrchestrator::scrapeConfigs() {
     ScrapeResult result;
     std::vector<int> proxy_ports = {config_.multiproxyPort()};
-    if (gemini_balancer_) proxy_ports.push_back(config_.geminiPort());
 
     int max_total = config_.maxTotal();
     auto hw = HunterTaskManager::instance().getHardware();
-    if (hw.ram_percent >= 95.0f) {
+    // Cap based on free RAM (not total used)
+    if (hw.ram_free_gb < 0.5f) {
         max_total = std::min(max_total, 40);
-    } else if (hw.ram_percent >= 90.0f) {
+    } else if (hw.ram_free_gb < 1.0f) {
         max_total = std::min(max_total, 80);
-    } else if (hw.ram_percent >= 80.0f) {
+    } else if (hw.ram_free_gb < 2.0f) {
         max_total = std::min(max_total, 160);
     }
     int per_source_cap = std::max(100, max_total / 3);
-    if (hw.ram_percent >= 90.0f) {
+    if (hw.ram_free_gb < 1.0f) {
         per_source_cap = std::max(20, std::min(per_source_cap, 40));
     }
 
@@ -2044,99 +1053,111 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
     int max_total = config_.maxTotal();
     if ((int)deduped.size() > max_total) deduped.resize(max_total);
 
-    // DPI-aware prioritization
-    if (dpi_evasion_) {
-        deduped = dpi_evasion_->prioritizeConfigsForStrategy(deduped);
-    } else {
-        deduped = network::prioritizeConfigs(deduped);
-    }
+    deduped = network::prioritizeConfigs(deduped);
 
     auto hw = HunterTaskManager::instance().getHardware();
-    if (hw.ram_percent >= 90.0f && deduped.size() > 40) {
+    // Cap configs based on free RAM (not total used). Each test process
+    // needs ~50-100MB, so with <2GB free we cap to 40 configs.
+    if (hw.ram_free_gb < 2.0f && deduped.size() > 40) {
         deduped.resize(40);
-        { std::ostringstream _ls; _ls << "[Bench-" << label << "] High RAM pressure: capped to " << deduped.size() << " configs";
+        { std::ostringstream _ls; _ls << "[Bench-" << label << "] Low free RAM: capped to " << deduped.size() << " configs";
           utils::LogRingBuffer::instance().push(_ls.str()); }
     }
 
-    { std::ostringstream _ls; _ls << "[Bench-" << label << "] Testing " << deduped.size() << " configs";
+    { std::ostringstream _ls; _ls << "[Bench-" << label << "] Testing " << deduped.size() << " configs (batch mode)";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
-    // Process in small chunks to avoid saturating the thread pool.
-    // Use dynamic chunk size from speed controls (clamped by RAM pressure).
-    int user_chunk = speed_chunk_size_.load();
-    int max_threads = std::max(1, std::min(50, speed_max_threads_.load()));
-    size_t chunk_limit = (size_t)std::max(1, std::min(user_chunk, max_threads));
-    const size_t CHUNK_SIZE = (hw.ram_percent >= 95.0f) ? std::min<size_t>(chunk_limit, 2)
-                            : (hw.ram_percent >= 90.0f) ? std::min<size_t>(chunk_limit, 4)
-                            : (hw.ram_percent >= 80.0f) ? std::min<size_t>(chunk_limit, 8)
-                            : std::max<size_t>(1, chunk_limit);
+    // ─── Batch testing: single xray process with N inbounds ───
+    // Instead of spawning one xray/sing-box process per config (slow, RAM-heavy),
+    // we use batchTestWithXray which starts ONE xray process with all configs as
+    // inbounds on unique SOCKS ports, then tests them all in parallel. This is
+    // 10-50x faster and uses far less RAM.
+    //
+    // Batch size: limited by available ports (500 per batch) and free RAM.
+    // Each inbound adds ~2-5MB to the xray process, so 100 inbounds ≈ 500MB.
     const int timeout_s = speed_test_timeout_.load();
-    auto& mgr = HunterTaskManager::instance();
-    std::vector<BenchResult> results;
+    const int base_port = constants::DEFAULT_BENCHMARK_BASE_PORT + base_port_offset;
 
-    for (size_t offset = 0; offset < deduped.size(); offset += CHUNK_SIZE) {
-        // Check pause/stop between chunks
+    // Dynamic batch size based on free RAM
+    size_t batch_size = 100;  // default: 100 configs per batch (1 xray process)
+    if (hw.ram_free_gb < 0.5f) batch_size = 10;
+    else if (hw.ram_free_gb < 1.0f) batch_size = 25;
+    else if (hw.ram_free_gb < 2.0f) batch_size = 50;
+    // Allow user override via speed chunk size (clamped)
+    int user_chunk = speed_chunk_size_.load();
+    if (user_chunk > 0) batch_size = std::min(batch_size, (size_t)std::max(1, std::min(user_chunk, 200)));
+
+    std::vector<BenchResult> results;
+    network::ProxyTester tester;
+
+    for (size_t offset = 0; offset < deduped.size(); offset += batch_size) {
+        // Check pause/stop between batches
         if (stop_requested_.load() || paused_.load()) break;
         auto chunk_hw = HunterTaskManager::instance().getHardware();
-        if (chunk_hw.ram_percent >= 96.0f) {
-            utils::LogRingBuffer::instance().push("[Bench-" + label + "] Aborting remaining chunks due to critical RAM pressure");
+        if (chunk_hw.ram_free_gb < 0.3f) {
+            utils::LogRingBuffer::instance().push("[Bench-" + label + "] Aborting: free RAM < 0.3GB");
             break;
         }
 
-        size_t end = std::min(offset + CHUNK_SIZE, deduped.size());
-        std::vector<std::future<BenchResult>> futures;
+        size_t end = std::min(offset + batch_size, deduped.size());
+        std::vector<std::string> batch_configs(deduped.begin() + offset, deduped.begin() + end);
 
-        for (size_t i = offset; i < end; i++) {
-            std::string uri = deduped[i]; // copy for lambda capture
-            futures.push_back(mgr.submitIO([uri, timeout_s]() {
+        // Use a unique base port per batch to avoid conflicts with previous batches
+        int batch_base_port = base_port + static_cast<int>(offset);
+
+        { std::ostringstream _ls; _ls << "[Bench-" << label << "] Batch " << (offset / batch_size + 1)
+          << ": testing " << batch_configs.size() << " configs (ports " << batch_base_port << "+)";
+          utils::LogRingBuffer::instance().push(_ls.str()); }
+
+        std::vector<network::ProxyTestResult> batch_results;
+        try {
+            batch_results = tester.batchTestWithXray(batch_configs, batch_base_port, timeout_s);
+        } catch (const std::exception& ex) {
+            utils::LogRingBuffer::instance().push("[Bench-" + label + "] Batch exception: " + std::string(ex.what()));
+            for (size_t i = 0; i < batch_configs.size(); i++) {
                 BenchResult br;
-                br.uri = uri;
-                try {
-                    network::ProxyTester tester;
-                    auto result = tester.testConfig(uri, "https://cachefly.cachefly.net/1mb.test", timeout_s);
-
-                    br.success = result.success && !result.telegram_only && result.download_speed_kbps > 0.0f;
-                    br.telegram_only = result.success && result.telegram_only;
-                    if (br.success) {
-                        br.latency_ms = result.download_speed_kbps > 0 ? 1000.0f / result.download_speed_kbps : 5000.0f;
-                        br.tier = br.latency_ms <= 3000 ? "gold" : "silver";
-                    } else if (br.telegram_only) {
-                        br.latency_ms = 0;
-                        br.tier = "telegram";
-                    } else {
-                        br.latency_ms = 0;
-                        br.tier = "dead";
-                    }
-                    br.engine_used = result.engine_used;
-                    br.error = result.error_message;
-                } catch (const std::exception& ex) {
-                    br.error = std::string("EXCEPTION: ") + ex.what();
-                    br.tier = "dead";
-                } catch (...) {
-                    br.error = "UNKNOWN EXCEPTION in test task";
-                    br.tier = "dead";
-                }
-                return br;
-            }));
-        }
-
-        for (auto& fut : futures) {
-            try {
-                results.push_back(fut.get());
-            } catch (const std::exception& e) {
-                BenchResult r;
-                r.error = e.what();
-                r.tier = "dead";
-                results.push_back(r);
-            } catch (...) {
-                BenchResult r;
-                r.error = "future::get unknown exception";
-                r.tier = "dead";
-                results.push_back(r);
+                br.uri = batch_configs[i];
+                br.error = std::string("Batch exception: ") + ex.what();
+                br.tier = "dead";
+                results.push_back(br);
             }
+            continue;
+        } catch (...) {
+            utils::LogRingBuffer::instance().push("[Bench-" + label + "] Batch unknown exception");
+            for (size_t i = 0; i < batch_configs.size(); i++) {
+                BenchResult br;
+                br.uri = batch_configs[i];
+                br.error = "Batch unknown exception";
+                br.tier = "dead";
+                results.push_back(br);
+            }
+            continue;
         }
 
-        if (offset + CHUNK_SIZE < deduped.size()) {
+        // Convert ProxyTestResult → BenchResult
+        for (size_t i = 0; i < batch_results.size() && i < batch_configs.size(); i++) {
+            BenchResult br;
+            br.uri = batch_configs[i];
+            const auto& r = batch_results[i];
+
+            br.success = r.success && !r.telegram_only && r.download_speed_kbps > 0.0f;
+            br.telegram_only = r.success && r.telegram_only;
+            if (br.success) {
+                br.latency_ms = r.download_speed_kbps > 0 ? 1000.0f / r.download_speed_kbps : 5000.0f;
+                br.tier = br.latency_ms <= 3000 ? "gold" : "silver";
+            } else if (br.telegram_only) {
+                br.latency_ms = 0;
+                br.tier = "telegram";
+            } else {
+                br.latency_ms = 0;
+                br.tier = "dead";
+            }
+            br.engine_used = r.engine_used;
+            br.error = r.error_message;
+            results.push_back(br);
+        }
+
+        if (offset + batch_size < deduped.size()) {
             { std::ostringstream _ls; _ls << "[Bench-" << label << "] Progress: " << results.size() << "/" << deduped.size();
               utils::LogRingBuffer::instance().push(_ls.str()); }
         }
@@ -2202,656 +1223,12 @@ int HunterOrchestrator::appendUniqueLines(const std::string& filepath,
     return utils::appendUniqueLines(filepath, lines);
 }
 
-std::string HunterOrchestrator::balancerCachePath(const std::string& name) const {
-    std::string base = utils::dirName(config_.stateFile());
-    if (base.empty()) base = "runtime";
-    return base + "/" + name;
-}
-
-void HunterOrchestrator::loadBalancerCache(const std::string& name, proxy::MultiProxyServer* bal) {
-    if (!bal) return;
-    std::string path = balancerCachePath(name);
-    std::string json = utils::loadJsonFile(path);
-    if (json.size() < 10 || json == "{}") return;
-
-    // Parse configs array: [{"uri":"...","latency_ms":...}, ...]
-    std::vector<std::pair<std::string, float>> configs;
-    size_t pos = 0;
-    while ((pos = json.find("\"uri\":\"", pos)) != std::string::npos) {
-        pos += 7; // skip '"uri":"'
-        size_t end = json.find('"', pos);
-        if (end == std::string::npos) break;
-        std::string uri = json.substr(pos, end - pos);
-        pos = end + 1;
-
-        float latency = 999.0f;
-        size_t lat_pos = json.find("\"latency_ms\":", pos);
-        if (lat_pos != std::string::npos && lat_pos < pos + 100) {
-            lat_pos += 14; // skip '"latency_ms":'
-            try { latency = std::stof(json.substr(lat_pos, 20)); } catch (...) {}
-        }
-
-        std::string engine_used;
-        size_t eng_pos = json.find("\"engine_used\":\"", pos);
-        if (eng_pos != std::string::npos && eng_pos < pos + 160) {
-            eng_pos += 15;
-            size_t eng_end = json.find('"', eng_pos);
-            if (eng_end != std::string::npos) {
-                engine_used = json.substr(eng_pos, eng_end - eng_pos);
-            }
-        }
-
-        if (!uri.empty() && uri.find("://") != std::string::npos) {
-            configs.emplace_back(uri, latency);
-            if (!engine_used.empty()) {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                cached_engine_hints_[uri] = engine_used;
-            }
-        }
-    }
-
-    if (!configs.empty()) {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        cached_configs_[name] = configs;
-        std::cout << "[Cache] Loaded " << configs.size() << " cached configs from " << name << std::endl;
-    }
-}
-
-void HunterOrchestrator::saveBalancerCache(const std::string& name,
-    const std::vector<std::pair<std::string, float>>& configs) {
-    std::string path = balancerCachePath(name);
-    utils::mkdirRecursive(utils::dirName(path));
-
-    std::ostringstream ss;
-    ss << "{\"saved_at\":" << utils::nowTimestamp() << ",\"configs\":[";
-    bool first = true;
-    int count = 0;
-    for (auto& [uri, lat] : configs) {
-        if (count >= 1000) break;
-        if (!first) ss << ",";
-        first = false;
-        std::string engine_used;
-        if (config_db_) engine_used = config_db_->getPreferredEngine(uri);
-        if (engine_used.empty()) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            auto hint_it = cached_engine_hints_.find(uri);
-            if (hint_it != cached_engine_hints_.end()) engine_used = hint_it->second;
-        }
-        ss << "{\"uri\":\"" << uri << "\",\"latency_ms\":" << lat;
-        if (!engine_used.empty()) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            cached_engine_hints_[uri] = engine_used;
-            ss << ",\"engine_used\":\"" << engine_used << "\"";
-        }
-        ss << "}";
-        count++;
-    }
-    ss << "]}";
-    utils::saveJsonFile(path, ss.str());
-}
-
 int HunterOrchestrator::computeAdaptiveSleep() {
     int base = config_.sleepSeconds();
     if (consecutive_scrape_failures_.load() >= 3) return std::min(base * 2, 600);
     if (last_validated_count_.load() == 0) return std::max(120, base / 3);
     if (last_validated_count_.load() < 5) return std::max(150, base / 2);
     return base;
-}
-
-void HunterOrchestrator::provisionPorts() {
-    // Get best configs from balancer or cached configs
-    std::vector<std::pair<std::string, float>> best;
-    auto resolve_engine_hint = [this](const std::string& uri) -> std::string {
-        if (config_db_) {
-            std::string engine = config_db_->getPreferredEngine(uri);
-            if (!engine.empty()) return engine;
-        }
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        auto it = cached_engine_hints_.find(uri);
-        return it != cached_engine_hints_.end() ? it->second : "";
-    };
-    if (balancer_) {
-        auto pool = balancer_->getAvailableConfigsList();
-        std::cout << "[Provision] Balancer pool: " << pool.size() << " configs" << std::endl;
-        for (auto& e : pool) {
-            best.emplace_back(e.uri, e.latency);
-            if (!e.engine_used.empty()) {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                cached_engine_hints_[e.uri] = e.engine_used;
-            }
-        }
-    }
-    if (best.empty() && config_db_) {
-        best = config_db_->getHealthyConfigs(PROVISION_PORT_COUNT);
-        std::cout << "[Provision] DB healthy configs: " << best.size() << std::endl;
-    }
-    if (best.empty()) {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        auto it = cached_configs_.find("HUNTER_balancer_cache.json");
-        if (it != cached_configs_.end()) best = it->second;
-        std::cout << "[Provision] Fallback cached configs: " << best.size() << std::endl;
-    }
-
-    // Sort by latency (best first) — quality-based priority
-    std::sort(best.begin(), best.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-
-    if (config_db_) {
-        const int telegram_slot_target = std::min(10, std::max(2, PROVISION_PORT_COUNT / 8));
-        std::set<std::string> existing_uris;
-        for (const auto& item : best) existing_uris.insert(item.first);
-        const auto telegram_only_records = config_db_->getTelegramOnlyRecords(std::max(telegram_slot_target * 4, 20));
-        int appended = 0;
-        for (const auto& rec : telegram_only_records) {
-            if (existing_uris.insert(rec.uri).second) {
-                best.emplace_back(rec.uri, 9000.0f + static_cast<float>(appended));
-                appended++;
-                if (appended >= telegram_slot_target) break;
-            }
-        }
-    }
-
-    // Limit to available port range
-    int max_slots = PROVISION_PORT_MAX - PROVISION_PORT_BASE + 1;
-    int count = std::min((int)best.size(), std::min(PROVISION_PORT_COUNT, max_slots));
-    std::cout << "[Provision] Provisioning " << count << " ports from " << best.size() << " configs" << std::endl;
-    if (!best.empty()) {
-        std::cout << "[Provision] First config: " << best[0].first.substr(0, 60) << " latency=" << best[0].second << std::endl;
-    }
-
-    std::lock_guard<std::mutex> lock(provision_mutex_);
-
-    // Stop existing processes
-    for (auto& slot : provisioned_ports_) {
-        if (slot.pid > 0) {
-            runtime_engine_manager_.stopProcess(slot.pid);
-        }
-    }
-    provisioned_ports_.clear();
-
-    // Start individual engine-specific processes on ports 2901+
-    double now = utils::nowTimestamp();
-    for (int i = 0; i < count; i++) {
-        int socks_port = PROVISION_PORT_BASE + i;
-        int http_port = socks_port;
-        auto& [uri, latency] = best[i];
-
-        auto parsed = network::UriParser::parse(uri);
-        if (!parsed.has_value() || !parsed->isValid()) {
-            std::cout << "[Provision] Skip port " << socks_port << ": parse failed for " << uri.substr(0, 50) << std::endl;
-            continue;
-        }
-
-        const std::string preferred_engine = resolve_engine_hint(uri);
-        const std::string engine_used = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
-        if (engine_used.empty()) {
-            std::cout << "[Provision] Skip port " << socks_port << ": no engine for " << uri.substr(0, 50) << " (preferred=" << preferred_engine << ")" << std::endl;
-            continue;
-        }
-        std::string config_text = runtime_engine_manager_.generateConfig(*parsed, socks_port, engine_used);
-        std::string config_path = runtime_engine_manager_.writeConfigFile(engine_used, config_text);
-        int pid = runtime_engine_manager_.startProcess(engine_used, config_path);
-        utils::LocalProxyProbeResult probe;
-        bool ready = false;
-        if (pid > 0 && utils::waitForPortAlive(socks_port, 5000, 100)) {
-            probe = utils::probeLocalMixedPort(socks_port, 2000);
-            ready = probe.mixed_ready();
-        }
-        if (pid > 0 && !ready) {
-            runtime_engine_manager_.stopProcess(pid);
-            pid = -1;
-        }
-
-        PortSlot slot;
-        slot.port = socks_port;
-        slot.http_port = http_port;
-        slot.uri = uri;
-        slot.engine_used = engine_used;
-        slot.pid = pid;
-        slot.alive = ready;
-        slot.tcp_alive = probe.tcp_alive;
-        slot.socks_ready = probe.socks_ready;
-        slot.http_ready = probe.http_ready;
-        slot.latency_ms = latency;
-        slot.last_health_check = now;
-        slot.last_probe_ts = utils::nowTimestamp();
-        slot.consecutive_failures = 0;
-        provisioned_ports_.push_back(slot);
-        if (!engine_used.empty()) {
-            std::lock_guard<std::mutex> lock(state_mutex_);
-            cached_engine_hints_[uri] = engine_used;
-        }
-
-        if (ready) {
-            std::cout << "[Provision] MIXED:" << socks_port << " <- "
-                      << uri.substr(0, std::min((int)uri.size(), 50)) << "..."
-                      << " (engine=" << engine_used << ", latency=" << latency << "ms)" << std::endl;
-        } else {
-            utils::LogRingBuffer::instance().push(
-                "[Provision] Failed to start MIXED:" + std::to_string(socks_port) +
-                " for " + uri.substr(0, std::min((int)uri.size(), 60)) +
-                " engine=" + engine_used +
-                " tcp=" + std::string(slot.tcp_alive ? "1" : "0") +
-                " socks=" + std::string(slot.socks_ready ? "1" : "0") +
-                " http=" + std::string(slot.http_ready ? "1" : "0"));
-        }
-    }
-
-    if (count > 0) {
-        std::cout << "[Provision] " << count << " mixed ports provisioned (HTTP+SOCKS on "
-                  << PROVISION_PORT_BASE << "-" << (PROVISION_PORT_BASE + count - 1)
-                  << ")" << std::endl;
-    }
-}
-
-void HunterOrchestrator::refreshProvisionedPorts() {
-    // Health-check each provisioned port; replace dead ones with next-best configs
-    std::lock_guard<std::mutex> lock(provision_mutex_);
-    const double now = utils::nowTimestamp();
-
-    std::vector<int> dead_indices;
-    for (int i = 0; i < (int)provisioned_ports_.size(); i++) {
-        auto& slot = provisioned_ports_[i];
-        if (!slot.alive && slot.pid <= 0) {
-            dead_indices.push_back(i);
-            continue;
-        }
-        // Check health every 30 seconds
-        if (now - slot.last_health_check < 30.0) continue;
-        slot.last_health_check = now;
-
-        const auto probe = utils::probeLocalMixedPort(slot.port, 1500);
-        slot.tcp_alive = probe.tcp_alive;
-        slot.socks_ready = probe.socks_ready;
-        slot.http_ready = probe.http_ready;
-        slot.last_probe_ts = utils::nowTimestamp();
-        if (probe.mixed_ready()) {
-            slot.alive = true;
-            slot.consecutive_failures = 0;
-        } else {
-            slot.alive = false;
-            slot.consecutive_failures++;
-            if (slot.consecutive_failures >= 3) {
-                // Port is dead — kill and mark for replacement
-                if (slot.pid > 0) {
-                    runtime_engine_manager_.stopProcess(slot.pid);
-                }
-                if (config_db_ && !slot.uri.empty()) {
-                    config_db_->updateHealth(slot.uri, false, 0.0f, slot.engine_used, true);
-                }
-                slot.alive = false;
-                slot.pid = -1;
-                dead_indices.push_back(i);
-                utils::LogRingBuffer::instance().push(
-                    "[Provision] Dead proxy on port " + std::to_string(slot.port) +
-                    " (failures=" + std::to_string(slot.consecutive_failures) +
-                    ", tcp=" + std::string(slot.tcp_alive ? "1" : "0") +
-                    ", socks=" + std::string(slot.socks_ready ? "1" : "0") +
-                    ", http=" + std::string(slot.http_ready ? "1" : "0") + ")");
-            }
-        }
-    }
-
-    if (dead_indices.empty()) return;
-    replaceProvisionedPortsLocked(dead_indices, now);
-}
-
-std::string HunterOrchestrator::recheckLiveProvisionedPorts() {
-    const bool was_paused = paused_.exchange(true);
-    const int timeout_s = speed_test_timeout_.load();
-    std::vector<ConfigHealthRecord> live_records;
-    if (config_db_) {
-        live_records = config_db_->getHealthyRecords(std::max(500, config_db_->size()));
-    }
-
-    std::vector<LiveRecheckItem> results;
-    results.reserve(live_records.size());
-    std::vector<std::string> passed_uris;
-    std::vector<std::string> failed_uris;
-
-    auto testWithEngine = [&](const std::string& uri, const std::string& preferred_engine) -> LiveRecheckItem {
-        LiveRecheckItem item;
-        item.uri = uri;
-
-        auto parsed = network::UriParser::parse(uri);
-        if (!parsed.has_value() || !parsed->isValid()) {
-            item.error = "invalid_uri";
-            return item;
-        }
-
-        std::vector<std::string> engines;
-        auto add_engine = [&](const std::string& engine) {
-            if (engine.empty()) return;
-            if (!runtime_engine_manager_.isEngineAvailable(engine)) return;
-            if (std::find(engines.begin(), engines.end(), engine) != engines.end()) return;
-            if (runtime_engine_manager_.generateConfig(*parsed, 10808, engine).empty()) return;
-            engines.push_back(engine);
-        };
-
-        add_engine(preferred_engine);
-        add_engine("xray");
-        add_engine("sing-box");
-        add_engine("mihomo");
-
-        if (engines.empty()) {
-            item.error = "no_compatible_engine";
-            return item;
-        }
-
-        for (const auto& engine : engines) {
-            const int port = reserveTemporaryListenPort();
-            if (port <= 0) {
-                item.error = "no_free_port";
-                break;
-            }
-
-            const std::string config_text = runtime_engine_manager_.generateConfig(*parsed, port, engine);
-            if (config_text.empty()) {
-                item.error = "config_generation_failed";
-                continue;
-            }
-            const std::string config_path = runtime_engine_manager_.writeConfigFile(engine, config_text);
-            if (config_path.empty()) {
-                item.error = "config_write_failed";
-                continue;
-            }
-
-            int pid = runtime_engine_manager_.startProcess(engine, config_path);
-            if (pid <= 0) {
-                item.error = "process_start_failed";
-                continue;
-            }
-
-            utils::LocalProxyProbeResult probe;
-            bool ready = false;
-            if (utils::waitForPortAlive(port, 5000, 100)) {
-                probe = utils::probeLocalMixedPort(port, 2000);
-                ready = probe.mixed_ready();
-            }
-
-            float score = -1.0f;
-            if (ready) {
-                score = testProvisionedPortDownload(port, timeout_s);
-            }
-            runtime_engine_manager_.stopProcess(pid);
-            std::this_thread::sleep_for(std::chrono::milliseconds(120));
-
-            if (ready && score > 0.0f) {
-                item.alive = true;
-                item.engine_used = engine;
-                item.score = score;
-                item.error.clear();
-                return item;
-            }
-
-            std::ostringstream err;
-            err << "engine=" << engine
-                << " tcp=" << (probe.tcp_alive ? "1" : "0")
-                << " socks=" << (probe.socks_ready ? "1" : "0")
-                << " http=" << (probe.http_ready ? "1" : "0");
-            item.error = err.str();
-        }
-
-        return item;
-    };
-
-    utils::LogRingBuffer::instance().push(
-        "[RecheckLive] Started deep live validation for " + std::to_string(live_records.size()) +
-        " configs using temporary engine ports");
-
-    for (const auto& rec : live_records) {
-        LiveRecheckItem item = testWithEngine(rec.uri, rec.engine_used);
-        if (item.alive) {
-            const float latency_ms = std::max(1.0f, 1000.0f / std::max(item.score, 0.001f));
-            if (config_db_) {
-                config_db_->updateHealth(rec.uri, true, latency_ms, item.engine_used);
-            }
-            passed_uris.push_back(rec.uri);
-        } else {
-            if (config_db_) {
-                config_db_->updateHealth(rec.uri, false, 0.0f, rec.engine_used, true);
-            }
-            failed_uris.push_back(rec.uri);
-        }
-        results.push_back(std::move(item));
-    }
-
-    if (config_db_) {
-        try {
-            config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
-        } catch (...) {}
-    }
-
-    utils::LogRingBuffer::instance().push(
-        "[RecheckLive] Completed: tested=" + std::to_string((int)results.size()) +
-        " passed=" + std::to_string((int)passed_uris.size()) +
-        " failed=" + std::to_string((int)failed_uris.size()) +
-        " runtime_kept_paused=1");
-
-    // Auto-download configs when trusted live proxies are found
-    if (!passed_uris.empty() && !was_paused) {
-        double now_ts = utils::nowTimestamp();
-        // Use a simple timestamp check for now (can be enhanced later)
-        static double last_download_ts = 0.0;
-        
-        // Check if more than 1 hour since last download
-        if (last_download_ts <= 0.0 || (now_ts - last_download_ts) >= 3600.0) {
-            last_download_ts = now_ts;  // Update timestamp
-            
-            utils::LogRingBuffer::instance().push(
-                "[RecheckLive] Found " + std::to_string((int)passed_uris.size()) + 
-                " trusted live proxies, triggering automatic config download");
-            
-            // Trigger automatic download with live proxies
-            std::vector<std::string> github_urls = config_.githubUrls();
-            if (!github_urls.empty()) {
-                // Create download task with live proxy priority
-                auto download_task = [this, github_urls]() {
-                    try {
-                        downloadConfigsAsync(github_urls, "");
-                    } catch (const std::exception& e) {
-                        utils::LogRingBuffer::instance().push(
-                            "[RecheckLive] Auto-download failed: " + std::string(e.what()));
-                    }
-                };
-                
-                // Run download in background
-                std::thread(download_task).detach();
-            }
-        } else {
-            utils::LogRingBuffer::instance().push(
-                "[RecheckLive] Found trusted live proxies but recent download exists (" +
-                std::to_string((int)(now_ts - last_download_ts)) + " seconds ago)");
-        }
-    }
-
-    // Restore original pause state — don't permanently pause the system
-    if (!was_paused) {
-        paused_.store(false);
-    }
-
-    std::ostringstream data;
-    data << "{"
-         << "\"tested\":" << (int)results.size()
-         << ",\"passed\":" << (int)passed_uris.size()
-         << ",\"failed\":" << (int)failed_uris.size()
-         << ",\"was_paused_before\":" << (was_paused ? "true" : "false")
-         << ",\"kept_paused\":" << (was_paused ? "true" : "false")
-         << ",\"passed_uris\":" << jsonStringArray(passed_uris)
-         << ",\"failed_uris\":" << jsonStringArray(failed_uris)
-         << ",\"tested_uris\":" << jsonStringArray([&]() {
-                std::vector<std::string> combined = passed_uris;
-                combined.insert(combined.end(), failed_uris.begin(), failed_uris.end());
-                return combined;
-            }())
-         << "}";
-    return data.str();
-}
-
-void HunterOrchestrator::replaceProvisionedPortsLocked(const std::vector<int>& dead_indices, double now,
-                                                       const std::set<std::string>& excluded_uris) {
-    if (dead_indices.empty()) return;
-
-    // Get replacement configs
-    std::set<std::string> existing_uris;
-    auto resolve_engine_hint = [this](const std::string& uri) -> std::string {
-        if (config_db_) {
-            std::string engine = config_db_->getPreferredEngine(uri);
-            if (!engine.empty()) return engine;
-        }
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        auto it = cached_engine_hints_.find(uri);
-        return it != cached_engine_hints_.end() ? it->second : "";
-    };
-    existing_uris.insert(excluded_uris.begin(), excluded_uris.end());
-    for (auto& slot : provisioned_ports_) {
-        if (slot.alive && slot.pid > 0) existing_uris.insert(slot.uri);
-    }
-
-    std::vector<std::pair<std::string, float>> replacements;
-    if (config_db_) {
-        auto healthy = config_db_->getHealthyConfigs(PROVISION_PORT_COUNT);
-        for (auto& [uri, lat] : healthy) {
-            if (existing_uris.find(uri) == existing_uris.end()) {
-                replacements.emplace_back(uri, lat);
-            }
-        }
-        const auto telegram_only_records = config_db_->getTelegramOnlyRecords(40);
-        int telegram_added = 0;
-        for (const auto& rec : telegram_only_records) {
-            if (existing_uris.find(rec.uri) != existing_uris.end()) continue;
-            replacements.emplace_back(rec.uri, 9000.0f + static_cast<float>(telegram_added));
-            existing_uris.insert(rec.uri);
-            telegram_added++;
-            if (telegram_added >= 10) break;
-        }
-    }
-    if (replacements.empty() && balancer_) {
-        auto pool = balancer_->getAvailableConfigsList();
-        for (auto& e : pool) {
-            if (!e.engine_used.empty()) {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                cached_engine_hints_[e.uri] = e.engine_used;
-            }
-            if (existing_uris.find(e.uri) == existing_uris.end()) {
-                replacements.emplace_back(e.uri, e.latency);
-            }
-        }
-    }
-
-    std::sort(replacements.begin(), replacements.end(),
-              [](const auto& a, const auto& b) { return a.second < b.second; });
-
-    for (int idx : dead_indices) {
-        auto& slot = provisioned_ports_[idx];
-        const int socks_port = slot.port;
-        const int h_port = slot.http_port > 0 ? slot.http_port : socks_port;
-        bool assigned = false;
-
-        while (!replacements.empty()) {
-            auto [uri, latency] = replacements.front();
-            replacements.erase(replacements.begin());
-
-            auto parsed = network::UriParser::parse(uri);
-            if (!parsed.has_value() || !parsed->isValid()) continue;
-
-            const std::string preferred_engine = resolve_engine_hint(uri);
-            const std::string engine_used = runtime_engine_manager_.resolveEngine(*parsed, preferred_engine);
-            if (engine_used.empty()) continue;
-
-            std::string config_text = runtime_engine_manager_.generateConfig(*parsed, socks_port, engine_used);
-            std::string config_path = runtime_engine_manager_.writeConfigFile(engine_used, config_text);
-            int pid = runtime_engine_manager_.startProcess(engine_used, config_path);
-            utils::LocalProxyProbeResult probe;
-            bool ready = false;
-            if (pid > 0 && utils::waitForPortAlive(socks_port, 5000, 100)) {
-                probe = utils::probeLocalMixedPort(socks_port, 2000);
-                ready = probe.mixed_ready();
-            }
-            if (pid > 0 && !ready) {
-                runtime_engine_manager_.stopProcess(pid);
-                pid = -1;
-            }
-
-            if (!ready) {
-                if (config_db_) config_db_->updateHealth(uri, false, 0.0f, engine_used, true);
-                slot.consecutive_failures++;
-                // Rate-limit: only log 1st, 5th, 10th, then every 20th failure
-                int cf = slot.consecutive_failures;
-                if (cf == 1 || cf == 5 || cf == 10 || (cf % 20) == 0) {
-                    utils::LogRingBuffer::instance().push(
-                        "[Provision] Failed to replace MIXED:" + std::to_string(socks_port) +
-                        " engine=" + engine_used +
-                        " using new config tcp=" + std::string(probe.tcp_alive ? "1" : "0") +
-                        " socks=" + std::string(probe.socks_ready ? "1" : "0") +
-                        " http=" + std::string(probe.http_ready ? "1" : "0") +
-                        " (failures=" + std::to_string(cf) + ")");
-                }
-                continue;
-            }
-
-            slot.uri = uri;
-            slot.engine_used = engine_used;
-            slot.http_port = h_port;
-            slot.pid = pid;
-            slot.alive = true;
-            slot.tcp_alive = probe.tcp_alive;
-            slot.socks_ready = probe.socks_ready;
-            slot.http_ready = probe.http_ready;
-            slot.latency_ms = latency;
-            slot.last_health_check = now;
-            slot.last_probe_ts = utils::nowTimestamp();
-            slot.consecutive_failures = 0;
-            {
-                std::lock_guard<std::mutex> lock(state_mutex_);
-                cached_engine_hints_[uri] = engine_used;
-            }
-
-            utils::LogRingBuffer::instance().push(
-                "[Provision] Replaced dead SOCKS:" + std::to_string(socks_port) +
-                " HTTP:" + std::to_string(h_port) +
-                " engine=" + engine_used +
-                " with new config (latency=" + std::to_string((int)latency) + "ms)");
-            assigned = true;
-            break;
-        }
-
-        if (!assigned) {
-            slot.uri.clear();
-            slot.engine_used.clear();
-            slot.http_port = h_port;
-            slot.pid = -1;
-            slot.alive = false;
-            slot.tcp_alive = false;
-            slot.socks_ready = false;
-            slot.http_ready = false;
-            slot.latency_ms = 0.0f;
-            slot.last_health_check = now;
-            slot.last_probe_ts = utils::nowTimestamp();
-            slot.consecutive_failures = 3;
-        }
-    }
-}
-
-void HunterOrchestrator::stopProvisionedPorts() {
-    std::lock_guard<std::mutex> lock(provision_mutex_);
-    for (auto& slot : provisioned_ports_) {
-        if (slot.pid > 0) {
-            runtime_engine_manager_.stopProcess(slot.pid);
-            slot.pid = -1;
-            slot.alive = false;
-            slot.tcp_alive = false;
-            slot.socks_ready = false;
-            slot.http_ready = false;
-            slot.last_probe_ts = utils::nowTimestamp();
-        }
-    }
-    provisioned_ports_.clear();
-}
-
-std::vector<HunterOrchestrator::PortSlot> HunterOrchestrator::getProvisionedPorts() const {
-    std::lock_guard<std::mutex> lock(provision_mutex_);
-    return provisioned_ports_;
 }
 
 int HunterOrchestrator::cachedConfigCount() const {
@@ -2864,64 +1241,22 @@ int HunterOrchestrator::cachedConfigCount() const {
 void HunterOrchestrator::printStartupBanner() {
     auto hw = HunterTaskManager::instance().getHardware();
 
-    int cached_main = 0, cached_gemini = 0;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        auto it = cached_configs_.find("HUNTER_balancer_cache.json");
-        if (it != cached_configs_.end()) cached_main = (int)it->second.size();
-        it = cached_configs_.find("HUNTER_gemini_balancer_cache.json");
-        if (it != cached_configs_.end()) cached_gemini = (int)it->second.size();
-    }
-
     cache::SmartCache::CacheStats cs;
     if (cache_) cs = cache_->getStats();
 
     int db_size = config_db_ ? config_db_->size() : 0;
 
-    std::string dpi_status = "off";
-    std::string dpi_strategy = "-";
-    std::string net_type = "unknown";
-    bool cdn_ok = false, google_ok = false, tg_ok = false;
-    if (dpi_evasion_) {
-        auto m = dpi_evasion_->getMetrics();
-        dpi_status = "active";
-        dpi_strategy = m.strategy;
-        net_type = m.network_type;
-        cdn_ok = m.cdn_reachable;
-        google_ok = m.google_reachable;
-        tg_ok = m.telegram_reachable;
-    }
-
-    bool obf_active = (obfuscation_ != nullptr);
-
     std::cout << "\n"
     "╔══════════════════════════════════════════════════════════════╗\n"
-    "║               HUNTER Anti-Censorship Engine                 ║\n"
+    "║                   HUNTER Config Discovery                    ║\n"
     "╠══════════════════════════════════════════════════════════════╣\n"
     "║  System    : " << hw.cpu_count << " CPUs, "
         << std::fixed << std::setprecision(1) << hw.ram_total_gb << " GB RAM ("
         << (int)hw.ram_percent << "% used)\n"
-    "║  Balancers : Main=" << config_.multiproxyPort()
-        << "  Gemini=" << config_.geminiPort() << "\n"
-    "║  Proxies   : " << PROVISION_PORT_BASE << "-"
-        << PROVISION_PORT_MAX
-        << " (" << (int)provisioned_ports_.size() << " active)\n"
-    "║  Cached    : main=" << cached_main << "  gemini=" << cached_gemini
-        << "  working=" << cs.working_count << "  all=" << cs.all_count << "\n"
+    "║  Cached    : working=" << cs.working_count << "  all=" << cs.all_count << "\n"
     "║  ConfigDB  : " << db_size << " entries\n"
     "╠══════════════════════════════════════════════════════════════╣\n"
-    "║  DPI Evasion      : " << dpi_status << "  strategy=" << dpi_strategy << "\n"
-    "║  Network Type     : " << net_type << "\n"
-    "║  Reachability     : CDN=" << (cdn_ok?"OK":"NO")
-        << "  Google=" << (google_ok?"OK":"NO")
-        << "  Telegram=" << (tg_ok?"OK":"NO") << "\n"
-    "║  Obfuscation      : " << (obf_active?"active":"off") << "\n"
-    "║  TLS Fingerprint  : randomized\n"
-    "║  Fragmentation    : auto\n"
-    "╠══════════════════════════════════════════════════════════════╣\n"
-    "║  Phase 1: Cached configs loaded -> immediate connectivity   ║\n"
-    "║  Phase 2: DPI evasion engines started                       ║\n"
-    "║  Phase 3: Background fetch (GitHub/Telegram) starting...    ║\n"
+    "║  Workers: config_scanner, github_bg, harvester, validator    ║\n"
     "╚══════════════════════════════════════════════════════════════╝\n"
     << std::endl;
 }
@@ -3003,40 +1338,6 @@ void HunterOrchestrator::printDashboard() {
         db_avg_lat = st.avg_latency_ms;
     }
 
-    // Balancer status
-    BalancerStatus bal_status;
-    int bal_backends = 0, bal_healthy = 0;
-    bool bal_running = false;
-    if (balancer_) {
-        bal_status = balancer_->getStatus();
-        bal_backends = bal_status.backend_count;
-        bal_healthy = bal_status.healthy_count;
-        bal_running = bal_status.running;
-    }
-    BalancerStatus gem_status;
-    int gem_backends = 0, gem_healthy = 0;
-    bool gem_running = false;
-    if (gemini_balancer_) {
-        gem_status = gemini_balancer_->getStatus();
-        gem_backends = gem_status.backend_count;
-        gem_healthy = gem_status.healthy_count;
-        gem_running = gem_status.running;
-    }
-
-    // DPI status
-    std::string dpi_str = "OFF";
-    std::string dpi_color = ansi::DIM;
-    if (dpi_evasion_) {
-        auto m = dpi_evasion_->getMetrics();
-        dpi_str = m.strategy;
-        if (!m.cdn_reachable && !m.google_reachable) {
-            dpi_str += " BLOCKED";
-            dpi_color = ansi::RED;
-        } else {
-            dpi_color = ansi::GREEN;
-        }
-    }
-
     // Workers
     int w_running = 0, w_sleeping = 0, w_err = 0, w_total = 0;
     std::vector<std::pair<std::string, WorkerStatus>> worker_list;
@@ -3049,14 +1350,6 @@ void HunterOrchestrator::printDashboard() {
             else if (ws.state == WorkerState::WORKER_ERROR) w_err++;
             worker_list.push_back({name, ws});
         }
-    }
-
-    // Provisioned ports
-    int prov_alive = 0, prov_total = 0;
-    {
-        std::lock_guard<std::mutex> plock(provision_mutex_);
-        prov_total = (int)provisioned_ports_.size();
-        for (auto& s : provisioned_ports_) if (s.alive) prov_alive++;
     }
 
     char time_buf[32];
@@ -3091,35 +1384,6 @@ void HunterOrchestrator::printDashboard() {
         << "   " << ansi::DIM << "avg " << (int)db_avg_lat << "ms" << ansi::RESET << "\n";
     out << "    " << ansi::bar(db_alive, db_total > 0 ? db_total : 1, 40) 
         << " " << ansi::DIM << (db_total > 0 ? (db_alive * 100 / db_total) : 0) << "% alive" << ansi::RESET << "\n\n";
-
-    // ── Balancers ──
-    out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " LOAD BALANCERS" << ansi::RESET << "\n";
-
-    // Main balancer
-    const bool bal_mixed_ready = bal_status.tcp_alive && bal_status.socks_ready && bal_status.http_ready;
-    out << "    " << (bal_mixed_ready ? ansi::GREEN : ansi::RED) << (bal_mixed_ready ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
-        << " Main  :" << config_.multiproxyPort() << "  "
-        << ansi::bar(bal_healthy, bal_backends > 0 ? bal_backends : 1, 15)
-        << " " << ansi::BOLD << bal_healthy << "/" << bal_backends << ansi::RESET
-        << (bal_mixed_ready ? "" : (std::string(ansi::RED) + " T" + (bal_status.tcp_alive ? std::string("1") : std::string("0")) +
-            " S" + (bal_status.socks_ready ? std::string("1") : std::string("0")) +
-            " H" + (bal_status.http_ready ? std::string("1") : std::string("0")) + ansi::RESET)) << "\n";
-
-    // Gemini balancer
-    const bool gem_mixed_ready = gem_status.tcp_alive && gem_status.socks_ready && gem_status.http_ready;
-    out << "    " << (gem_mixed_ready ? ansi::GREEN : ansi::RED) << (gem_mixed_ready ? "\xe2\x97\x89" : "\xe2\x97\x8b") << ansi::RESET
-        << " Gemini:" << config_.geminiPort() << "  "
-        << ansi::bar(gem_healthy, gem_backends > 0 ? gem_backends : 1, 15)
-        << " " << ansi::BOLD << gem_healthy << "/" << gem_backends << ansi::RESET
-        << (gem_mixed_ready ? "" : (std::string(ansi::RED) + " T" + (gem_status.tcp_alive ? std::string("1") : std::string("0")) +
-            " S" + (gem_status.socks_ready ? std::string("1") : std::string("0")) +
-            " H" + (gem_status.http_ready ? std::string("1") : std::string("0")) + ansi::RESET)) << "\n";
-
-    // Provisioned proxies
-    out << "    " << (prov_alive > 0 ? ansi::GREEN : ansi::DIM) << "\xe2\x97\x89" << ansi::RESET
-        << " Proxies:" << PROVISION_PORT_BASE << "-" << (PROVISION_PORT_BASE + PROVISION_PORT_COUNT - 1)
-        << "  " << ansi::bar(prov_alive, prov_total > 0 ? prov_total : 1, 15)
-        << " " << ansi::BOLD << prov_alive << "/" << prov_total << ansi::RESET << "\n\n";
 
     // ── Workers ──
     out << "  " << ansi::BOLD << ansi::YELLOW << "\xe2\x96\xb6" << ansi::WHITE << " WORKERS "
@@ -3167,8 +1431,7 @@ void HunterOrchestrator::printDashboard() {
     out << "    RAM: " << ansi::ramBar(hw.ram_percent, 25) 
         << " " << ansi::BOLD << (int)hw.ram_percent << "%" << ansi::RESET
         << ansi::DIM << " (" << std::fixed << std::setprecision(1) << hw.ram_used_gb << "/" << hw.ram_total_gb << " GB)" << ansi::RESET << "\n";
-    out << "    DPI: " << dpi_color << dpi_str << ansi::RESET
-        << "    Cycles: " << ansi::BOLD << cycles << ansi::RESET
+    out << "    Cycles: " << ansi::BOLD << cycles << ansi::RESET
         << "    Validated: " << ansi::BOLD << ansi::GREEN << validated << ansi::RESET << "\n\n";
 
     // ── Live Activity ──
@@ -3197,144 +1460,6 @@ void HunterOrchestrator::printDashboard() {
     out << ansi::DIM << "  [Ctrl+C to stop | runtime/stop.flag for graceful shutdown]" << ansi::RESET << "\n";
 
     std::cout << out.str() << std::flush;
-}
-
-void HunterOrchestrator::killPortOccupants() {
-    std::cout << "[PortKill] Checking for processes occupying required ports..." << std::endl;
-    
-    // Only check balancer and provisioned ports (NOT ephemeral test ports)
-    std::vector<int> required_ports = {
-        config_.multiproxyPort(),      // Main balancer port
-        config_.geminiPort(),          // Gemini balancer port
-    };
-    for (int i = 0; i < PROVISION_PORT_COUNT; i++) {
-        required_ports.push_back(PROVISION_PORT_BASE + i);
-    }
-    
-    bool killed_any = false;
-    
-#ifdef _WIN32
-    // Collect PIDs from netstat for all required ports
-    std::set<int> pids_to_kill;
-    for (int port : required_ports) {
-        if (!utils::isPortAlive(port, 200)) continue;  // Skip ports that are free
-        
-        std::string netstat_cmd = "netstat -ano -p TCP";
-        std::string result = utils::execCommand(netstat_cmd);
-        
-        std::string port_str = ":" + std::to_string(port);
-        std::istringstream ss(result);
-        std::string line;
-        while (std::getline(ss, line)) {
-            // Only match LISTENING state on our exact port
-            if (line.find("LISTENING") == std::string::npos) continue;
-            if (line.find(port_str) == std::string::npos) continue;
-            
-            // Extract PID (last token)
-            std::istringstream line_ss(line);
-            std::string token;
-            std::vector<std::string> tokens;
-            while (line_ss >> token) tokens.push_back(token);
-            
-            if (tokens.size() >= 5) {
-                try {
-                    int pid = std::stoi(tokens.back());
-                    if (pid > 4) pids_to_kill.insert(pid);  // Skip System (PID 0,4)
-                } catch (...) {}
-            }
-        }
-    }
-    
-    // Kill collected PIDs using Windows API (no shell needed)
-    for (int pid : pids_to_kill) {
-        HANDLE hProc = OpenProcess(PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION, FALSE, pid);
-        if (!hProc) {
-            DWORD err = GetLastError();
-            std::cerr << "[PortKill] OpenProcess failed for PID " << pid 
-                      << " (error=" << err << ")" << std::endl;
-            continue;
-        }
-        char exe_name[MAX_PATH] = {};
-        DWORD size = MAX_PATH;
-        QueryFullProcessImageNameA(hProc, 0, exe_name, &size);
-        std::string name(exe_name);
-        
-        // Only kill xray processes, not system services
-        if (name.find("xray") != std::string::npos || 
-            name.find("sing-box") != std::string::npos ||
-            name.find("mihomo") != std::string::npos) {
-            std::cout << "[PortKill] Killing " << name << " (PID " << pid << ")" << std::endl;
-            TerminateProcess(hProc, 0);
-            killed_any = true;
-        }
-        CloseHandle(hProc);
-    }
-    
-    if (killed_any) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-    }
-#else
-    // Linux/macOS: use lsof to find and kill processes
-    for (int port : required_ports) {
-        std::string lsof_cmd = "lsof -ti :" + std::to_string(port);
-        std::string pids = utils::execCommand(lsof_cmd);
-        
-        if (!pids.empty()) {
-            std::istringstream ss(pids);
-            std::string pid_str;
-            
-            while (std::getline(ss, pid_str)) {
-                try {
-                    int pid = std::stoi(pid_str);
-                    
-                    // Get process name
-                    std::string ps_cmd = "ps -p " + std::to_string(pid) + " -o comm=";
-                    std::string process_name = utils::trim(utils::execCommand(ps_cmd));
-                    
-                    // Skip our own process and system processes
-                    if (process_name != "hunter" && 
-                        process_name != "systemd" &&
-                        process_name != "kernel" &&
-                        !process_name.empty()) {
-                        
-                        std::cout << "[PortKill] Port " << port << " occupied by " 
-                                  << process_name << " (PID " << pid << "), terminating..." << std::endl;
-                        
-                        // Kill the process
-                        std::string kill_cmd = "kill -9 " + std::to_string(pid);
-                        utils::execCommand(kill_cmd);
-                        killed_any = true;
-                        
-                        // Give it a moment to terminate
-                        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-                    }
-                } catch (...) {
-                    // Skip if PID parsing fails
-                }
-            }
-        }
-    }
-#endif
-    
-    if (killed_any) {
-        std::cout << "[PortKill] Some processes were terminated. Waiting for ports to be released..." << std::endl;
-        std::this_thread::sleep_for(std::chrono::seconds(2));
-        
-        // Verify ports are now free
-        bool all_free = true;
-        for (int port : required_ports) {
-            if (utils::isPortAlive(port, 100)) {
-                std::cout << "[PortKill] WARNING: Port " << port << " is still in use!" << std::endl;
-                all_free = false;
-            }
-        }
-        
-        if (all_free) {
-            std::cout << "[PortKill] All required ports are now free" << std::endl;
-        }
-    } else {
-        std::cout << "[PortKill] No processes occupying required ports found" << std::endl;
-    }
 }
 
 int HunterOrchestrator::loadBundleConfigs() {
@@ -3407,7 +1532,7 @@ bool HunterOrchestrator::detectCensorship() {
         }
     }
     
-    bool censored = (failed >= test_hosts.size() - 1); // All or all but one failed
+    bool censored = (failed >= static_cast<int>(test_hosts.size()) - 1); // All or all but one failed
     if (censored) {
         std::cout << "[Censorship] *** CENSORSHIP DETECTED *** (" << failed << "/" << test_hosts.size() << " hosts blocked)" << std::endl;
     } else {
@@ -3476,426 +1601,6 @@ bool HunterOrchestrator::emergencyBootstrap() {
     return false;
 }
 
-std::string HunterOrchestrator::buildStatusJson(const std::string& phase, int last_tested, int last_passed) {
-    std::lock_guard<std::mutex> status_lock(status_mutex_);
-    int db_total = 0, db_alive = 0, db_tested = 0, db_untested = 0;
-    float db_avg_lat = 0.0f;
-    int db_total_tests = 0, db_total_passes = 0;
-    int db_stale = 0;
-    auto workerStateName = [](WorkerState state) -> const char* {
-        switch (state) {
-            case WorkerState::IDLE: return "idle";
-            case WorkerState::RUNNING: return "running";
-            case WorkerState::SLEEPING: return "sleeping";
-            case WorkerState::WORKER_ERROR: return "error";
-            case WorkerState::STOPPED: return "stopped";
-        }
-        return "unknown";
-    };
-    auto resourceModeName = [](ResourceMode mode) -> const char* {
-        switch (mode) {
-            case ResourceMode::NORMAL: return "normal";
-            case ResourceMode::MODERATE: return "moderate";
-            case ResourceMode::SCALED: return "scaled";
-            case ResourceMode::CONSERVATIVE: return "conservative";
-            case ResourceMode::REDUCED: return "reduced";
-            case ResourceMode::MINIMAL: return "minimal";
-            case ResourceMode::ULTRA_MINIMAL: return "ultra_minimal";
-        }
-        return "unknown";
-    };
-    std::vector<ConfigHealthRecord> healthy_records;
-    std::vector<ConfigHealthRecord> telegram_only_records;
-    if (config_db_) {
-        auto s = config_db_->getStats();
-        db_total = s.total;
-        db_alive = s.alive;
-        db_tested = s.tested_unique;
-        db_untested = s.untested_unique;
-        db_stale = s.stale_unique;
-        db_avg_lat = s.avg_latency_ms;
-        db_total_tests = s.total_tested;
-        db_total_passes = s.total_passed;
-        healthy_records = config_db_->getHealthyRecords(200);
-        telegram_only_records = config_db_->getTelegramOnlyRecords(200);
-    }
-
-    BalancerStatus bal_status;
-    int bal_backends = 0, bal_healthy = 0;
-    bool bal_running = false;
-    if (balancer_) {
-        bal_status = balancer_->getStatus();
-        bal_backends = bal_status.backend_count;
-        bal_healthy = bal_status.healthy_count;
-        bal_running = bal_status.running;
-    }
-    BalancerStatus gem_status;
-    int gem_backends = 0, gem_healthy = 0;
-    bool gem_running = false;
-    if (gemini_balancer_) {
-        gem_status = gemini_balancer_->getStatus();
-        gem_backends = gem_status.backend_count;
-        gem_healthy = gem_status.healthy_count;
-        gem_running = gem_status.running;
-    }
-
-    double start_time = 0.0;
-    {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        start_time = start_time_;
-    }
-    double uptime = utils::nowTimestamp() - start_time;
-    int pending_unique = db_untested + db_stale;
-    const HardwareSnapshot hw = HunterTaskManager::instance().getHardware();
-    const HunterTaskManager::Metrics task_metrics = HunterTaskManager::instance().getMetrics();
-    const orchestrator::ThreadManager::Status tm_status = thread_manager_
-        ? thread_manager_->getStatus()
-        : orchestrator::ThreadManager::Status{};
-    auto parseExtraInt = [](const std::map<std::string, std::string>& extra, const std::string& key, int fallback) -> int {
-        auto it = extra.find(key);
-        if (it == extra.end()) return fallback;
-        try {
-            return std::stoi(it->second);
-        } catch (...) {
-            return fallback;
-        }
-    };
-    auto parseExtraDouble = [](const std::map<std::string, std::string>& extra, const std::string& key, double fallback) -> double {
-        auto it = extra.find(key);
-        if (it == extra.end()) return fallback;
-        try {
-            return std::stod(it->second);
-        } catch (...) {
-            return fallback;
-        }
-    };
-    std::string history_json = "[]";
-    int validator_last_tested = last_tested;
-    int validator_last_passed = last_passed;
-    int validator_interval_s = 0;
-    int validator_active_test_processes = 0;
-    int validator_max_test_processes = 0;
-    double validator_rate_per_s = 0.0;
-    double eta_seconds = 0.0;
-    int effective_timeout_s = speed_test_timeout_.load();
-    int effective_max_concurrent = speed_max_threads_.load();
-    int effective_batch_size = std::max(1, speed_chunk_size_.load());
-    int effective_chunk_size = speed_chunk_size_.load();
-    auto validator_it = tm_status.workers.find("validator");
-    if (validator_it != tm_status.workers.end()) {
-        const auto& extra = validator_it->second.extra;
-        validator_last_tested = parseExtraInt(extra, "last_tested", validator_last_tested);
-        validator_last_passed = parseExtraInt(extra, "last_passed", validator_last_passed);
-        validator_interval_s = parseExtraInt(extra, "interval_s", validator_interval_s);
-        validator_active_test_processes = parseExtraInt(extra, "active_test_processes", validator_active_test_processes);
-        validator_max_test_processes = parseExtraInt(extra, "max_test_processes", validator_max_test_processes);
-        validator_rate_per_s = parseExtraDouble(extra, "rate_per_s", validator_rate_per_s);
-        pending_unique = parseExtraInt(extra, "pending_unique", pending_unique);
-        eta_seconds = parseExtraDouble(extra, "eta_s", eta_seconds);
-        effective_timeout_s = parseExtraInt(extra, "effective_timeout_s", effective_timeout_s);
-        effective_max_concurrent = parseExtraInt(extra, "effective_max_concurrent", effective_max_concurrent);
-        effective_batch_size = parseExtraInt(extra, "effective_batch_size", effective_batch_size);
-        effective_chunk_size = parseExtraInt(extra, "effective_chunk_size", effective_chunk_size);
-        auto hist_it = extra.find("history_json");
-        if (hist_it != extra.end() && !hist_it->second.empty()) {
-            history_json = hist_it->second;
-        }
-    }
-
-    std::ostringstream alive_json;
-    alive_json << "[";
-    bool alive_first = true;
-    double latest_found_ts = 0.0;
-    double latest_alive_ts = 0.0;
-    double latest_alive_test_ts = 0.0;
-    for (auto& rec : healthy_records) {
-        if (!alive_first) alive_json << ",";
-        alive_first = false;
-        latest_found_ts = std::max(latest_found_ts, rec.first_seen);
-        latest_alive_ts = std::max(latest_alive_ts, rec.last_alive_time);
-        latest_alive_test_ts = std::max(latest_alive_test_ts, rec.last_tested);
-        utils::JsonBuilder item;
-        item.add("uri", rec.uri)
-            .add("latency_ms", rec.latency_ms)
-            .add("engine_used", rec.engine_used)
-            .add("first_seen", rec.first_seen)
-            .add("last_alive", rec.last_alive_time)
-            .add("last_tested", rec.last_tested)
-            .add("total_tests", rec.total_tests)
-            .add("total_passes", rec.total_passes)
-            .add("consecutive_fails", rec.consecutive_fails)
-            .add("alive", rec.alive)
-            .add("tag", rec.tag);
-        alive_json << item.build();
-    }
-    alive_json << "]";
-
-    std::ostringstream telegram_json;
-    telegram_json << "[";
-    bool telegram_first = true;
-    for (auto& rec : telegram_only_records) {
-        if (!telegram_first) telegram_json << ",";
-        telegram_first = false;
-        latest_found_ts = std::max(latest_found_ts, rec.first_seen);
-        latest_alive_ts = std::max(latest_alive_ts, rec.last_alive_time);
-        latest_alive_test_ts = std::max(latest_alive_test_ts, rec.last_tested);
-        utils::JsonBuilder item;
-        item.add("uri", rec.uri)
-            .add("latency_ms", rec.latency_ms)
-            .add("engine_used", rec.engine_used)
-            .add("first_seen", rec.first_seen)
-            .add("last_alive", rec.last_alive_time)
-            .add("last_tested", rec.last_tested)
-            .add("total_tests", rec.total_tests)
-            .add("total_passes", rec.total_passes)
-            .add("consecutive_fails", rec.consecutive_fails)
-            .add("alive", rec.alive)
-            .add("telegram_only", rec.telegram_only)
-            .add("tag", rec.tag);
-        telegram_json << item.build();
-    }
-    telegram_json << "]";
-
-    utils::JsonBuilder dbj;
-    dbj.add("total", db_total)
-       .add("alive", db_alive)
-       .add("tested_unique", db_tested)
-       .add("untested_unique", db_untested)
-       .add("stale_unique", db_stale)
-       .add("avg_latency_ms", db_avg_lat)
-       .add("total_tests", db_total_tests)
-       .add("total_passes", db_total_passes);
-
-    utils::JsonBuilder valj;
-    valj.add("last_tested", validator_last_tested)
-        .add("last_passed", validator_last_passed)
-        .add("interval_s", validator_interval_s)
-        .add("active_test_processes", validator_active_test_processes)
-        .add("max_test_processes", validator_max_test_processes)
-        .add("rate_per_s", validator_rate_per_s);
-
-    // Provisioned ports array
-    std::ostringstream ports_json;
-    ports_json << "[";
-    {
-        std::lock_guard<std::mutex> plock(provision_mutex_);
-        bool ports_first = true;
-        for (auto& slot : provisioned_ports_) {
-            if (!ports_first) ports_json << ",";
-            ports_first = false;
-            const int public_mixed_port = slot.port > 0 ? slot.port : slot.http_port;
-            utils::JsonBuilder pj;
-            pj.add("port", public_mixed_port)
-              .add("http_port", public_mixed_port)
-              .add("mixed", true)
-              .add("uri", slot.uri)
-              .add("engine_used", slot.engine_used)
-              .add("alive", slot.alive)
-              .add("tcp_alive", slot.tcp_alive)
-              .add("socks_ready", slot.socks_ready)
-              .add("http_ready", slot.http_ready)
-              .add("latency_ms", slot.latency_ms)
-              .add("last_probe_ts", slot.last_probe_ts)
-              .add("consecutive_failures", slot.consecutive_failures);
-            ports_json << pj.build();
-        }
-    }
-    ports_json << "]";
-
-    // Balancers array
-    std::ostringstream bal_json;
-    {
-        utils::JsonBuilder bm;
-        bm.add("port", config_.multiproxyPort())
-          .add("type", "main")
-          .add("running", bal_running)
-          .add("backends", bal_backends)
-          .add("healthy", bal_healthy)
-          .add("tcp_alive", bal_status.tcp_alive)
-          .add("socks_ready", bal_status.socks_ready)
-          .add("http_ready", bal_status.http_ready)
-          .add("last_probe_ts", bal_status.last_probe_ts);
-        utils::JsonBuilder bg;
-        bg.add("port", config_.geminiPort())
-          .add("type", "gemini")
-          .add("running", gem_running)
-          .add("backends", gem_backends)
-          .add("healthy", gem_healthy)
-          .add("tcp_alive", gem_status.tcp_alive)
-          .add("socks_ready", gem_status.socks_ready)
-          .add("http_ready", gem_status.http_ready)
-          .add("last_probe_ts", gem_status.last_probe_ts);
-        bal_json << "[" << bm.build() << "," << bg.build() << "]";
-    }
-
-    // Speed controls JSON
-    utils::JsonBuilder speedj;
-    {
-        std::lock_guard<std::mutex> slock(speed_mutex_);
-        speedj.add("profile", speed_profile_name_);
-    }
-    speedj.add("max_threads", speed_max_threads_.load())
-          .add("test_timeout_s", speed_test_timeout_.load())
-          .add("chunk_size", speed_chunk_size_.load())
-          .add("effective_max_concurrent", effective_max_concurrent)
-          .add("effective_timeout_s", effective_timeout_s)
-          .add("effective_batch_size", effective_batch_size)
-          .add("effective_chunk_size", effective_chunk_size);
-
-    std::ostringstream workers_json;
-    workers_json << "[";
-    bool workers_first = true;
-    for (const auto& pair : tm_status.workers) {
-        if (!workers_first) workers_json << ",";
-        workers_first = false;
-        const WorkerStatus& worker = pair.second;
-        utils::JsonBuilder wj;
-        utils::JsonBuilder extraj;
-        for (const auto& extra_pair : worker.extra) {
-            extraj.add(extra_pair.first, extra_pair.second);
-        }
-        wj.add("name", pair.first)
-          .add("state", workerStateName(worker.state))
-          .add("last_run", worker.last_run)
-          .add("last_error", worker.last_error)
-          .add("runs", worker.runs)
-          .add("errors", worker.errors)
-          .add("next_run_in", worker.next_run_in)
-          .addRaw("extra", extraj.build());
-        workers_json << wj.build();
-    }
-    workers_json << "]";
-
-    utils::JsonBuilder hardwarej;
-    hardwarej.add("cpu_count", hw.cpu_count)
-             .add("cpu_percent", hw.cpu_percent)
-             .add("ram_total_gb", hw.ram_total_gb)
-             .add("ram_used_gb", hw.ram_used_gb)
-             .add("ram_percent", hw.ram_percent)
-             .add("mode", resourceModeName(hw.mode))
-             .add("io_pool_size", hw.io_pool_size)
-             .add("cpu_pool_size", hw.cpu_pool_size)
-             .add("io_pending", task_metrics.io_pending)
-             .add("cpu_pending", task_metrics.cpu_pending)
-             .add("io_active", task_metrics.io_active)
-             .add("cpu_active", task_metrics.cpu_active)
-             .add("max_configs", hw.max_configs)
-             .add("scan_chunk", hw.scan_chunk)
-             .add("thread_count", tm_status.hardware.thread_count);
-
-    double last_download_success_ts = 0.0;
-    double last_scan_cycle_ts = 0.0;
-    std::string censorship_strategy = "none";
-    std::string censorship_network = "unknown";
-    std::string censorship_pressure = "normal";
-    bool censorship_cdn_ok = false;
-    bool censorship_google_ok = false;
-    bool censorship_telegram_ok = false;
-    auto github_worker_it = tm_status.workers.find("github_bg");
-    if (github_worker_it != tm_status.workers.end()) {
-        last_download_success_ts = parseExtraDouble(github_worker_it->second.extra, "last_success_ts", 0.0);
-    }
-    auto scanner_worker_it = tm_status.workers.find("config_scanner");
-    if (scanner_worker_it != tm_status.workers.end()) {
-        last_scan_cycle_ts = parseExtraDouble(scanner_worker_it->second.extra, "last_cycle_success_ts", 0.0);
-    }
-    auto validator_worker_it = tm_status.workers.find("validator");
-    if (validator_worker_it != tm_status.workers.end()) {
-        latest_found_ts = std::max(latest_found_ts, parseExtraDouble(validator_worker_it->second.extra, "latest_first_seen_ts", 0.0));
-        latest_alive_test_ts = std::max(latest_alive_test_ts, parseExtraDouble(validator_worker_it->second.extra, "latest_alive_test_ts", 0.0));
-    }
-    if (dpi_evasion_) {
-        auto dpi_metrics = dpi_evasion_->getMetrics();
-        censorship_strategy = dpi_metrics.strategy;
-        censorship_network = dpi_metrics.network_type;
-        censorship_pressure = dpi_metrics.pressure_level;
-        censorship_cdn_ok = dpi_metrics.cdn_reachable;
-        censorship_google_ok = dpi_metrics.google_reachable;
-        censorship_telegram_ok = dpi_metrics.telegram_reachable;
-    }
-
-    utils::JsonBuilder activityj;
-    activityj.add("last_discovery_ts", latest_found_ts)
-             .add("last_alive_confirmation_ts", latest_alive_ts)
-             .add("last_healthy_test_ts", latest_alive_test_ts)
-             .add("last_successful_download_ts", last_download_success_ts)
-             .add("last_scan_cycle_ts", last_scan_cycle_ts);
-
-    bool edge_bypass_active = false;
-    std::string edge_bypass_status = "inactive";
-    if (dpi_evasion_) {
-        edge_bypass_active = dpi_evasion_->isEdgeRouterBypassActive();
-        edge_bypass_status = dpi_evasion_->getEdgeRouterBypassStatus();
-    }
-
-    utils::JsonBuilder censorshipj;
-    censorshipj.add("strategy", censorship_strategy)
-               .add("network_type", censorship_network)
-               .add("pressure_level", censorship_pressure)
-               .add("cdn_reachable", censorship_cdn_ok)
-               .add("google_reachable", censorship_google_ok)
-               .add("telegram_reachable", censorship_telegram_ok)
-               .add("edge_router_bypass_active", edge_bypass_active)
-               .add("edge_router_bypass_status", edge_bypass_status);
-
-    utils::JsonBuilder runtimej;
-    runtimej.add("multiproxy_port", config_.multiproxyPort())
-            .add("gemini_port", config_.geminiPort())
-            .add("max_total", config_.maxTotal())
-            .add("max_workers", config_.maxWorkers())
-            .add("scan_limit", config_.scanLimit())
-            .add("sleep_seconds", config_.sleepSeconds())
-            .add("xray_path", config_.xrayPath())
-            .add("singbox_path", config_.singBoxPath())
-            .add("mihomo_path", config_.mihomoPath())
-            .add("tor_path", config_.torPath())
-            .add("telegram_enabled", config_.getBool("telegram_enabled", false))
-            .add("telegram_limit", config_.telegramLimit())
-            .add("telegram_timeout_ms", config_.getInt("telegram_timeout_ms", 12000))
-            .add("targets_count", (int)config_.telegramTargets().size())
-            .add("github_urls_count", (int)config_.githubUrls().size());
-
-    const double ts = utils::nowTimestamp();
-    const double ts_ms = ts * 1000.0;
-    utils::JsonBuilder root;
-    root.add("ts", ts)
-        .add("ts_ms", ts_ms)
-        .add("phase", phase)
-        .add("paused", paused_.load())
-        .add("uptime_s", uptime)
-        .add("balancer_backends", bal_backends)
-        .add("pending_unique", pending_unique)
-        .add("eta_seconds", eta_seconds)
-        .addRaw("db", dbj.build())
-        .addRaw("validator", valj.build())
-        .addRaw("speed", speedj.build())
-        .addRaw("hardware", hardwarej.build())
-        .addRaw("activity", activityj.build())
-        .addRaw("censorship", censorshipj.build())
-        .addRaw("runtime_config", runtimej.build())
-        .addRaw("workers", workers_json.str())
-        .addRaw("alive_configs", alive_json.str())
-        .addRaw("telegram_only_configs", telegram_json.str())
-        .addRaw("history", history_json)
-        .addRaw("provisioned_ports", ports_json.str())
-        .addRaw("balancers", bal_json.str());
-
-    // Runtime cleanup stats
-    if (cleanup_manager_) {
-        root.addRaw("runtime_cleanup", cleanup_manager_->buildStatsJson());
-    }
-
-    return root.build();
-}
-
-void HunterOrchestrator::writeStatusFile(const std::string& phase, int last_tested, int last_passed) {
-    std::string base = utils::dirName(config_.stateFile());
-    if (base.empty()) base = "runtime";
-    utils::mkdirRecursive(base);
-    std::string status_path = base + "/HUNTER_status.json";
-    utils::saveJsonFile(status_path, buildStatusJson(phase, last_tested, last_passed));
-}
-
 bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& sources, const std::string& proxy) {
     bool expected = false;
     if (!download_in_progress_.compare_exchange_strong(expected, true)) {
@@ -3908,6 +1613,7 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     } guard{download_in_progress_};
 
     std::cout << "[Download] downloadConfigsAsync started with " << sources.size() << " sources" << std::endl;
+    utils::LogRingBuffer::instance().push("[Download] Started with " + std::to_string(sources.size()) + " sources");
     
     int total_sources = static_cast<int>(sources.size());
     int downloaded_count = 0;
@@ -3950,61 +1656,6 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
         }
     }
     
-    // 4. Trusted live proxies from provisioned ports
-    std::vector<int> live_proxy_ports;
-    for (const auto& slot : getProvisionedPorts()) {
-        if (slot.alive && slot.socks_ready && slot.latency_ms > 0.0f) {  // Only use working live proxies
-            live_proxy_ports.push_back(slot.port);
-        }
-    }
-    
-    // Sort live proxies by latency (fastest first)
-    std::sort(live_proxy_ports.begin(), live_proxy_ports.end(), [this](int a, int b) {
-        const auto& ports = getProvisionedPorts();
-        const PortSlot* slot_a = nullptr;
-        const PortSlot* slot_b = nullptr;
-        
-        for (const auto& slot : ports) {
-            if (slot.port == a) slot_a = &slot;
-            if (slot.port == b) slot_b = &slot;
-        }
-        
-        if (slot_a && slot_b) {
-            return slot_a->latency_ms < slot_b->latency_ms;  // Lower latency = faster
-        }
-        return false;
-    });
-    
-    for (int port : live_proxy_ports) {
-        std::string live_proxy = "127.0.0.1:" + std::to_string(port);
-        // Avoid duplicates
-        if (std::find(proxy_chain.begin(), proxy_chain.end(), live_proxy) == proxy_chain.end()) {
-            proxy_chain.push_back(live_proxy);
-            
-            // Find the slot to get latency info
-            float latency = 0.0f;
-            for (const auto& slot : getProvisionedPorts()) {
-                if (slot.port == port) {
-                    latency = slot.latency_ms;
-                    break;
-                }
-            }
-            
-            std::cout << "[Download] Added trusted live proxy to fallback chain: " << live_proxy 
-                      << " (latency: " << latency << " ms)" << std::endl;
-        }
-    }
-    
-    // 5. Discovered healthy local proxies from balancers
-    std::vector<int> healthy_ports = orchestrator::githubProxyPorts(this);
-    for (int port : healthy_ports) {
-        std::string local_proxy = "127.0.0.1:" + std::to_string(port);
-        // Avoid duplicates
-        if (std::find(proxy_chain.begin(), proxy_chain.end(), local_proxy) == proxy_chain.end()) {
-            proxy_chain.push_back(local_proxy);
-            std::cout << "[Download] Added healthy local proxy to fallback chain: " << local_proxy << std::endl;
-        }
-    }
     
     std::cout << "[Download] Proxy fallback chain has " << proxy_chain.size() << " options" << std::endl;
     
@@ -4134,10 +1785,11 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
                 
                 if (success) {
                     successful_proxy = working_proxy;
-                    std::cout << "[Download] SUCCESS: Downloaded " << content.length() 
-                              << " bytes from " << source << " via " 
+                    std::cout << "[Download] SUCCESS: Downloaded " << content.length()
+                              << " bytes from " << source << " via "
                               << (working_proxy.empty() ? "direct connection" : "proxy " + working_proxy) << std::endl;
                     emitLog("SUCCESS: Downloaded " + std::to_string(content.length()) + " bytes from " + source + " via " + (working_proxy.empty() ? "direct connection" : "proxy " + working_proxy));
+                    utils::LogRingBuffer::instance().push("[Download] SUCCESS: " + std::to_string(content.length()) + " bytes from " + source);
                     
                     // Show content preview
                     std::string preview = content.substr(0, 200);
@@ -4172,10 +1824,12 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
                 int promoted_existing = 0;
                 unique_added = config_db_->addConfigsWithPriority(valid_configs, "download", &promoted_existing);
                 downloaded_count += unique_added;
-                std::cout << "[Download] Added " << unique_added << " unique configs from " << source 
+                std::cout << "[Download] Added " << unique_added << " unique configs from " << source
                           << " (found " << configs_found << " total, refreshed "
                           << promoted_existing << " existing, invalid " << invalid_configs << ")" << std::endl;
                 emitLog("Added " + std::to_string(unique_added) + " unique configs from " + source);
+                utils::LogRingBuffer::instance().push("[Download] Added " + std::to_string(unique_added) + " configs from " + source +
+                    " (total " + std::to_string(configs_found) + ", invalid " + std::to_string(invalid_configs) + ")");
                 if (promoted_existing > 0) {
                     emitLog("Refreshed " + std::to_string(promoted_existing) + " existing configs from " + source);
                 }
@@ -4203,9 +1857,10 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
             
         } else {
             error_msg = "All connectivity options failed";
-            std::cout << "[Download] Failed to download from " << source 
+            std::cout << "[Download] Failed to download from " << source
                       << " after trying " << working_proxies.size() << " connectivity options" << std::endl;
             emitLog("FAILED: Could not download from " + source + " - all proxies failed");
+            utils::LogRingBuffer::instance().push("[Download] FAILED: " + source);
             completed_sources = static_cast<int>(i + 1);
             emitProgress(source, progress, "failed", "");
         }
@@ -4230,11 +1885,12 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     
     // Final progress
     emitProgress("", 1.0f, "finished", "");
-    std::cout << "[Download] Finished. Downloaded " << downloaded_count << " unique configs from " 
+    std::cout << "[Download] Finished. Downloaded " << downloaded_count << " unique configs from "
               << total_sources << " sources using proxy fallback chain" << std::endl;
-    std::cout << "[Download] Summary: " << downloaded_count << " configs added, " 
+    std::cout << "[Download] Summary: " << downloaded_count << " configs added, "
               << total_sources << " sources processed" << std::endl;
     emitLog("COMPLETED: Downloaded " + std::to_string(downloaded_count) + " unique configs from " + std::to_string(total_sources) + " sources");
+    utils::LogRingBuffer::instance().push("[Download] COMPLETED: " + std::to_string(downloaded_count) + " configs from " + std::to_string(total_sources) + " sources");
     return successful_sources > 0;
 }
 

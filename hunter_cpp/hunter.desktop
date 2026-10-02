@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Hunter
+GenericName=Censorship Circumvention Tool
+Comment=Discover, validate, and manage proxy configurations to bypass censorship.
+Exec=hunter
+Icon=hunter
+Terminal=false
+Categories=Network;Security;Utility;
+StartupWMClass=Hunter
+Keywords=proxy;vpn;censorship;circumvention;xray;sing-box;

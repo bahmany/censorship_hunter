@@ -73,6 +73,24 @@ public:
     static std::string generateConfig(const ParsedConfig& parsed, int socks_port, int http_port = 0);
 
     /**
+     * @brief Generate a LEAN XRay test config for liveness checking.
+     *
+     * Unlike generateConfig (which is for the live proxy and adds a
+     * balancer, 5 SOCKS5-fallback outbounds, observatory, and complex
+     * routing), this produces a minimal config:
+     *   - 1 SOCKS inbound on socks_port
+     *   - 1 proxy outbound (the config under test)
+     *   - direct + dns-out + blackhole outbounds
+     *   - simple routing (DNS → dns-out, private IPs → direct, rest → proxy)
+     *
+     * This avoids the observatory probe delay (30s interval) and the
+     * leastPing balancer potentially routing test traffic to dead
+     * SOCKS5-fallback endpoints, both of which caused live configs to
+     * be marked dead during short test windows.
+     */
+    static std::string generateTestConfig(const ParsedConfig& parsed, int socks_port);
+
+    /**
      * @brief Generate XRay balanced config with multiple outbounds (dual-protocol: SOCKS + HTTP)
      * @param configs Parsed configs with their SOCKS ports
      * @param listen_port Main SOCKS listener port

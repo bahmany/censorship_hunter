@@ -3,7 +3,9 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <wininet.h>
+#ifdef _MSC_VER
 #pragma comment(lib, "wininet.lib")
+#endif
 #endif
 
 #include <string>

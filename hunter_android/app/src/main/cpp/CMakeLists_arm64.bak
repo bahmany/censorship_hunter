@@ -1,0 +1,106 @@
+cmake_minimum_required(VERSION 3.22.1)
+project(hunter_android VERSION 2.0.0 LANGUAGES C CXX)
+
+set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+
+# Paths
+set(HUNTER_SRC_DIR /home/mohammad/Documents/projects/censorship_hunter/hunter_cpp)
+set(CROSS_PREFIX /home/mohammad/Documents/projects/censorship_hunter/cross_build/android/install)
+set(IMGUI_DIR ${HUNTER_SRC_DIR}/third_party/imgui)
+set(QR_DIR ${HUNTER_SRC_DIR}/third_party/qrcodegen)
+
+# Include directories
+include_directories(
+    ${HUNTER_SRC_DIR}/include
+    ${HUNTER_SRC_DIR}
+    ${CROSS_PREFIX}/include
+    ${IMGUI_DIR}
+    ${IMGUI_DIR}/backends
+    ${QR_DIR}
+)
+
+# ─── Hunter Core Library (same sources as desktop) ───
+set(CORE_SOURCES
+    ${HUNTER_SRC_DIR}/src/core/config.cpp
+    ${HUNTER_SRC_DIR}/src/core/models.cpp
+    ${HUNTER_SRC_DIR}/src/core/utils.cpp
+    ${HUNTER_SRC_DIR}/src/core/task_manager.cpp
+    ${HUNTER_SRC_DIR}/src/core/seed_data.cpp
+)
+set(NETWORK_SOURCES
+    ${HUNTER_SRC_DIR}/src/network/http_client.cpp
+    ${HUNTER_SRC_DIR}/src/network/uri_parser.cpp
+    ${HUNTER_SRC_DIR}/src/network/config_fetcher.cpp
+    ${HUNTER_SRC_DIR}/src/network/continuous_validator.cpp
+    ${HUNTER_SRC_DIR}/src/network/proxy_tester.cpp
+    ${HUNTER_SRC_DIR}/src/network/aggressive_harvester.cpp
+    ${HUNTER_SRC_DIR}/src/network/flexible_fetcher.cpp
+    ${HUNTER_SRC_DIR}/src/network/sys_proxy.cpp
+)
+set(PROXY_SOURCES
+    ${HUNTER_SRC_DIR}/src/proxy/xray_manager.cpp
+    ${HUNTER_SRC_DIR}/src/proxy/proxy_server_manager.cpp
+)
+set(CACHE_SOURCES
+    ${HUNTER_SRC_DIR}/src/cache/smart_cache.cpp
+)
+set(ORCHESTRATOR_SOURCES
+    ${HUNTER_SRC_DIR}/src/orchestrator/thread_manager.cpp
+    ${HUNTER_SRC_DIR}/src/orchestrator/orchestrator.cpp
+    ${HUNTER_SRC_DIR}/src/orchestrator/runtime_cleanup_manager.cpp
+)
+
+add_library(hunter_core STATIC
+    ${CORE_SOURCES}
+    ${NETWORK_SOURCES}
+    ${PROXY_SOURCES}
+    ${CACHE_SOURCES}
+    ${ORCHESTRATOR_SOURCES}
+)
+target_compile_definitions(hunter_core PUBLIC CURL_STATICLIB)
+target_link_libraries(hunter_core PUBLIC
+    ${CROSS_PREFIX}/lib/libcurl.a
+    ${CROSS_PREFIX}/lib/libz.a
+    log
+    android
+)
+
+# ─── ImGui with OpenGL ES3 backend ───
+set(IMGUI_SOURCES
+    ${IMGUI_DIR}/imgui.cpp
+    ${IMGUI_DIR}/imgui_draw.cpp
+    ${IMGUI_DIR}/imgui_tables.cpp
+    ${IMGUI_DIR}/imgui_widgets.cpp
+    ${IMGUI_DIR}/backends/imgui_impl_opengl3.cpp
+)
+set(QR_SOURCES
+    ${QR_DIR}/qrcodegen.cpp
+)
+
+# ─── JNI bridge + Android platform backend + GUI ───
+set(JNI_SOURCES
+    jni_bridge.cpp
+    imgui_impl_android_custom.cpp
+    android_app.cpp
+    ${HUNTER_SRC_DIR}/src/gui/app.cpp
+)
+
+# ─── Native shared library ───
+add_library(hunter SHARED
+    ${JNI_SOURCES}
+    ${IMGUI_SOURCES}
+    ${QR_SOURCES}
+)
+
+target_link_libraries(hunter PRIVATE
+    hunter_core
+    EGL
+    GLESv3
+    log
+    android
+)
+
+# Find Android log and app functions
+find_library(log-lib log)
+find_library(android-lib android)

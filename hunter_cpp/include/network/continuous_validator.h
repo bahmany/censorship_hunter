@@ -42,6 +42,22 @@ public:
                       bool telegram_only = false);
 
     /**
+     * @brief Update Gemini accessibility status for a config.
+     * @param uri Config URI
+     * @param gemini_status -1=unknown, 0=blocked, 1=accessible
+     */
+    void updateGeminiStatus(const std::string& uri, int gemini_status);
+
+    /**
+     * @brief Get alive configs that need a Gemini check (never checked
+     *        or checked more than gemini_interval_s ago).
+     * @param gemini_interval_s Re-check interval (default 3600 = 1 hour)
+     * @param max_count Max configs to return
+     */
+    std::vector<ConfigHealthRecord> getAliveForGeminiCheck(int gemini_interval_s = 3600,
+                                                             int max_count = 20);
+
+    /**
      * @brief Get a batch of untested or stale configs
      */
     std::vector<ConfigHealthRecord> getUntestedBatch(int batch_size = 80);
@@ -68,6 +84,17 @@ public:
      * Sorted: alive first (by latency), then dead (by last_tested desc)
      */
     std::vector<ConfigHealthRecord> getAllRecords(int max_count = 500);
+
+    /**
+     * @brief Get alive config records only (cheap — O(alive log alive)).
+     *
+     * Unlike getAllRecords, this does NOT copy/sort the entire database;
+     * it only touches alive records, which are typically a tiny fraction
+     * of the total. Sorted by latency (telegram-only entries last), then
+     * capped to max_count. Use this for live UI display instead of
+     * getAllRecords when only working configs are of interest.
+     */
+    std::vector<ConfigHealthRecord> getAliveRecords(int max_count = 500);
 
     /**
      * @brief Get the last known preferred runtime engine for a specific URI
@@ -126,6 +153,14 @@ public:
     int size() const;
 
     /**
+     * @brief Proactively evict dead/stale configs (call periodically,
+     *        not just when the DB is full). Keeps memory usage lean
+     *        when the database holds up to 1M entries.
+     * @return Number of records evicted
+     */
+    int evictDead();
+
+    /**
      * @brief Save entire database to disk (JSON lines format)
      * @param filepath Path to save file
      * @return Number of records saved
@@ -138,6 +173,45 @@ public:
      * @return Number of records loaded
      */
     int loadFromDisk(const std::string& filepath);
+
+    /**
+     * @brief Save only alive/live configs to a separate cache file.
+     *        This file survives restarts and is re-merged into the DB
+     *        on startup so live connections are never lost.
+     * @param filepath Path to live cache file
+     * @return Number of live records saved
+     */
+    int saveLiveToDisk(const std::string& filepath) const;
+
+    /**
+     * @brief Load live configs from cache and merge into DB.
+     *        Alive configs from the cache are marked alive and given
+     *        priority for revalidation. Does NOT overwrite existing records.
+     * @param filepath Path to live cache file
+     * @return Number of live records loaded
+     */
+    int loadLiveFromDisk(const std::string& filepath);
+
+    /**
+     * @brief Get alive configs that need revalidation (last tested
+     *        more than revalidate_interval_s ago). Called by the
+     *        validator to re-check live connections every 30 min.
+     * @param revalidate_interval_s Max age in seconds (default 1800 = 30 min)
+     * @param max_count Max configs to return
+     * @return Vector of alive records needing revalidation
+     */
+    std::vector<ConfigHealthRecord> getAliveForRevalidation(int revalidate_interval_s = 1800,
+                                                             int max_count = 100);
+
+    /**
+     * @brief Remove configs from the live list that have been dead for
+     *        more than dead_ttl_s seconds. These are configs that were
+     *        once alive but have been continuously failing for 3 days.
+     *        They are evicted from the DB entirely.
+     * @param dead_ttl_s TTL in seconds (default 259200 = 3 days)
+     * @return Number of records removed
+     */
+    int removeDeadLive(int dead_ttl_s = 259200);
 
 private:
     int max_size_;
@@ -189,6 +263,7 @@ private:
     int max_concurrent_;
     std::atomic<int> total_tested_{0};
     std::atomic<int> total_passed_{0};
+    std::atomic<int> batch_port_offset_{0};  // rotates base port to avoid conflicts
 
     bool quickCheck(const std::string& uri);
     bool pingTestWithXray(const std::string& uri);

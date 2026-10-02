@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+#include <memory>
 #include <string>
 #include <vector>
 #include <set>
@@ -43,25 +45,40 @@ public:
     HarvestStats getStats() const;
 
 private:
-    HttpClient http_;
-    std::vector<int> proxy_ports_;
-    std::vector<int> alive_ports_;
-    int port_idx_ = 0;
-    bool direct_works_ = false;
-    bool direct_checked_ = false;
-    HarvestStats stats_;
-    mutable std::mutex mutex_;
-
     struct Source {
         std::string url;
         std::string tag;
     };
 
+    /**
+     * @brief Per-harvest state shared with the in-flight fetch tasks.
+     *
+     * Held by shared_ptr and captured *by value* into every task submitted to
+     * the IO pool. harvest() gives up on stragglers once the deadline passes,
+     * so those tasks can still be running after harvest() returns and after
+     * the AggressiveHarvester itself is destroyed (HarvesterWorker::execute()
+     * builds one on the stack). Keeping their state here — instead of in
+     * AggressiveHarvester members — is what stops that from being a
+     * use-after-free.
+     */
+    struct Context {
+        HttpClient http;
+        std::vector<int> alive_ports;
+        std::atomic<int> port_idx{0};
+        std::atomic<bool> direct_works{false};
+        std::atomic<bool> cancelled{false};
+    };
+
+    std::vector<int> proxy_ports_;
+    HarvestStats stats_;
+    mutable std::mutex mutex_;
+
     static std::vector<Source> allSources();
-    std::optional<int> nextProxyPort();
-    void probeAlivePorts();
-    bool checkDirectAccess();
-    std::set<std::string> fetchOneSource(const Source& src);
+    static std::vector<int> probeAlivePorts(const std::vector<int>& ports);
+    static bool checkDirectAccess(HttpClient& http);
+    static std::optional<int> nextProxyPort(Context& ctx);
+    static std::set<std::string> fetchOneSource(const std::shared_ptr<Context>& ctx,
+                                                const Source& src);
 };
 
 } // namespace network

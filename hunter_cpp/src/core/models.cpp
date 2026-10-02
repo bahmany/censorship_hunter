@@ -39,6 +39,7 @@ int getEnvIntClamped(const char* name, int fallback, int min_value, int max_valu
 HardwareSnapshot HardwareSnapshot::detect() {
     HardwareSnapshot snap;
     snap.cpu_count = utils::getCpuCount();
+    snap.cpu_percent = utils::getCpuPercent();
     snap.ram_percent = utils::getMemoryPercent();
 
 #ifdef _WIN32
@@ -47,65 +48,80 @@ HardwareSnapshot HardwareSnapshot::detect() {
     if (GlobalMemoryStatusEx(&ms)) {
         snap.ram_total_gb = (float)ms.ullTotalPhys / (1024.0f * 1024.0f * 1024.0f);
         snap.ram_used_gb = snap.ram_total_gb * (snap.ram_percent / 100.0f);
+        snap.ram_free_gb = snap.ram_total_gb - snap.ram_used_gb;
     }
 #else
     struct sysinfo si;
     if (sysinfo(&si) == 0) {
         snap.ram_total_gb = (float)(si.totalram * si.mem_unit) / (1024.0f * 1024.0f * 1024.0f);
         snap.ram_used_gb = snap.ram_total_gb - (float)(si.freeram * si.mem_unit) / (1024.0f * 1024.0f * 1024.0f);
+        snap.ram_free_gb = snap.ram_total_gb - snap.ram_used_gb;
     }
 #endif
 
-    int base = std::max(4, snap.cpu_count);
+    // ─── Budget: use only 20% of FREE resources ───
+    // This prevents the app from starving the system when RAM/CPU is scarce.
+    // Free RAM = total - used. Free CPU = cores * (1 - cpu_usage%).
+    snap.ram_budget_gb = snap.ram_free_gb * 0.20f;
+    snap.cpu_budget_cores = (float)snap.cpu_count * (1.0f - snap.cpu_percent / 100.0f) * 0.20f;
 
-    if (snap.ram_percent >= 95) {
+    // Clamp budgets to sane minimums
+    if (snap.ram_budget_gb < 0.1f) snap.ram_budget_gb = 0.1f;
+    if (snap.cpu_budget_cores < 1.0f) snap.cpu_budget_cores = 1.0f;
+
+    // ─── Resource tiers based on RAM budget (20% of free) ───
+    // Each ConfigHealthRecord uses ~450 bytes, so:
+    //   0.5 GB budget → ~1M configs max in memory
+    //   1.0 GB budget → ~2M configs max in memory
+    //   2.0 GB budget → ~4M configs max in memory
+    // We cap at 10000 per-cycle to avoid overwhelming the test pipeline.
+
+    if (snap.ram_budget_gb < 0.25f) {
         snap.mode = ResourceMode::ULTRA_MINIMAL;
-        // Severe pressure: aggressively reduce parallelism to limit thrashing.
-        snap.io_pool_size = std::min(14, std::max(8, base / 2));
-        snap.cpu_pool_size = 2;
-        snap.max_configs = 100;
-        snap.scan_chunk = 24;
-    } else if (snap.ram_percent >= 90) {
+        snap.io_pool_size = std::min(8, std::max(4, (int)snap.cpu_budget_cores));
+        snap.cpu_pool_size = 1;
+        snap.max_configs = 200;
+        snap.scan_chunk = 16;
+    } else if (snap.ram_budget_gb < 0.5f) {
         snap.mode = ResourceMode::MINIMAL;
-        // High pressure: keep throughput but avoid spawning too many workers.
-        snap.io_pool_size = std::min(20, std::max(10, base));
+        snap.io_pool_size = std::min(12, std::max(6, (int)snap.cpu_budget_cores));
         snap.cpu_pool_size = 2;
-        snap.max_configs = 180;
-        snap.scan_chunk = 36;
-    } else if (snap.ram_percent >= 85) {
+        snap.max_configs = 500;
+        snap.scan_chunk = 24;
+    } else if (snap.ram_budget_gb < 1.0f) {
         snap.mode = ResourceMode::REDUCED;
-        snap.io_pool_size = std::max(10, base + 2);
-        snap.cpu_pool_size = std::max(2, base / 2);
-        snap.max_configs = 250;
-        snap.scan_chunk = 40;
-    } else if (snap.ram_percent >= 80) {
+        snap.io_pool_size = std::min(20, std::max(8, (int)snap.cpu_budget_cores));
+        snap.cpu_pool_size = std::max(2, (int)(snap.cpu_budget_cores / 2));
+        snap.max_configs = 1000;
+        snap.scan_chunk = 30;
+    } else if (snap.ram_budget_gb < 2.0f) {
         snap.mode = ResourceMode::CONSERVATIVE;
-        snap.io_pool_size = std::min(48, std::max(18, base * 2));
-        snap.cpu_pool_size = std::max(2, base / 2);
-        snap.max_configs = 400;
-        snap.scan_chunk = 50;
-    } else if (snap.ram_percent >= 70) {
+        snap.io_pool_size = std::min(32, std::max(12, (int)snap.cpu_budget_cores));
+        snap.cpu_pool_size = std::max(2, (int)(snap.cpu_budget_cores / 2));
+        snap.max_configs = 2000;
+        snap.scan_chunk = 40;
+    } else if (snap.ram_budget_gb < 4.0f) {
         snap.mode = ResourceMode::SCALED;
-        snap.io_pool_size = std::min(80, std::max(24, base * 3));
-        snap.cpu_pool_size = std::max(3, base / 2);
-        snap.max_configs = 600;
+        snap.io_pool_size = std::min(48, std::max(16, (int)snap.cpu_budget_cores));
+        snap.cpu_pool_size = std::max(3, (int)(snap.cpu_budget_cores / 2));
+        snap.max_configs = 4000;
         snap.scan_chunk = 50;
-    } else if (snap.ram_percent >= 60) {
+    } else if (snap.ram_budget_gb < 8.0f) {
         snap.mode = ResourceMode::MODERATE;
-        snap.io_pool_size = std::min(96, std::max(32, base * 4));
-        snap.cpu_pool_size = std::max(4, base);
-        snap.max_configs = 800;
+        snap.io_pool_size = std::min(64, std::max(24, (int)snap.cpu_budget_cores));
+        snap.cpu_pool_size = std::max(4, (int)snap.cpu_budget_cores);
+        snap.max_configs = 6000;
         snap.scan_chunk = 50;
     } else {
         snap.mode = ResourceMode::NORMAL;
-        snap.io_pool_size = std::min(128, std::max(40, base * 5));
-        snap.cpu_pool_size = std::max(4, base);
-        snap.max_configs = 1000;
+        snap.io_pool_size = std::min(128, std::max(32, (int)snap.cpu_budget_cores));
+        snap.cpu_pool_size = std::max(4, (int)snap.cpu_budget_cores);
+        snap.max_configs = 10000;
         snap.scan_chunk = 50;
     }
 
     snap.io_pool_size = getEnvIntClamped("HUNTER_IO_POOL_SIZE", snap.io_pool_size, 4, 128);
-    snap.cpu_pool_size = getEnvIntClamped("HUNTER_CPU_POOL_SIZE", snap.cpu_pool_size, 2, 64);
+    snap.cpu_pool_size = getEnvIntClamped("HUNTER_CPU_POOL_SIZE", snap.cpu_pool_size, 1, 64);
 
     return snap;
 }
@@ -190,9 +206,14 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
     
     std::string stream = "{\"network\":\"" + net + "\"";
     if (sec == "tls") {
+        // NOTE: Xray 26.x removed "allowInsecure" — it now causes a fatal
+        // config error. We omit it entirely; xray will validate certs by
+        // default. For testing free proxies with self-signed/expired certs,
+        // this means some TLS configs that would have worked with
+        // allowInsecure=true will now fail — but that's better than ALL
+        // TLS configs failing due to the config parse error.
         stream += ",\"security\":\"tls\",\"tlsSettings\":{\"serverName\":\"" +
                   (sni.empty() ? address : sni) + "\""
-                  ",\"allowInsecure\":true"
                   + (fingerprint.empty() ? "" : ",\"fingerprint\":\"" + fingerprint + "\"")
                   + (net == "h2" ? ",\"alpn\":[\"h2\",\"http/1.1\"]" : "")
                   + "}";

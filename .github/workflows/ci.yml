@@ -1,0 +1,40 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  linux-build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential cmake ninja-build \
+            libcurl4-openssl-dev libz-dev \
+            libglfw3-dev libgl1-mesa-dev \
+            pkg-config
+
+      - name: Configure (CMake)
+        working-directory: hunter_cpp
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_STANDARD=17
+
+      - name: Build
+        working-directory: hunter_cpp
+        run: cmake --build build -j $(nproc)
+
+      - name: Run tests
+        working-directory: hunter_cpp
+        run: |
+          if [ -f build/hunter_tests ]; then
+            ./build/hunter_tests
+          fi

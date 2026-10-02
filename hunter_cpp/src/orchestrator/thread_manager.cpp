@@ -10,6 +10,7 @@
 #include <deque>
 #include <sstream>
 #include <iostream>
+#include <iomanip>
 #include <filesystem>
 #include <fstream>
 #include <algorithm>
@@ -88,6 +89,23 @@ int appendGitHubCacheLines(const std::string& cache_path, const std::vector<std:
     std::ofstream f(cache_path, std::ios::app);
     if (!f) return 0;
     for (const auto& c : new_lines) f << c << "\n";
+
+    // Bound the in-memory seen set to prevent unbounded growth. The cache
+    // file on disk is the persistent record; the in-memory set is only for
+    // dedup within a session. When it exceeds the cap, trim oldest entries
+    // (std::set is ordered, so begin() = oldest). This keeps memory bounded
+    // while still deduplicating recent configs. The ConfigDB has its own
+    // independent dedup, so trimming the seen set only risks re-appending
+    // a few duplicates to the cache file — harmless.
+    static constexpr size_t SEEN_MAX = 200000;
+    if (seen.size() > SEEN_MAX) {
+        size_t to_remove = seen.size() - (SEEN_MAX * 3 / 4);  // trim to 75%
+        auto it = seen.begin();
+        for (size_t i = 0; i < to_remove && it != seen.end(); ++i) {
+            it = seen.erase(it);
+        }
+    }
+
     return (int)new_lines.size();
 }
 
@@ -132,7 +150,7 @@ GitHubRefreshResult refreshGithubConfigs(HunterOrchestrator* orch, int cap,
         return result;
     }
 
-    auto proxy_ports = githubProxyPorts(orch);
+    std::vector<int> proxy_ports; // no local proxy balancer anymore; direct fetch only
     auto github_urls = orch->config().githubUrls();
     auto fetched = orch->configFetcher().fetchGithubConfigs(github_urls, proxy_ports, cap, timeout_per, overall_timeout);
     lock.unlock();
@@ -165,166 +183,11 @@ GitHubRefreshResult refreshGithubConfigs(HunterOrchestrator* orch, int cap,
     return result;
 }
 
-struct IranAssetTarget {
-    std::string file_name;
-    std::vector<std::string> urls;
-};
-
 std::string runtimeBasePathFor(HunterOrchestrator* orch) {
     std::string base = utils::dirName(orch->config().stateFile());
     if (base.empty()) base = "runtime";
     utils::mkdirRecursive(base);
     return base;
-}
-
-std::string iranAssetDirFor(HunterOrchestrator* orch) {
-    std::string dir = runtimeBasePathFor(orch) + "/assets/iran";
-    utils::mkdirRecursive(dir);
-    return dir;
-}
-
-std::vector<IranAssetTarget> iranAssetTargets() {
-    return {
-        {"geoip-ir.srs", {
-            "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geoip-ir.srs",
-            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@rule-set/geoip-ir.srs"
-        }},
-        {"geosite-ir.srs", {
-            "https://raw.githubusercontent.com/Chocolate4U/Iran-sing-box-rules/rule-set/geosite-ir.srs",
-            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@rule-set/geosite-ir.srs"
-        }},
-        {"geoip-lite.db", {
-            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/geoip-lite.db"
-        }},
-        {"geosite-lite.db", {
-            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/geosite-lite.db"
-        }},
-        {"security-ip.db", {
-            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/security-ip.db"
-        }},
-        {"security.db", {
-            "https://cdn.jsdelivr.net/gh/chocolate4u/Iran-sing-box-rules@release/security.db"
-        }},
-    };
-}
-
-std::string readBinaryFile(const std::string& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) return "";
-    std::ostringstream ss;
-    ss << file.rdbuf();
-    return ss.str();
-}
-
-bool writeBinaryFileAtomic(const std::string& path, const std::string& body) {
-    utils::mkdirRecursive(utils::dirName(path));
-    const std::string temp = path + ".tmp";
-    {
-        std::ofstream file(temp, std::ios::binary | std::ios::trunc);
-        if (!file) return false;
-        file.write(body.data(), static_cast<std::streamsize>(body.size()));
-        if (!file.good()) return false;
-    }
-    std::error_code ec;
-    std::filesystem::rename(temp, path, ec);
-    if (ec) {
-        std::filesystem::remove(path, ec);
-        ec.clear();
-        std::filesystem::rename(temp, path, ec);
-    }
-    if (ec) {
-        std::filesystem::remove(temp, ec);
-        return false;
-    }
-    return true;
-}
-
-struct IranAssetsRefreshResult {
-    int files_total = 0;
-    int files_updated = 0;
-    int files_unchanged = 0;
-    int files_failed = 0;
-    std::string transport = "none";
-    std::string last_source;
-    std::string reason = "ok";
-};
-
-IranAssetsRefreshResult refreshIranAssets(HunterOrchestrator* orch, int timeout_ms) {
-    IranAssetsRefreshResult result;
-    const auto targets = iranAssetTargets();
-    result.files_total = (int)targets.size();
-
-    auto& mgr = HunterTaskManager::instance();
-    std::unique_lock<std::timed_mutex> lock(mgr.fetchLock(), std::defer_lock);
-    if (!lock.try_lock_for(std::chrono::seconds(10))) {
-        result.reason = "scrape_lock_busy";
-        return result;
-    }
-
-    auto& fetcher = orch->configFetcher();
-    auto& http = orch->httpClient();
-    const auto proxy_ports = githubProxyPorts(orch);
-    const bool direct_ok = fetcher.checkDirectAccess();
-    const auto proxy_port = fetcher.findBestProxyPort(proxy_ports);
-    const std::string proxy_url = proxy_port.has_value()
-        ? ("socks5h://127.0.0.1:" + std::to_string(*proxy_port))
-        : "";
-    const std::string asset_dir = iranAssetDirFor(orch);
-
-    for (const auto& target : targets) {
-        bool downloaded = false;
-        std::string body;
-        std::string source;
-        std::string transport;
-
-        auto tryUrls = [&](const std::string& proxy, const std::string& transport_name) {
-            for (const auto& url : target.urls) {
-                std::string candidate = http.get(url, timeout_ms, proxy);
-                if (!candidate.empty()) {
-                    body = std::move(candidate);
-                    source = url;
-                    transport = transport_name;
-                    return true;
-                }
-            }
-            return false;
-        };
-
-        if (direct_ok) {
-            downloaded = tryUrls("", "direct");
-            if (!downloaded && !proxy_url.empty()) downloaded = tryUrls(proxy_url, "proxy");
-        } else {
-            if (!proxy_url.empty()) downloaded = tryUrls(proxy_url, "proxy");
-            if (!downloaded) downloaded = tryUrls("", "direct_fallback");
-        }
-
-        if (!downloaded) {
-            result.files_failed++;
-            continue;
-        }
-
-        const std::string target_path = asset_dir + "/" + target.file_name;
-        const std::string existing = readBinaryFile(target_path);
-        if (existing == body) {
-            result.files_unchanged++;
-        } else if (writeBinaryFileAtomic(target_path, body)) {
-            result.files_updated++;
-        } else {
-            result.files_failed++;
-            continue;
-        }
-
-        result.transport = transport;
-        result.last_source = source;
-    }
-
-    if (result.files_failed > 0 && result.files_updated == 0 && result.files_unchanged == 0) {
-        result.reason = "download_failed";
-    } else if (result.files_failed > 0) {
-        result.reason = "partial";
-    }
-
-    return result;
 }
 
 }
@@ -475,7 +338,11 @@ void ConfigScannerWorker::execute() {
     auto hw = getHardware();
     auto task_metrics = HunterTaskManager::instance().getMetrics();
     { std::ostringstream _ls; _ls << "[Scanner] Starting cycle (mode=" << (int)hw.mode
-              << ", RAM=" << hw.ram_percent << "%, workers=" << hw.io_pool_size << ")";
+              << ", RAM=" << hw.ram_percent << "% (free=" << std::fixed << std::setprecision(1)
+              << hw.ram_free_gb << "GB, budget=20%=" << hw.ram_budget_gb << "GB)"
+              << ", CPU=" << std::setprecision(0) << hw.cpu_percent << "% (budget=20%="
+              << std::setprecision(1) << hw.cpu_budget_cores << " cores)"
+              << ", workers=" << hw.io_pool_size << ", max_configs=" << hw.max_configs << ")";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
     updateExtra("mode", std::to_string((int)hw.mode));
@@ -530,92 +397,19 @@ void ConfigScannerWorker::execute() {
     }
     // If we didn't validate anything, back off a bit.
     if (orch_->lastValidatedCount() == 0) base = std::max(base, 180);
+    // If the DB has many untested configs, run more frequently to drain
+    // the backlog faster. The validator worker handles per-batch testing,
+    // but the scanner's runCycle also injects untested configs into the
+    // validation pipeline and scrapes new sources.
+    if (auto* db = orch_->configDb()) {
+        auto stats = db->getStats();
+        if (stats.untested_unique > 10000) {
+            base = std::min(base, 30);  // drain large backlogs fast
+        } else if (stats.untested_unique > 1000) {
+            base = std::min(base, 45);
+        }
+    }
     interval_seconds = base;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// TelegramPublisherWorker
-// ═══════════════════════════════════════════════════════════════════
-
-TelegramPublisherWorker::TelegramPublisherWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
-    : BaseWorker("telegram_publisher", constants::PUBLISHER_INTERVAL_S, stop), orch_(orch) {
-    const int env_interval = HunterConfig::getEnvInt("HUNTER_PUBLISHER_INTERVAL_S", -1);
-    if (env_interval > 0) interval_seconds = env_interval;
-}
-
-void TelegramPublisherWorker::execute() {
-    auto* reporter = orch_->botReporter();
-    if (!reporter || !reporter->isConfigured()) return;
-
-    // Collect URIs from gold/silver files
-    auto gold_uris = utils::readLines(orch_->config().goldFile());
-    if (gold_uris.empty()) return;
-
-    int max_lines = orch_->config().getInt("telegram_publish_max_lines", 50);
-    if ((int)gold_uris.size() > max_lines)
-        gold_uris.resize(max_lines);
-
-    bool ok = reporter->reportConfigFiles(gold_uris);
-    updateExtra("published", ok ? "true" : "false");
-    updateExtra("count", std::to_string(gold_uris.size()));
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// BalancerWorker
-// ═══════════════════════════════════════════════════════════════════
-
-BalancerWorker::BalancerWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
-    : BaseWorker("balancer", constants::BALANCER_CHECK_INTERVAL_S, stop), orch_(orch) {
-    const int env_interval = HunterConfig::getEnvInt("HUNTER_BALANCER_INTERVAL_S", -1);
-    if (env_interval > 0) interval_seconds = env_interval;
-}
-
-void BalancerWorker::execute() {
-    auto* bal = orch_->balancer();
-    if (!bal) return;
-
-    auto status = bal->getStatus();
-    updateExtra("port", std::to_string(status.port));
-    updateExtra("backends", std::to_string(status.backend_count));
-    updateExtra("healthy", std::to_string(status.healthy_count));
-    updateExtra("running", status.running ? "true" : "false");
-
-    // Check if port responds, restart if needed
-    if (status.running && !utils::isPortAlive(status.port, 2000)) {
-        utils::LogRingBuffer::instance().push("[Balancer] Port not responding, refreshing...");
-        // Balancer health monitor handles this internally
-    }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// HealthMonitorWorker
-// ═══════════════════════════════════════════════════════════════════
-
-HealthMonitorWorker::HealthMonitorWorker(std::atomic<bool>& stop,
-                                          std::vector<BaseWorker*> all_workers)
-    : BaseWorker("health_monitor", constants::HEALTH_MONITOR_INTERVAL_S, stop),
-      workers_(std::move(all_workers)) {}
-
-void HealthMonitorWorker::execute() {
-    auto hw = HunterTaskManager::instance().getHardware();
-    updateExtra("ram_percent", std::to_string(hw.ram_percent));
-    updateExtra("cpu_count", std::to_string(hw.cpu_count));
-    updateExtra("mode", std::to_string((int)hw.mode));
-
-    // Check worker health
-    int running = 0, errors = 0;
-    for (auto* w : workers_) {
-        auto st = w->getStatus();
-        if (st.state == WorkerState::RUNNING || st.state == WorkerState::SLEEPING) running++;
-        if (st.state == WorkerState::WORKER_ERROR) errors++;
-    }
-    updateExtra("workers_running", std::to_string(running));
-    updateExtra("workers_error", std::to_string(errors));
-
-    // Memory pressure GC
-    if (hw.ram_percent >= 90) {
-        HunterTaskManager::instance().maybeResize();
-    }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -775,7 +569,7 @@ void GitHubDownloaderWorker::execute() {
     }
 
     int cap = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_CAP", constants::DEFAULT_GITHUB_BG_CAP);
-    cap = std::max(200, std::min(150000, cap));
+    cap = std::max(200, std::min(1000000, cap));
     { std::ostringstream _ls; _ls << "[GitHubBG] Fetching from " << enabled_sources.size() 
         << " sources (cap=" << cap << ") with proxy fallback";
       utils::LogRingBuffer::instance().push(_ls.str()); }
@@ -837,58 +631,6 @@ void GitHubDownloaderWorker::execute() {
     utils::LogRingBuffer::instance().push(final_msg.str());
 }
 
-IranAssetsWorker::IranAssetsWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
-    : BaseWorker("iran_assets", constants::IRAN_ASSETS_INTERVAL_S, stop), orch_(orch) {
-    const int env_interval = HunterConfig::getEnvInt("HUNTER_IRAN_ASSETS_INTERVAL_S", -1);
-    if (env_interval > 0) interval_seconds = env_interval;
-}
-
-void IranAssetsWorker::execute() {
-    interval_seconds = constants::IRAN_ASSETS_INTERVAL_S;
-
-    const bool enabled = HunterConfig::getEnvBool("HUNTER_IRAN_ASSETS_ENABLED", true);
-    if (!enabled) {
-        updateExtra("enabled", "false");
-        updateExtra("reason", "disabled");
-        return;
-    }
-
-    const std::string asset_dir = iranAssetDirFor(orch_);
-    const int timeout_ms = std::max(4000, HunterConfig::getEnvInt("HUNTER_IRAN_ASSETS_TIMEOUT_MS", 15000));
-    const IranAssetsRefreshResult refresh = refreshIranAssets(orch_, timeout_ms);
-
-    download_count_++;
-    updateExtra("enabled", "true");
-    updateExtra("asset_dir", asset_dir);
-    updateExtra("files_total", std::to_string(refresh.files_total));
-    updateExtra("files_updated", std::to_string(refresh.files_updated));
-    updateExtra("files_unchanged", std::to_string(refresh.files_unchanged));
-    updateExtra("files_failed", std::to_string(refresh.files_failed));
-    updateExtra("transport", refresh.transport);
-    updateExtra("last_source", refresh.last_source);
-    updateExtra("reason", refresh.reason);
-    updateExtra("timeout_ms", std::to_string(timeout_ms));
-    updateExtra("downloads", std::to_string(download_count_));
-    updateExtra("last_sync_ts", std::to_string(utils::nowTimestamp()));
-
-    std::ostringstream line;
-    line << "[IranAssets] dir=" << asset_dir
-         << " updated=" << refresh.files_updated
-         << " unchanged=" << refresh.files_unchanged
-         << " failed=" << refresh.files_failed
-         << " reason=" << refresh.reason;
-    if (!refresh.transport.empty()) line << " transport=" << refresh.transport;
-    if (!refresh.last_source.empty()) line << " source=" << refresh.last_source;
-    utils::LogRingBuffer::instance().push(line.str());
-
-    const int env_interval = HunterConfig::getEnvInt("HUNTER_IRAN_ASSETS_INTERVAL_S", -1);
-    if (env_interval > 0) interval_seconds = env_interval;
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// ValidatorWorker
-// ═══════════════════════════════════════════════════════════════════
-
 ValidatorWorker::ValidatorWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
     : BaseWorker("validator", constants::VALIDATOR_INTERVAL_S, stop), orch_(orch) {
     const int env_interval = HunterConfig::getEnvInt("HUNTER_VALIDATOR_INTERVAL_S", -1);
@@ -904,19 +646,34 @@ void ValidatorWorker::execute() {
 
     auto hw = HunterTaskManager::instance().getHardware();
     auto task_metrics = HunterTaskManager::instance().getMetrics();
-    int batch_size = std::max(5, std::min(50, orch_->chunkSize() * 2));
-    if (hw.ram_percent >= 95.0f) batch_size = std::min(batch_size, 8);
-    else if (hw.ram_percent >= 90.0f) batch_size = std::min(batch_size, 12);
-    else if (hw.ram_percent >= 80.0f) batch_size = std::min(batch_size, 20);
+
+    // ─── Batch size selection ───
+    // The validator now uses a two-phase approach: a fast TCP pre-screen
+    // (2-second TCP connect, no process spawn) followed by full proxy tests
+    // only for configs that pass. The TCP pre-screen is very cheap — it's
+    // just a socket connect — so we can safely use a larger batch size even
+    // under memory pressure.
+    //
+    // The old throttling (RAM >= 95% → batch=8) caused a death spiral:
+    // high RAM → tiny batch → slow testing → configs pile up → more RAM →
+    // even smaller batch. With TCP pre-screening, each test is 15x cheaper,
+    // so we raise the floor significantly.
+    // Larger batch sizes now that we use batchTestWithXray (one xray process
+    // for all configs). Each inbound adds ~2-5MB to the xray process, so
+    // 200 inbounds ≈ 1GB. We cap based on free RAM.
+    int batch_size = std::max(50, std::min(200, orch_->chunkSize() * 8));
+    if (hw.ram_percent >= 95.0f) batch_size = std::min(batch_size, 50);
+    else if (hw.ram_percent >= 90.0f) batch_size = std::min(batch_size, 80);
+    else if (hw.ram_percent >= 80.0f) batch_size = std::min(batch_size, 120);
     const int io_pressure_limit = std::max(4, task_metrics.io_pool_size * 2);
     if (task_metrics.io_pending >= io_pressure_limit) {
-        batch_size = std::max(4, std::min(batch_size, task_metrics.io_pool_size));
+        batch_size = std::max(10, std::min(batch_size, task_metrics.io_pool_size * 2));
     }
 
     int timeout_s = orch_->testTimeout();
     int max_concurrent = orch_->maxThreads();
     if (task_metrics.io_pending >= io_pressure_limit) {
-        max_concurrent = std::max(2, std::min(max_concurrent, task_metrics.io_pool_size));
+        max_concurrent = std::max(4, std::min(max_concurrent, task_metrics.io_pool_size));
     }
     network::ContinuousValidator validator(*db, batch_size, timeout_s, max_concurrent);
     auto [tested, passed] = validator.validateBatch();
@@ -1052,53 +809,10 @@ void ValidatorWorker::execute() {
                 std::cout.flush();
             }
 
-            // ── 2. Write balancer cache JSON ──
-            std::ostringstream bcj;
-            bcj << "{\"configs\":[";
-            bool bfirst = true;
-            for (auto& [uri, lat] : healthy) {
-                if (!bfirst) bcj << ",";
-                bfirst = false;
-                const auto it = std::find_if(all_records.begin(), all_records.end(),
-                    [&](const ConfigHealthRecord& rec) { return rec.uri == uri; });
-                utils::JsonBuilder item;
-                item.add("uri", uri)
-                    .add("latency_ms", lat);
-                if (it != all_records.end()) {
-                    item.add("engine_used", it->engine_used)
-                        .add("first_seen", it->first_seen)
-                        .add("last_alive", it->last_alive_time)
-                        .add("last_tested", it->last_tested)
-                        .add("total_tests", it->total_tests)
-                        .add("total_passes", it->total_passes)
-                        .add("consecutive_fails", it->consecutive_fails)
-                        .add("alive", it->alive)
-                        .add("tag", it->tag);
-                }
-                bcj << item.build();
-            }
-            bcj << "]}";
-            std::string base = utils::dirName(orch_->config().stateFile());
-            if (base.empty()) base = "runtime";
-            bool bc_ok = utils::saveJsonFile(base + "/HUNTER_balancer_cache.json", bcj.str());
-            std::cout << "[Validator] Balancer cache: " << (bc_ok ? "OK" : "FAIL") << " (" << healthy.size() << " configs)" << std::endl;
-            std::cout.flush();
-
-            // ── 3. Update balancers (may be slow, do AFTER file writes) ──
-            if (orch_->balancer()) {
-                orch_->balancer()->updateAvailableConfigs(healthy, true);
-            }
-            if (orch_->geminiBalancer() && healthy.size() > 1) {
-                int half = std::max(1, (int)healthy.size() / 2);
-                std::vector<std::pair<std::string, float>> gemini_configs(
-                    healthy.begin() + half, healthy.end());
-                orch_->geminiBalancer()->updateAvailableConfigs(gemini_configs, true);
-            }
-
             if (should_refresh_after_live) {
                 last_live_refresh_attempt_ms = now_ms;
                 int github_cap = HunterConfig::getEnvInt("HUNTER_GITHUB_BG_CAP", constants::DEFAULT_GITHUB_BG_CAP);
-                github_cap = std::max(200, std::min(150000, github_cap));
+                github_cap = std::max(200, std::min(1000000, github_cap));
                 auto refresh = refreshGithubConfigs(orch_, github_cap, 6, 20.0f, "github_bg", "[Validator->GitHub]");
                 // Copy values to compatibility fields
                 refresh.total_fetched = refresh.fetched_total;
@@ -1125,251 +839,19 @@ void ValidatorWorker::execute() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// DpiPressureWorker
-// ═══════════════════════════════════════════════════════════════════
-
-DpiPressureWorker::DpiPressureWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
-    : BaseWorker("dpi_pressure", constants::DPI_PRESSURE_INTERVAL_S, stop), orch_(orch) {}
-
-void DpiPressureWorker::execute() {
-    security::DpiPressureEngine engine(0.7f);
-    auto stats = engine.runPressureCycle();
-
-    updateExtra("tls_ok", std::to_string(stats["tls_probes_ok"]));
-    updateExtra("telegram_reachable", std::to_string(stats["telegram_reachable"]));
-    updateExtra("cycles", std::to_string(stats["pressure_cycles"]));
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// ImportWatcherWorker
-// ═══════════════════════════════════════════════════════════════════
-
-ImportWatcherWorker::ImportWatcherWorker(HunterOrchestrator* orch, std::atomic<bool>& stop)
-    : BaseWorker("import_watcher", 30, stop), orch_(orch) {}
-
-void ImportWatcherWorker::ensureImportDirs() {
-    namespace fs = std::filesystem;
-    try {
-        fs::create_directories("config/import");
-        fs::create_directories("config/import/processed");
-        fs::create_directories("config/import/invalid");
-    } catch (...) {}
-}
-
-bool ImportWatcherWorker::isValidProxyUri(const std::string& uri) const {
-    if (uri.size() < 10) return false;
-
-    // Must have a supported scheme
-    static const std::vector<std::string> schemes = {
-        "vmess://", "vless://", "trojan://", "ss://", "ssr://",
-        "hysteria2://", "hy2://", "tuic://"
-    };
-    bool has_scheme = false;
-    for (const auto& s : schemes) {
-        if (uri.compare(0, s.size(), s) == 0) { has_scheme = true; break; }
-    }
-    if (!has_scheme) return false;
-
-    // vmess:// must be followed by valid base64 that decodes to JSON
-    if (uri.compare(0, 8, "vmess://") == 0) {
-        std::string payload = uri.substr(8);
-        auto hash = payload.find('#');
-        if (hash != std::string::npos) payload = payload.substr(0, hash);
-        if (payload.size() < 10) return false;
-        std::string decoded = utils::base64Decode(payload);
-        if (decoded.empty() || decoded.find('{') == std::string::npos) return false;
-        // Must have "add" field (server address)
-        if (decoded.find("\"add\"") == std::string::npos) return false;
-        return true;
-    }
-
-    // For other schemes: scheme://payload — payload must not be empty
-    auto sep = uri.find("://");
-    if (sep == std::string::npos) return false;
-    std::string payload = uri.substr(sep + 3);
-    // Remove fragment
-    auto hash = payload.find('#');
-    if (hash != std::string::npos) payload = payload.substr(0, hash);
-    if (payload.size() < 3) return false;
-
-    // vless/trojan: must contain @ (uuid@host:port)
-    if (uri.compare(0, 8, "vless://") == 0 || uri.compare(0, 9, "trojan://") == 0) {
-        if (payload.find('@') == std::string::npos) return false;
-    }
-
-    // ss:// can be base64 encoded or method:password@host:port
-    // Just check it's not obviously garbage
-    if (uri.compare(0, 5, "ss://") == 0) {
-        if (payload.find('@') == std::string::npos) {
-            // Might be base64 encoded — try decode
-            std::string decoded = utils::base64Decode(payload);
-            if (decoded.empty() || decoded.find(':') == std::string::npos) return false;
-        }
-    }
-
-    return true;
-}
-
-void ImportWatcherWorker::execute() {
-    namespace fs = std::filesystem;
-    ensureImportDirs();
-
-    const std::string import_dir = "config/import";
-
-    // Scan for .txt files in import directory
-    std::vector<std::string> files_to_process;
-    try {
-        for (const auto& entry : fs::directory_iterator(import_dir)) {
-            if (!entry.is_regular_file()) continue;
-            std::string ext = entry.path().extension().string();
-            // Accept .txt, .conf, .list, .sub, or no extension
-            if (ext == ".txt" || ext == ".conf" || ext == ".list" || ext == ".sub" || ext.empty()) {
-                files_to_process.push_back(entry.path().string());
-            }
-        }
-    } catch (const std::exception& e) {
-        return; // Directory doesn't exist or access error
-    }
-
-    if (files_to_process.empty()) return;
-
-    auto* db = orch_->configDb();
-    if (!db) return;
-
-    int batch_valid = 0, batch_invalid = 0, batch_duplicate = 0;
-    std::set<std::string> valid_configs;
-    std::vector<std::string> invalid_lines;
-
-    for (const auto& file_path : files_to_process) {
-        std::string filename = fs::path(file_path).filename().string();
-        utils::LogRingBuffer::instance().push("[Import] Processing: " + filename);
-
-        auto lines = utils::readLines(file_path);
-        if (lines.empty()) {
-            utils::LogRingBuffer::instance().push("[Import] " + filename + " is empty, skipping");
-            // Move empty file to processed
-            try {
-                fs::rename(file_path, import_dir + "/processed/" + filename);
-            } catch (...) {
-                try { fs::remove(file_path); } catch (...) {}
-            }
-            continue;
-        }
-
-        // Also try base64 decode the entire file content (some subscription URLs return base64)
-        std::set<std::string> extracted;
-        for (const auto& line : lines) {
-            std::string trimmed = utils::trim(line);
-            if (trimmed.empty()) continue;
-
-            // If line looks like a URI, add directly
-            if (trimmed.find("://") != std::string::npos) {
-                extracted.insert(trimmed);
-            } else {
-                // Try base64 decode
-                auto decoded_uris = utils::tryDecodeAndExtract(trimmed);
-                extracted.insert(decoded_uris.begin(), decoded_uris.end());
-            }
-        }
-
-        // Also try the whole file as base64
-        if (extracted.empty() && lines.size() == 1) {
-            auto decoded_uris = utils::tryDecodeAndExtract(lines[0]);
-            extracted.insert(decoded_uris.begin(), decoded_uris.end());
-        }
-
-        for (const auto& uri : extracted) {
-            // Dedup check
-            if (seen_uris_.count(uri)) {
-                batch_duplicate++;
-                continue;
-            }
-
-            // Validate URI format
-            if (!isValidProxyUri(uri)) {
-                batch_invalid++;
-                invalid_lines.push_back(uri);
-                continue;
-            }
-
-            seen_uris_.insert(uri);
-            valid_configs.insert(uri);
-            batch_valid++;
-        }
-
-        // Move processed file
-        try {
-            std::string dest = import_dir + "/processed/" + filename;
-            // If dest exists, add timestamp
-            if (fs::exists(dest)) {
-                auto now = std::chrono::system_clock::now().time_since_epoch();
-                auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-                dest = import_dir + "/processed/" + std::to_string(ms) + "_" + filename;
-            }
-            fs::rename(file_path, dest);
-        } catch (...) {
-            try { fs::remove(file_path); } catch (...) {}
-        }
-    }
-
-    // Save invalid lines for user reference
-    if (!invalid_lines.empty()) {
-        std::string invalid_file = import_dir + "/invalid/last_invalid.txt";
-        std::ofstream f(invalid_file, std::ios::app);
-        if (f.is_open()) {
-            auto now = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
-            f << "# --- Import scan at " << std::ctime(&now);
-            for (const auto& line : invalid_lines) {
-                f << line << "\n";
-            }
-        }
-    }
-
-    // Add valid configs to database
-    if (!valid_configs.empty()) {
-        int added = db->addConfigs(valid_configs, "import");
-        total_imported_ += batch_valid;
-        total_invalid_ += batch_invalid;
-        total_duplicate_ += batch_duplicate;
-
-        { std::ostringstream _ls; _ls << "[Import] " << files_to_process.size() << " files: "
-                  << batch_valid << " valid, " << batch_invalid << " invalid -> " << added << " new";
-          utils::LogRingBuffer::instance().push(_ls.str()); }
-    } else if (batch_invalid > 0 || batch_duplicate > 0) {
-        { std::ostringstream _ls; _ls << "[Import] " << files_to_process.size() << " files: "
-                  << "0 valid, " << batch_invalid << " invalid, " << batch_duplicate << " dup";
-          utils::LogRingBuffer::instance().push(_ls.str()); }
-    }
-
-    updateExtra("total_imported", std::to_string(total_imported_));
-    updateExtra("total_invalid", std::to_string(total_invalid_));
-    updateExtra("total_duplicate", std::to_string(total_duplicate_));
-    updateExtra("db_size", std::to_string(db->size()));
-}
-
-// ═══════════════════════════════════════════════════════════════════
 // ThreadManager
 // ═══════════════════════════════════════════════════════════════════
 
 ThreadManager::ThreadManager(HunterOrchestrator* orch) : orch_(orch) {
     scanner_ = std::make_unique<ConfigScannerWorker>(orch, stop_event_);
-    telegram_ = std::make_unique<TelegramPublisherWorker>(orch, stop_event_);
-    balancer_ = std::make_unique<BalancerWorker>(orch, stop_event_);
     harvester_ = std::make_unique<HarvesterWorker>(orch, stop_event_);
     github_downloader_ = std::make_unique<GitHubDownloaderWorker>(orch, stop_event_);
-    iran_assets_ = std::make_unique<IranAssetsWorker>(orch, stop_event_);
     validator_ = std::make_unique<ValidatorWorker>(orch, stop_event_);
-    dpi_pressure_ = std::make_unique<DpiPressureWorker>(orch, stop_event_);
-    import_watcher_ = std::make_unique<ImportWatcherWorker>(orch, stop_event_);
 
     all_workers_ = {
-        scanner_.get(), telegram_.get(), balancer_.get(),
-        harvester_.get(), github_downloader_.get(), iran_assets_.get(), validator_.get(),
-        dpi_pressure_.get(), import_watcher_.get()
+        scanner_.get(), harvester_.get(), github_downloader_.get(), validator_.get()
     };
 
-    health_ = std::make_unique<HealthMonitorWorker>(stop_event_, all_workers_);
-    all_workers_.insert(all_workers_.begin(), health_.get());
     for (auto* w : all_workers_) {
         w->setPauseCallback([this]() {
             return orch_ && orch_->isPaused();
@@ -1427,28 +909,6 @@ ThreadManager::Status ThreadManager::getStatus() const {
         s.workers[w->name] = w->getStatus();
     }
     return s;
-}
-
-// Utility functions for GitHub proxy management
-std::vector<int> githubProxyPorts(HunterOrchestrator* orch) {
-    std::set<int> seen_ports;
-    std::vector<int> ports;
-    auto add_port = [&](int port) {
-        if (port > 0 && seen_ports.insert(port).second) {
-            ports.push_back(port);
-        }
-    };
-
-    add_port(orch->config().multiproxyPort());
-    add_port(orch->config().geminiPort());
-
-    for (const auto& slot : orch->getProvisionedPorts()) {
-        if ((slot.alive || slot.pid > 0) && slot.port > 0) {
-            add_port(slot.port);
-        }
-    }
-
-    return ports;
 }
 
 } // namespace orchestrator

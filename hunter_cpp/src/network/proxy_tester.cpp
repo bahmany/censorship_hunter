@@ -2,6 +2,7 @@
 #include "network/uri_parser.h"
 #include "core/utils.h"
 #include "core/win_compat.h"
+#include "core/engine_embed.h"
 #include "proxy/xray_manager.h"
 
 #include <iostream>
@@ -12,9 +13,13 @@
 #include <atomic>
 #include <mutex>
 #include <cstdlib>
+#include <cstring>
 #include <future>
 #include <sstream>
 #include <vector>
+#include <initializer_list>
+
+#include <curl/curl.h>
 
 #ifdef _WIN32
 #include <winsock2.h>
@@ -24,6 +29,10 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
 #endif
 
 // Helper: log to both stdout and ring buffer for dashboard
@@ -41,6 +50,57 @@ namespace network {
 static std::atomic<int> s_active_tests{0};
 static std::atomic<int> s_peak_tests{0};
 static std::mutex s_port_mutex;
+
+// RAII guard for s_active_tests — ensures the counter is ALWAYS decremented,
+// even if an exception is thrown or an early return is taken. Without this,
+// a single leaked increment causes a death spiral: once s_active_tests reaches
+// the max, all new tests block forever in the spin-wait loop.
+struct ActiveTestGuard {
+    ActiveTestGuard() {
+        int active = ++s_active_tests;
+        int peak = s_peak_tests.load();
+        while (active > peak && !s_peak_tests.compare_exchange_weak(peak, active)) {}
+    }
+    ~ActiveTestGuard() {
+        s_active_tests.fetch_sub(1);
+    }
+    ActiveTestGuard(const ActiveTestGuard&) = delete;
+    ActiveTestGuard& operator=(const ActiveTestGuard&) = delete;
+};
+
+// ─── Bounded parallelism for batch tests ───
+// batchTestWithXray previously spawned one std::async thread per config
+// (up to 50+ at once). Each thread runs libcurl downloads that can take
+// 5-30 seconds. Under load this creates hundreds of threads, each with
+// an 8MB stack, exhausting memory and causing the 1-hour hang. The
+// BatchSemaphore limits concurrent in-batch tests to a sane number
+// derived from hardware concurrency, preventing thread explosion.
+class BatchSemaphore {
+public:
+    explicit BatchSemaphore(int count) : count_(count) {}
+    void acquire() {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait(lock, [this] { return count_ > 0; });
+        count_--;
+    }
+    void release() {
+        std::lock_guard<std::mutex> lock(mu_);
+        count_++;
+        cv_.notify_one();
+    }
+private:
+    std::mutex mu_;
+    std::condition_variable cv_;
+    int count_;
+};
+
+struct BatchSlotGuard {
+    BatchSemaphore& sem;
+    explicit BatchSlotGuard(BatchSemaphore& s) : sem(s) { sem.acquire(); }
+    ~BatchSlotGuard() { sem.release(); }
+    BatchSlotGuard(const BatchSlotGuard&) = delete;
+    BatchSlotGuard& operator=(const BatchSlotGuard&) = delete;
+};
 
 static int getEnvIntClamped(const char* name, int fallback, int min_value, int max_value) {
     const char* raw = std::getenv(name);
@@ -62,15 +122,19 @@ static int getMaxConcurrentTests() {
         if (forced > 0) {
             max_tests = forced;
         } else {
+            // Use 20% of CPU cores for concurrent test processes.
+            // Each xray/sing-box test process is CPU-light (mostly I/O wait),
+            // but spawning too many causes RAM spikes and context-switch overhead.
             int cpus = static_cast<int>(std::thread::hardware_concurrency());
             if (cpus <= 0) cpus = 4;
-            max_tests = std::min(48, std::max(16, cpus * 2));
+            int budget = std::max(4, cpus / 5);  // 20% of cores
+            max_tests = std::min(32, std::max(4, budget));
         }
     }
     return max_tests;
 }
 
-static int getProcessHoldMs() {
+[[maybe_unused]] static int getProcessHoldMs() {
     static int hold_ms = -1;
     if (hold_ms < 0) {
         hold_ms = getEnvIntClamped("HUNTER_TEST_PROCESS_HOLD_MS", 1200, 0, 5000);
@@ -79,11 +143,18 @@ static int getProcessHoldMs() {
 }
 
 static bool useTcpPreScreen() {
+    // Default OFF: in censored environments (Iran, China, etc.), ISPs use
+    // DPI to block raw TCP connections to proxy server ports. A server
+    // that fails a raw TCP connect can still work through a proxy engine
+    // like xray, which uses TLS/obfuscation to bypass DPI. Enabling this
+    // would filter out ALL configs as "dead" in censored environments.
+    // Set HUNTER_ENABLE_TCP_PRESCREEN=1 to enable (useful in uncensored
+    // environments where most servers are genuinely offline).
     static int enabled = getEnvIntClamped("HUNTER_ENABLE_TCP_PRESCREEN", 0, 0, 1);
     return enabled == 1;
 }
 
-static bool keepFailedXrayArtifacts() {
+[[maybe_unused]] static bool keepFailedXrayArtifacts() {
     static int enabled = getEnvIntClamped("HUNTER_KEEP_FAILED_XRAY_CONFIG", 0, 0, 1);
     return enabled == 1;
 }
@@ -124,18 +195,18 @@ static std::string makeRuntimeArtifactPath(const char* prefix, int port, const c
     return oss.str();
 }
 
-static void logKeptArtifacts(const std::string& engine_name, int test_port) {
+[[maybe_unused]] static void logKeptArtifacts(const std::string& engine_name, int test_port) {
     TLOG("  [" << engine_name << ":" << test_port << "] KEEP failure artifacts enabled");
 }
 
-static void onTestStarted() {
+[[maybe_unused]] static void onTestStarted() {
     const int active = ++s_active_tests;
     int peak = s_peak_tests.load();
     while (active > peak && !s_peak_tests.compare_exchange_weak(peak, active)) {
     }
 }
 
-static void onTestFinished() {
+[[maybe_unused]] static void onTestFinished() {
     --s_active_tests;
 }
 
@@ -187,23 +258,67 @@ static ProxyTestResult chooseBestResult(const std::vector<ProxyTestResult>& resu
 }
 
 ProxyTester::ProxyTester() {
-#ifdef _WIN32
-    singbox_path_ = "bin/sing-box.exe";
-    xray_path_ = "bin/xray.exe";
-    mihomo_path_ = "bin/mihomo.exe";
-#else
-    // Try env vars first, then absolute path, then relative
+    // Priority 1: Embedded or externally-placed engines (single-file build / Android).
+    embed::ensureExtracted();
+    {
+        std::string ex = embed::xrayPath();
+        std::string es = embed::singBoxPath();
+        if (!ex.empty() && utils::fileExists(ex)) xray_path_ = ex;
+        if (!es.empty() && utils::fileExists(es)) singbox_path_ = es;
+    }
+
+    // Priority 2: env overrides (for xray/sing-box not yet set, and always for mihomo).
     const char* env_xray = std::getenv("HUNTER_XRAY_PATH");
     const char* env_singbox = std::getenv("HUNTER_SINGBOX_PATH");
     const char* env_mihomo = std::getenv("HUNTER_MIHOMO_PATH");
-    xray_path_ = env_xray ? env_xray : "bin/xray";
-    singbox_path_ = env_singbox ? env_singbox : "bin/sing-box";
-    mihomo_path_ = env_mihomo ? env_mihomo : "bin/mihomo";
-    // If relative path doesn't exist, try /app/bin/ prefix (Docker CWD is /app/hunter_cpp)
-    if (!utils::fileExists(xray_path_) && utils::fileExists("/app/bin/xray")) xray_path_ = "/app/bin/xray";
-    if (!utils::fileExists(singbox_path_) && utils::fileExists("/app/bin/sing-box")) singbox_path_ = "/app/bin/sing-box";
-    if (!utils::fileExists(mihomo_path_) && utils::fileExists("/app/bin/mihomo")) mihomo_path_ = "/app/bin/mihomo";
+    if (xray_path_.empty() && env_xray && *env_xray && utils::fileExists(env_xray))
+        xray_path_ = env_xray;
+    if (singbox_path_.empty() && env_singbox && *env_singbox && utils::fileExists(env_singbox))
+        singbox_path_ = env_singbox;
+
+    // Priority 3: classic bin/ lookup for anything not yet resolved.
+    auto resolvePath = [](const char* env_val,
+                          std::initializer_list<const char*> candidates) -> std::string {
+        if (env_val && *env_val && utils::fileExists(env_val)) return env_val;
+        for (const char* c : candidates) {
+            if (utils::fileExists(c)) return c;
+        }
+        return candidates.begin()[0];
+    };
+
+#ifdef _WIN32
+    if (xray_path_.empty()) {
+        xray_path_ = "bin/xray.exe";
+        if (!utils::fileExists(xray_path_) && utils::fileExists("xray.exe")) xray_path_ = "xray.exe";
+    }
+    if (singbox_path_.empty()) {
+        singbox_path_ = "bin/sing-box.exe";
+        if (!utils::fileExists(singbox_path_) && utils::fileExists("sing-box.exe")) singbox_path_ = "sing-box.exe";
+    }
+    mihomo_path_ = resolvePath(env_mihomo, {"bin/mihomo.exe", "mihomo.exe", "./mihomo.exe"});
+#else
+    if (xray_path_.empty())
+        xray_path_    = resolvePath(env_xray,    {"bin/xray",    "xray",    "./xray",    "/app/bin/xray"});
+    if (singbox_path_.empty())
+        singbox_path_ = resolvePath(env_singbox, {"bin/sing-box", "sing-box", "./sing-box", "/app/bin/sing-box"});
+    mihomo_path_  = resolvePath(env_mihomo,  {"bin/mihomo",   "mihomo",   "./mihomo",   "/app/bin/mihomo"});
 #endif
+
+    // Log resolved engine paths once per process (ProxyTester may be
+    // constructed multiple times as a local variable in validator/bench).
+    {
+        static std::once_flag once;
+        std::call_once(once, [this]() {
+            std::ostringstream ss;
+            ss << "[ProxyTester] Engine paths: xray=" << xray_path_
+               << "(" << (utils::fileExists(xray_path_) ? "OK" : "MISSING") << ")"
+               << " sing-box=" << singbox_path_
+               << "(" << (utils::fileExists(singbox_path_) ? "OK" : "MISSING") << ")"
+               << " mihomo=" << mihomo_path_
+               << "(" << (utils::fileExists(mihomo_path_) ? "OK" : "MISSING") << ")";
+            utils::LogRingBuffer::instance().push(ss.str());
+        });
+    }
 }
 
 ProxyTester::~ProxyTester() {}
@@ -223,7 +338,9 @@ int ProxyTester::maxConcurrentTestCount() {
 int ProxyTester::getFreePort() {
     std::lock_guard<std::mutex> lock(s_port_mutex);
     // Sequential scanning from a rotating base (v2rayN pattern)
-    // Avoids random collisions and finds free ports faster
+    // Avoids random collisions and finds free ports faster.
+    // Uses isPortFree (actual bind) instead of isPortAlive (connect)
+    // to detect ports in TIME_WAIT and avoid "address already in use" errors.
     static std::atomic<int> s_next_port{20000};
     int start = s_next_port.load();
     if (start >= 30000) start = 20000;
@@ -231,7 +348,7 @@ int ProxyTester::getFreePort() {
     for (int i = 0; i < 500; i++) {
         int port = start + i;
         if (port >= 30000) port -= 10000; // wrap around
-        if (!utils::isPortAlive(port, 50)) {
+        if (utils::isPortFree(port)) {
             s_next_port.store(port + 1);
             return port;
         }
@@ -246,17 +363,22 @@ std::string ProxyTester::generateXrayConfig(const std::string& config_uri, int s
         return "";
     }
     ParsedConfig config = parsed_opt.value();
-    return proxy::XRayManager::generateConfig(config, socks_port);
+    // Use the lean test config (no balancer/SOCKS5-fallback/observatory)
+    // — see XRayManager::generateTestConfig docs for why.
+    return proxy::XRayManager::generateTestConfig(config, socks_port);
 }
 
 // Multi-tier test URLs for Iranian censorship resilience
-// Using IP-based URLs where possible to avoid DNS poisoning
+// NOTE: 1.1.1.1/generate_204 was removed — Cloudflare changed that endpoint
+// and it now returns HTTP 404, which caused every config to waste 2+ seconds
+// on a guaranteed-fail probe before reaching the working URLs below.
 static const char* TEST_URLS[] = {
-    "https://1.1.1.1/generate_204",        // Cloudflare IP - no DNS needed
-    "http://1.1.1.1:80/generate_204",      // HTTP fallback - no TLS
-    "https://www.gstatic.com/generate_204", // Google (may be blocked)
+    "https://www.gstatic.com/generate_204",        // Google connectivity check (returns 204)
+    "https://cp.cloudflare.com/generate_204",      // Cloudflare portal check (returns 204)
+    "https://www.google.com/generate_204",         // Google alternate (returns 204)
+    "http://www.gstatic.com/generate_204",         // HTTP fallback (no TLS, returns 204)
 };
-static const int NUM_TEST_URLS = 3;
+static const int NUM_TEST_URLS = 4;
 
 // Telegram DC IPs for connectivity fallback test
 static const char* TELEGRAM_DCS[] = {
@@ -268,10 +390,10 @@ static const char* TELEGRAM_DOMAIN_HOSTS[] = {
     "api.telegram.org", "telegram.org", "web.telegram.org", "t.me"
 };
 static const int NUM_TELEGRAM_DOMAIN_HOSTS = 4;
-static const char* TELEGRAM_CDN_HOSTS[] = {
+[[maybe_unused]] static const char* TELEGRAM_CDN_HOSTS[] = {
     "cdn1.telegram-cdn.org", "cdn4.telegram-cdn.org", "cdn5.telegram-cdn.org"
 };
-static const int NUM_TELEGRAM_CDN_HOSTS = 3;
+[[maybe_unused]] static const int NUM_TELEGRAM_CDN_HOSTS = 3;
 static const char* TELEGRAM_JS_URLS[] = {
     "https://telegram.org/js/telegram-widget.js?22"
 };
@@ -309,21 +431,33 @@ struct TelegramReachabilitySummary {
     }
 };
 
-#ifdef _WIN32
-static bool sendSocketBytes(SOCKET fd, const unsigned char* data, size_t size) {
+// ─── Cross-platform SOCKS5 helpers (used for Telegram reachability checks) ───
+// These work on both Windows and Linux by using utils::createTcpSocket which
+// abstracts winsock vs POSIX sockets. Previously these were Windows-only,
+// which meant Linux/Docker builds had NO Telegram fallback — configs that
+// could reach Telegram DCs but not HTTP test URLs were marked dead.
+static bool sendSocketBytes(utils::socket_t fd, const unsigned char* data, size_t size) {
     size_t sent_total = 0;
     while (sent_total < size) {
+#ifdef _WIN32
         int sent = send(fd, reinterpret_cast<const char*>(data + sent_total), static_cast<int>(size - sent_total), 0);
+#else
+        ssize_t sent = ::send(fd, reinterpret_cast<const char*>(data + sent_total), size - sent_total, MSG_NOSIGNAL);
+#endif
         if (sent <= 0) return false;
         sent_total += static_cast<size_t>(sent);
     }
     return true;
 }
 
-static bool recvSocketBytes(SOCKET fd, unsigned char* data, size_t size) {
+static bool recvSocketBytes(utils::socket_t fd, unsigned char* data, size_t size) {
     size_t received_total = 0;
     while (received_total < size) {
+#ifdef _WIN32
         int received = recv(fd, reinterpret_cast<char*>(data + received_total), static_cast<int>(size - received_total), 0);
+#else
+        ssize_t received = ::recv(fd, reinterpret_cast<char*>(data + received_total), size - received_total, 0);
+#endif
         if (received <= 0) return false;
         received_total += static_cast<size_t>(received);
     }
@@ -331,15 +465,23 @@ static bool recvSocketBytes(SOCKET fd, unsigned char* data, size_t size) {
 }
 
 static bool testSocks5Endpoint(int socks_port, const std::string& host, int remote_port, int timeout_ms = 8000) {
-    SOCKET fd = utils::createTcpSocket("127.0.0.1", socks_port, std::max(timeout_ms, 1) / 1000.0);
+    utils::socket_t fd = utils::createTcpSocket("127.0.0.1", socks_port, std::max(timeout_ms, 1) / 1000.0);
     if (fd == INVALID_SOCKET) {
-        TLOG("    [SOCKS5:" << socks_port << "] FAIL: Cannot connect to proxy");
         return false;
     }
 
+    // Set socket timeouts
+#ifdef _WIN32
     DWORD tv_ms = static_cast<DWORD>(timeout_ms > 0 ? timeout_ms : 1);
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char*>(&tv_ms), sizeof(tv_ms));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char*>(&tv_ms), sizeof(tv_ms));
+#else
+    struct timeval tv;
+    tv.tv_sec = timeout_ms / 1000;
+    tv.tv_usec = (timeout_ms % 1000) * 1000;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
 
     const unsigned char hello[] = {0x05, 0x01, 0x00};
     unsigned char resp[2] = {};
@@ -460,9 +602,8 @@ static TelegramReachabilitySummary probeTelegramReachability(int socks_port, int
 
     return summary;
 }
-#endif
 
-ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri, 
+ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
                                           const std::string& test_url, 
                                           int timeout_seconds) {
     ProxyTestResult result;
@@ -477,7 +618,8 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
             return result;
         }
     }
-    s_active_tests++;
+    // RAII guard: decrements s_active_tests on every return path, including exceptions.
+    ActiveTestGuard test_guard;
     
     // Extract short URI for logging
     std::string short_uri = summarizeConfigForLog(config_uri);
@@ -489,7 +631,6 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
         if (!utils::tcpConnect(parsed_opt->address, parsed_opt->port, 2000)) {
             result.error_message = "Server unreachable";
             TLOG("  [Pre] DEAD " << short_uri << " - TCP connection failed to " << parsed_opt->address << ":" << parsed_opt->port);
-            s_active_tests--;
             return result;
         }
         TLOG("  [Pre] TCP OK " << parsed_opt->address << ":" << parsed_opt->port);
@@ -501,7 +642,6 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     if (config_json.empty()) {
         result.error_message = "Unsupported config";
         TLOG("  [Test:" << test_port << "] SKIP " << short_uri << " - unsupported");
-        s_active_tests--;
         return result;
     }
     
@@ -509,7 +649,6 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     std::string temp_config = makeRuntimeArtifactPath("temp_xray_test", test_port, ".json");
     if (!utils::saveJsonFile(temp_config, config_json)) {
         result.error_message = "Failed to write temp config";
-        s_active_tests--;
         return result;
     }
     
@@ -549,7 +688,6 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
             std::remove(temp_config.c_str());
             std::remove(xray_out_path.c_str());
         }
-        s_active_tests--;
         return result;
     }
     if (hOutFile != INVALID_HANDLE_VALUE) CloseHandle(hOutFile);
@@ -595,7 +733,6 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
         }
         result.error_message = "XRay port not listening";
         TLOG("  [Test:" << test_port << "] FAIL " << short_uri << " - port not alive");
-        s_active_tests--;
         return result;
     }
     
@@ -650,49 +787,89 @@ ProxyTestResult ProxyTester::testWithXray(const std::string& config_uri,
     }
     
 #else
+    // Log the command being run (helps diagnose path issues)
+    TLOG("  [Test:" << test_port << "] CMD: " << xray_path_ << " run -c " << temp_config);
     pid_t pid = fork();
     if (pid == 0) {
+        // Child: redirect stderr to /dev/null to suppress xray's verbose logs
         execl(xray_path_.c_str(), "xray", "run", "-c", temp_config.c_str(), NULL);
-        exit(1);
+        // If we get here, execl failed — log to stderr (parent can capture)
+        std::cerr << "  [Test:" << test_port << "] EXEC FAILED: " << xray_path_
+                  << " — " << strerror(errno) << std::endl;
+        _exit(127);
+    } else if (pid < 0) {
+        result.error_message = "Failed to fork";
+        TLOG("  [Test:" << test_port << "] FAIL - fork failed");
+        std::remove(temp_config.c_str());
+        return result;
     } else if (pid > 0) {
         bool port_alive = false;
         for (int i = 0; i < 10; i++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             if (utils::isPortAlive(test_port, 500)) { port_alive = true; break; }
+            // Check if child died early (execl failed)
+            int status = 0;
+            pid_t w = waitpid(pid, &status, WNOHANG);
+            if (w == pid) {
+                // Child exited — if code 127, execl failed
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+                    result.error_message = "XRay binary not found: " + xray_path_;
+                    TLOG("  [Test:" << test_port << "] FAIL - xray binary not found: " << xray_path_);
+                    std::remove(temp_config.c_str());
+                    return result;
+                }
+                break;
+            }
         }
-        
+
         if (!port_alive) {
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+            utils::killAndWait(pid);
             std::remove(temp_config.c_str());
             result.error_message = "XRay port not listening";
-            TLOG("  [Test:" << test_port << "] FAIL - port not alive");
-            s_active_tests--;
+            TLOG("  [Test:" << test_port << "] FAIL - port not alive (xray may have crashed)");
             return result;
         }
-        
+
         float speed = -1.0f;
         for (int t = 0; t < NUM_TEST_URLS && speed <= 0.0f; t++) {
             const int url_timeout = t == 0 ? 10 : timeout_seconds;
             speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", test_port, url_timeout);
         }
-        
-        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+
+        // Telegram reachability fallback: if HTTP downloads fail (common in
+        // censored environments where DPI blocks HTTP even through proxies),
+        // check if the proxy can at least reach Telegram DCs via TCP. This
+        // was previously Windows-only — Linux/Docker builds had no fallback.
+        bool telegram_ok = false;
+        TelegramReachabilitySummary telegram_summary;
+        if (speed <= 0.0f) {
+            telegram_summary = probeTelegramReachability(test_port, 3500, timeout_seconds);
+            telegram_ok = telegram_summary.strongEnough();
+            TLOG("  [Test:" << test_port << "] TG-CHECK " << short_uri << " (" << telegram_summary.describe() << ")");
+        }
+
+        // Bounded kill + reap — never blocks even if xray ignores SIGTERM.
+        utils::killAndWait(pid);
         std::remove(temp_config.c_str());
-        
+
         if (speed > 0.0f) {
             result.success = true;
             result.download_speed_kbps = speed;
-            TLOG("  [Test:" << test_port << "] OK   - " << speed << " KB/s");
+            TLOG("  [Test:" << test_port << "] OK   " << short_uri << " - " << speed << " KB/s");
+        } else if (telegram_ok) {
+            result.success = true;
+            result.telegram_only = true;
+            result.download_speed_kbps = 0.1f;
+            TLOG("  [Test:" << test_port << "] TG-OK " << short_uri << " (Telegram-only, HTTP blocked by DPI; " << telegram_summary.describe() << ")");
         } else {
-            result.error_message = "Download failed";
-            TLOG("  [Test:" << test_port << "] FAIL - download failed");
+            result.error_message = telegram_summary.score() > 0 ? "Telegram reachability not strong enough" : "All connectivity tests failed";
+            TLOG("  [Test:" << test_port << "] FAIL " << short_uri << " - all tests failed");
         }
     } else {
         result.error_message = "Failed to fork";
     }
 #endif
     
-    s_active_tests--;
     return result;
 }
 
@@ -838,7 +1015,7 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
             return result;
         }
     }
-    s_active_tests++;
+    ActiveTestGuard test_guard;
     
     std::string short_uri = summarizeConfigForLog(config_uri);
     
@@ -846,7 +1023,6 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
     auto parsed_opt = UriParser::parse(config_uri);
     if (!parsed_opt.has_value() || !parsed_opt->isValid()) {
         result.error_message = "URI parse failed";
-        s_active_tests--;
         return result;
     }
     
@@ -854,14 +1030,12 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
     std::string config_json = parsed_opt->toSingBoxConfigJson(test_port);
     if (config_json.empty()) {
         result.error_message = "Unsupported config for sing-box";
-        s_active_tests--;
         return result;
     }
     
     std::string temp_config = makeRuntimeArtifactPath("temp_singbox_test", test_port, ".json");
     if (!utils::saveJsonFile(temp_config, config_json)) {
         result.error_message = "Failed to write temp config";
-        s_active_tests--;
         return result;
     }
     
@@ -887,49 +1061,80 @@ ProxyTestResult ProxyTester::testWithSingBox(const std::string& config_uri,
         TLOG("  [sing-box:" << test_port << "] RESULT: FAIL " << short_uri << " reason=" << result.error_message);
     }
 #else
+    TLOG("  [sing-box:" << test_port << "] CMD: " << singbox_path_ << " run -c " << temp_config);
     pid_t pid = fork();
     if (pid == 0) {
         execl(singbox_path_.c_str(), "sing-box", "run", "-c", temp_config.c_str(), NULL);
-        exit(1);
+        std::cerr << "  [sing-box:" << test_port << "] EXEC FAILED: " << singbox_path_
+                  << " — " << strerror(errno) << std::endl;
+        _exit(127);
+    } else if (pid < 0) {
+        result.error_message = "Failed to fork";
+        TLOG("  [sing-box:" << test_port << "] FAIL - fork failed");
+        std::remove(temp_config.c_str());
+        return result;
     } else if (pid > 0) {
         bool port_alive = false;
         for (int i = 0; i < 10; i++) {
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             if (utils::isPortAlive(test_port, 500)) { port_alive = true; break; }
+            int status = 0;
+            pid_t w = waitpid(pid, &status, WNOHANG);
+            if (w == pid) {
+                if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+                    result.error_message = "sing-box binary not found: " + singbox_path_;
+                    TLOG("  [sing-box:" << test_port << "] FAIL - binary not found: " << singbox_path_);
+                    std::remove(temp_config.c_str());
+                    return result;
+                }
+                break;
+            }
         }
-        
+
         if (!port_alive) {
-            kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+            utils::killAndWait(pid);
             std::remove(temp_config.c_str());
             result.error_message = "sing-box port not listening";
             TLOG("  [sing-box:" << test_port << "] FAIL - port not alive");
-            s_active_tests--;
             return result;
         }
-        
+
         float speed = -1.0f;
         for (int t = 0; t < NUM_TEST_URLS && speed <= 0.0f; t++) {
             const int url_timeout = t == 0 ? 10 : timeout_seconds;
             speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", test_port, url_timeout);
         }
-        
-        kill(pid, SIGTERM); waitpid(pid, NULL, 0);
+
+        // Telegram reachability fallback (same as xray path above)
+        bool telegram_ok = false;
+        TelegramReachabilitySummary telegram_summary;
+        if (speed <= 0.0f) {
+            telegram_summary = probeTelegramReachability(test_port, 3500, timeout_seconds);
+            telegram_ok = telegram_summary.strongEnough();
+        }
+
+        // Bounded kill + reap — never blocks even if sing-box ignores SIGTERM.
+        utils::killAndWait(pid);
         std::remove(temp_config.c_str());
-        
+
         if (speed > 0.0f) {
             result.success = true;
             result.download_speed_kbps = speed;
-            TLOG("  [sing-box:" << test_port << "] OK   - " << speed << " KB/s");
+            TLOG("  [sing-box:" << test_port << "] OK   " << short_uri << " - " << speed << " KB/s");
+        } else if (telegram_ok) {
+            result.success = true;
+            result.telegram_only = true;
+            result.download_speed_kbps = 0.1f;
+            TLOG("  [sing-box:" << test_port << "] TG-OK " << short_uri << " (Telegram-only)");
         } else {
-            result.error_message = "Download failed";
-            TLOG("  [sing-box:" << test_port << "] FAIL - download failed");
+            result.error_message = "All connectivity tests failed";
+            TLOG("  [sing-box:" << test_port << "] FAIL " << short_uri << " - all tests failed");
         }
     } else {
         result.error_message = "Failed to fork";
     }
 #endif
     
-    s_active_tests--;
     return result;
 }
 
@@ -948,7 +1153,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
             return result;
         }
     }
-    s_active_tests++;
+    ActiveTestGuard test_guard;
     
     std::string short_uri = summarizeConfigForLog(config_uri);
     
@@ -956,7 +1161,6 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     auto parsed_opt = UriParser::parse(config_uri);
     if (!parsed_opt.has_value() || !parsed_opt->isValid()) {
         result.error_message = "URI parse failed";
-        s_active_tests--;
         return result;
     }
     
@@ -964,7 +1168,6 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
     std::string config_yaml = parsed_opt->toMihomoConfigYaml(test_port);
     if (config_yaml.empty()) {
         result.error_message = "Unsupported config for mihomo";
-        s_active_tests--;
         return result;
     }
     
@@ -974,7 +1177,6 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
         std::ofstream ofs(temp_config);
         if (!ofs) {
             result.error_message = "Failed to write temp config";
-            s_active_tests--;
             return result;
         }
         ofs << config_yaml;
@@ -996,7 +1198,7 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
             std::this_thread::sleep_for(std::chrono::milliseconds(300));
             if (utils::isPortAlive(test_port, 500)) { port_alive = true; break; }
         }
-        
+
         if (!port_alive) {
             kill(pid, SIGTERM); waitpid(pid, NULL, 0);
             std::remove(temp_config.c_str());
@@ -1005,40 +1207,74 @@ ProxyTestResult ProxyTester::testWithMihomo(const std::string& config_uri,
             s_active_tests--;
             return result;
         }
-        
+
         float speed = -1.0f;
         for (int t = 0; t < NUM_TEST_URLS && speed <= 0.0f; t++) {
             const int url_timeout = t == 0 ? 10 : timeout_seconds;
             speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", test_port, url_timeout);
         }
-        
+
+        // Telegram reachability fallback (same as xray/sing-box paths)
+        bool telegram_ok = false;
+        TelegramReachabilitySummary telegram_summary;
+        if (speed <= 0.0f) {
+            telegram_summary = probeTelegramReachability(test_port, 3500, timeout_seconds);
+            telegram_ok = telegram_summary.strongEnough();
+        }
+
         kill(pid, SIGTERM); waitpid(pid, NULL, 0);
         std::remove(temp_config.c_str());
-        
+
         if (speed > 0.0f) {
             result.success = true;
             result.download_speed_kbps = speed;
-            TLOG("  [mihomo:" << test_port << "] OK   - " << speed << " KB/s");
+            TLOG("  [mihomo:" << test_port << "] OK   " << short_uri << " - " << speed << " KB/s");
+        } else if (telegram_ok) {
+            result.success = true;
+            result.telegram_only = true;
+            result.download_speed_kbps = 0.1f;
+            TLOG("  [mihomo:" << test_port << "] TG-OK " << short_uri << " (Telegram-only)");
         } else {
-            result.error_message = "Download failed";
-            TLOG("  [mihomo:" << test_port << "] FAIL - download failed");
+            result.error_message = "All connectivity tests failed";
+            TLOG("  [mihomo:" << test_port << "] FAIL " << short_uri << " - all tests failed");
         }
     } else {
         result.error_message = "Failed to fork";
     }
 #endif
     
-    s_active_tests--;
     return result;
 }
 
-ProxyTestResult ProxyTester::testConfig(const std::string& config_uri, 
-                                       const std::string& test_url, 
+ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
+                                       const std::string& test_url,
                                        int timeout_seconds) {
     ProxyTestResult result;
     result.uri = config_uri;
-    
+
     std::vector<ProxyTestResult> results;
+
+    // ─── Engine selection strategy ───
+    // Try xray first. If xray SUCCEEDS, return immediately.
+    // If xray FAILS because the config format is unsupported (port not
+    // listening / unsupported config), try sing-box and mihomo — they may
+    // support protocols xray doesn't (e.g. hysteria2, tuic).
+    // If xray FAILS because the server is unreachable or all connectivity
+    // tests failed (the proxy started but can't reach the internet), do
+    // NOT try other engines — the problem is the server, not the engine.
+    // Trying sing-box/mihomo on a dead server wastes 30-60 seconds per
+    // config, which is catastrophic when testing 100k+ configs.
+
+    auto isConfigFormatError = [](const ProxyTestResult& r) {
+        // These errors mean the engine couldn't handle the config format,
+        // so trying a different engine might help.
+        return r.error_message.find("Unsupported") != std::string::npos ||
+               r.error_message.find("port not listening") != std::string::npos ||
+               r.error_message.find("port not alive") != std::string::npos ||
+               r.error_message.find("URI parse failed") != std::string::npos ||
+               r.error_message.find("Failed to start") != std::string::npos ||
+               r.error_message.find("Failed to fork") != std::string::npos;
+    };
 
     // Try xray first
     if (utils::fileExists(xray_path_)) {
@@ -1047,6 +1283,11 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
             r.uri = config_uri;
             results.push_back(r);
             if (r.success) return r;
+            // If xray started but the server is dead, don't try other engines.
+            if (!isConfigFormatError(r)) {
+                result = r;
+                return result;
+            }
         } catch (const std::exception& ex) {
             ProxyTestResult fail;
             fail.uri = config_uri;
@@ -1060,13 +1301,17 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
         }
     }
 
-    // Fallback: sing-box
+    // Fallback: sing-box (only reached if xray had a config-format error or wasn't found)
     if (utils::fileExists(singbox_path_)) {
         try {
             auto r = testWithSingBox(config_uri, test_url, timeout_seconds);
             r.uri = config_uri;
             results.push_back(r);
             if (r.success) return r;
+            if (!isConfigFormatError(r)) {
+                result = r;
+                return result;
+            }
         } catch (const std::exception& ex) {
             ProxyTestResult fail;
             fail.uri = config_uri;
@@ -1080,7 +1325,7 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
         }
     }
 
-    // Fallback: mihomo
+    // Fallback: mihomo (only reached if both xray and sing-box had config-format errors)
     if (utils::fileExists(mihomo_path_)) {
         try {
             auto r = testWithMihomo(config_uri, test_url, timeout_seconds);
@@ -1102,10 +1347,19 @@ ProxyTestResult ProxyTester::testConfig(const std::string& config_uri,
 
     if (results.empty()) {
         result.error_message = "No proxy engine binaries found";
+        // Log this once per process — it usually means ALL tests will fail
+        static std::atomic<bool> warned_once{false};
+        if (!warned_once.exchange(true)) {
+            TLOG("[ProxyTester] WARNING: No engine binaries found!"
+                 << " xray=" << xray_path_ << "(" << (utils::fileExists(xray_path_) ? "ok" : "MISSING") << ")"
+                 << " sing-box=" << singbox_path_ << "(" << (utils::fileExists(singbox_path_) ? "ok" : "MISSING") << ")"
+                 << " mihomo=" << mihomo_path_ << "(" << (utils::fileExists(mihomo_path_) ? "ok" : "MISSING") << ")"
+                 << " — set HUNTER_XRAY_PATH / HUNTER_SINGBOX_PATH env vars or run from project root");
+        }
     } else {
         result = chooseBestResult(results);
     }
-    
+
     return result;
 }
 
@@ -1283,11 +1537,22 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
     int quick_timeout = std::max(3, std::min(timeout_seconds, 8));
     int dl_timeout = std::max(5, timeout_seconds);
 
+    // Bound concurrent in-batch tests to prevent thread explosion. Each
+    // std::async thread gets an 8MB stack; spawning 50+ at once for a large
+    // batch exhausts memory over time. Cap to 2x CPU cores (4-32).
+    int batch_concurrency = std::max(4, std::min(32, utils::getCpuCount() * 2));
+    const char* env_batch = std::getenv("HUNTER_BATCH_CONCURRENCY");
+    if (env_batch && *env_batch) {
+        try { batch_concurrency = std::max(1, std::min(64, std::stoi(env_batch))); } catch (...) {}
+    }
+    BatchSemaphore batch_sem(batch_concurrency);
+
     std::vector<std::future<void>> futures;
     for (auto& [orig_idx, port] : index_port_map) {
         size_t idx = orig_idx;
         int p = port;
-        futures.push_back(std::async(std::launch::async, [this, idx, p, quick_timeout, dl_timeout, &results]() {
+        futures.push_back(std::async(std::launch::async, [this, idx, p, quick_timeout, dl_timeout, &results, &batch_sem]() {
+            BatchSlotGuard slot_guard(batch_sem);
             std::string short_uri = summarizeConfigForLog(results[idx].uri);
 
             float speed = -1.0f;
@@ -1340,16 +1605,331 @@ std::vector<ProxyTestResult> ProxyTester::batchTestWithXray(
          << valid_entries.size() << " inbounds)");
 
 #else
-    // Non-Windows: fall back to individual testing
-    TLOG("[BatchTest] Batch testing not yet implemented on this platform, using individual tests");
-    for (size_t i = 0; i < config_uris.size(); i++) {
-        results[i] = testConfig(config_uris[i], TEST_URLS[0], timeout_seconds);
-        results[i].uri = config_uris[i];
+    // ─── Linux / macOS: fork + exec a single xray process ───
+    TLOG("[BatchTest] Starting single xray process (fork/exec)");
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child: redirect stdout/stderr to /dev/null to suppress xray logs
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execl(xray_path_.c_str(), "xray", "run", "-c", config_path.c_str(), (char*)NULL);
+        // execl failed
+        _exit(127);
+    } else if (pid < 0) {
+        TLOG("[BatchTest] FAIL - fork failed: " << strerror(errno));
+        std::remove(config_path.c_str());
+        for (auto& r : results) {
+            if (r.error_message.empty()) r.error_message = "Failed to fork batch xray";
+        }
+        return results;
     }
+
+    // Wait for xray to start — check if any port in the batch is alive
+    bool any_port_alive = false;
+    for (int attempt = 0; attempt < 20; attempt++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        for (auto& [idx, port] : index_port_map) {
+            if (utils::isPortAlive(port, 200)) {
+                any_port_alive = true;
+                break;
+            }
+        }
+        if (any_port_alive) break;
+        // Check if child died early (execl failed)
+        int status = 0;
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+                TLOG("[BatchTest] FAIL - xray binary not found: " << xray_path_);
+                std::remove(config_path.c_str());
+                for (auto& r : results) {
+                    if (r.error_message.empty()) r.error_message = "XRay binary not found: " + xray_path_;
+                }
+                return results;
+            }
+            break;
+        }
+    }
+
+    if (!any_port_alive) {
+        TLOG("[BatchTest] FAIL - no ports alive after startup");
+        utils::killAndWait(pid);
+        std::remove(config_path.c_str());
+        for (auto& r : results) {
+            if (r.error_message.empty()) r.error_message = "Batch xray ports not listening";
+        }
+        return results;
+    }
+
+    // Give a brief extra moment for remaining ports to come up
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+    TLOG("[BatchTest] Process alive, testing " << index_port_map.size() << " configs in parallel...");
+
+    // ═══ Test all configs in parallel through their individual SOCKS ports ═══
+    int quick_timeout = std::max(3, std::min(timeout_seconds, 8));
+    int dl_timeout = std::max(5, timeout_seconds);
+
+    // Bound concurrent in-batch tests to prevent thread explosion (see Windows path above).
+    int batch_concurrency = std::max(4, std::min(32, utils::getCpuCount() * 2));
+    const char* env_batch = std::getenv("HUNTER_BATCH_CONCURRENCY");
+    if (env_batch && *env_batch) {
+        try { batch_concurrency = std::max(1, std::min(64, std::stoi(env_batch))); } catch (...) {}
+    }
+    BatchSemaphore batch_sem(batch_concurrency);
+
+    std::vector<std::future<void>> futures;
+    for (auto& [orig_idx, port] : index_port_map) {
+        size_t idx = orig_idx;
+        int p = port;
+        futures.push_back(std::async(std::launch::async, [this, idx, p, quick_timeout, dl_timeout, &results, &batch_sem]() {
+            BatchSlotGuard slot_guard(batch_sem);
+            std::string short_uri = summarizeConfigForLog(results[idx].uri);
+
+            float speed = -1.0f;
+            for (int t = 0; t < NUM_TEST_URLS && speed <= 0.0f; t++) {
+                const int url_timeout = t == 0 ? quick_timeout : dl_timeout;
+                speed = utils::downloadSpeedViaSocks5(TEST_URLS[t], "127.0.0.1", p, url_timeout);
+            }
+
+            // Tier 3: Telegram DC connectivity
+            bool telegram_ok = false;
+            TelegramReachabilitySummary telegram_summary;
+            if (speed <= 0.0f) {
+                telegram_summary = probeTelegramReachability(p, 3500, dl_timeout);
+                telegram_ok = telegram_summary.strongEnough();
+                TLOG("  [Batch:" << p << "] TG-CHECK " << short_uri << " (" << telegram_summary.describe() << ")");
+            }
+
+            if (speed > 0.0f) {
+                results[idx].success = true;
+                results[idx].download_speed_kbps = speed;
+                TLOG("  [Batch:" << p << "] OK   " << short_uri << " - " << speed << " KB/s");
+            } else if (telegram_ok) {
+                results[idx].success = true;
+                results[idx].telegram_only = true;
+                results[idx].download_speed_kbps = 0.1f;
+                TLOG("  [Batch:" << p << "] TG-OK " << short_uri << " (Telegram-only; " << telegram_summary.describe() << ")");
+            } else {
+                results[idx].error_message = telegram_summary.score() > 0 ? "Telegram reachability not strong enough" : "All connectivity tests failed";
+                TLOG("  [Batch:" << p << "] FAIL " << short_uri);
+            }
+        }));
+    }
+
+    // Wait for all parallel tests to complete
+    for (auto& f : futures) {
+        try { f.get(); } catch (...) {}
+    }
+
+    // Kill the single xray process
+    utils::killAndWait(pid);
     std::remove(config_path.c_str());
+
+    int passed = 0;
+    for (auto& r : results) { if (r.success) passed++; }
+    TLOG("[BatchTest] Done: " << passed << "/" << config_uris.size() << " passed (1 process, "
+         << valid_entries.size() << " inbounds)");
 #endif
 
     return results;
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Gemini (Google AI) accessibility check
+// ═══════════════════════════════════════════════════════════════════
+
+// Gemini API endpoint — we check if the proxy IP can reach Google's
+// Generative Language API. Any HTTP response (even 401/403/404) means
+// the IP is NOT blocked. Connection failure/timeout = blocked.
+static constexpr const char* GEMINI_API_URL =
+    "https://generativelanguage.googleapis.com/v1beta/models";
+
+static int checkGeminiViaSocks5(int socks_port, int timeout_seconds) {
+    // Returns: 1 = accessible (got HTTP response), 0 = blocked (conn failed),
+    //         -1 = error
+    // Ensure curl is initialized (safe to call multiple times)
+    {
+        static std::once_flag curl_once;
+        std::call_once(curl_once, []() { curl_global_init(CURL_GLOBAL_ALL); });
+    }
+
+    CURL* curl = curl_easy_init();
+    if (!curl) return -1;
+
+    std::string proxy_str = "socks5h://127.0.0.1:" + std::to_string(socks_port);
+    std::string response_body;
+    long http_code = 0;
+
+    curl_easy_setopt(curl, CURLOPT_URL, GEMINI_API_URL);
+    curl_easy_setopt(curl, CURLOPT_PROXY, proxy_str.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, +[](void* contents, size_t s, size_t n, void* u) -> size_t {
+        ((std::string*)u)->append((char*)contents, s * n);
+        return s * n;
+    });
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response_body);
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)timeout_seconds);
+    curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, (long)std::min(timeout_seconds, 10));
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
+    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+    curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1L);
+    // HEAD request — we only care about reachability, not the body
+    curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+
+    CURLcode res = curl_easy_perform(curl);
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+
+    // If we got any HTTP response code (even 0 with a successful curl),
+    // the connection reached Gemini's servers → NOT blocked.
+    // CURLE_HTTP_RETURNED_ERROR (22) means we got an HTTP error response
+    // (like 401/403) — that still means the IP is NOT blocked.
+    if (res == CURLE_OK || res == CURLE_HTTP_RETURNED_ERROR) {
+        // Got an HTTP response — IP is accessible
+        return 1;
+    }
+    // CURLE_URL_MALLOCD, CURLE_COULDNT_RESOLVE_PROXY, CURLE_COULDNT_CONNECT,
+    // CURLE_OPERATION_TIMEDOUT, CURLE_SSL_CONNECT_ERROR, etc. = blocked
+    return 0;
+}
+
+int ProxyTester::checkGeminiAccess(const std::string& config_uri, int timeout_seconds) {
+    // Start the proxy engine (xray first, then sing-box fallback) and make
+    // an HTTPS request to Gemini's API endpoint through the SOCKS5 proxy.
+    // Any HTTP response (even 401/403) means the IP is NOT blocked.
+    // Connection failure/timeout means the IP IS blocked.
+
+    auto parsed_opt = UriParser::parse(config_uri);
+    if (!parsed_opt.has_value() || !parsed_opt->isValid()) return -1;
+
+    std::string short_uri = config_uri.substr(0, std::min<size_t>(config_uri.size(), 50));
+
+    // Try xray first
+    int test_port = getFreePort();
+    std::string config_json = generateXrayConfig(config_uri, test_port);
+    if (config_json.empty()) {
+        // Try sing-box config
+        config_json = parsed_opt->toSingBoxConfigJson(test_port);
+    }
+    if (config_json.empty()) return -1;
+
+    std::string temp_config = makeRuntimeArtifactPath("temp_gemini_test", test_port, ".json");
+    if (!utils::saveJsonFile(temp_config, config_json)) return -1;
+
+    // Determine which engine to use based on config content
+    bool use_singbox = (config_json.find("\"inbounds\"") != std::string::npos &&
+                       config_json.find("\"log\"") != std::string::npos &&
+                       config_json.find("\"route\"") != std::string::npos);
+    std::string engine_path = use_singbox ? singbox_path_ : xray_path_;
+    std::string engine_name = use_singbox ? "sing-box" : "xray";
+
+    if (!utils::fileExists(engine_path)) {
+        // Fallback: try the other engine
+        use_singbox = !use_singbox;
+        engine_path = use_singbox ? singbox_path_ : xray_path_;
+        engine_name = use_singbox ? "sing-box" : "xray";
+        // Regenerate config for the other engine
+        if (use_singbox) {
+            config_json = parsed_opt->toSingBoxConfigJson(test_port);
+        } else {
+            config_json = generateXrayConfig(config_uri, test_port);
+        }
+        if (config_json.empty() || !utils::saveJsonFile(temp_config, config_json)) {
+            std::remove(temp_config.c_str());
+            return -1;
+        }
+        if (!utils::fileExists(engine_path)) {
+            std::remove(temp_config.c_str());
+            return -1;
+        }
+    }
+
+#ifdef _WIN32
+    // Windows: use CreateProcess (same pattern as testWithXray)
+    STARTUPINFOA si = {};
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    std::string cmd = "\"" + engine_path + "\" run -c \"" + temp_config + "\"";
+    if (!CreateProcessA(NULL, &cmd[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi)) {
+        std::remove(temp_config.c_str());
+        return -1;
+    }
+    CloseHandle(pi.hThread);
+
+    bool port_alive = false;
+    for (int i = 0; i < 10; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        if (utils::isPortAlive(test_port, 500)) { port_alive = true; break; }
+    }
+
+    int result = -1;
+    if (port_alive) {
+        result = checkGeminiViaSocks5(test_port, timeout_seconds);
+    }
+
+    TerminateProcess(pi.hProcess, 0);
+    WaitForSingleObject(pi.hProcess, 2000);
+    CloseHandle(pi.hProcess);
+    std::remove(temp_config.c_str());
+    return result;
+#else
+    TLOG("  [Gemini:" << test_port << "] CMD: " << engine_path << " run -c " << temp_config);
+    pid_t pid = fork();
+    if (pid == 0) {
+        // Child
+        execl(engine_path.c_str(), engine_name.c_str(), "run", "-c", temp_config.c_str(), NULL);
+        std::cerr << "  [Gemini:" << test_port << "] EXEC FAILED: " << engine_path
+                  << " — " << strerror(errno) << std::endl;
+        _exit(127);
+    } else if (pid < 0) {
+        std::remove(temp_config.c_str());
+        return -1;
+    }
+
+    // Wait for proxy to start listening
+    bool port_alive = false;
+    for (int i = 0; i < 10; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(300));
+        if (utils::isPortAlive(test_port, 500)) { port_alive = true; break; }
+        int status = 0;
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid) {
+            if (WIFEXITED(status) && WEXITSTATUS(status) == 127) {
+                TLOG("  [Gemini:" << test_port << "] FAIL - " << engine_name << " binary not found");
+                std::remove(temp_config.c_str());
+                return -1;
+            }
+            break;
+        }
+    }
+
+    int result = -1;
+    if (port_alive) {
+        // Make HTTPS request to Gemini API through the SOCKS5 proxy.
+        // We use libcurl with SOCKS5 proxy. Any HTTP response (even 401/403)
+        // means the IP is NOT blocked by Gemini.
+        result = checkGeminiViaSocks5(test_port, timeout_seconds);
+        TLOG("  [Gemini:" << test_port << "] " << short_uri << " -> "
+             << (result == 1 ? "ACCESSIBLE" : result == 0 ? "BLOCKED" : "UNKNOWN"));
+    } else {
+        TLOG("  [Gemini:" << test_port << "] FAIL - port not alive");
+    }
+
+    kill(pid, SIGTERM);
+    utils::killAndWait(pid, 1000);
+    std::remove(temp_config.c_str());
+    return result;
+#endif
 }
 
 } // namespace network

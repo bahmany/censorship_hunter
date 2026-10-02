@@ -18,6 +18,7 @@ struct CleanupFolderRule {
     int max_age_hours = 24;
     std::string pattern;
     bool recursive = false;
+    int64_t max_total_bytes = 0;  // 0 = no size limit
 };
 
 struct CleanupStats {

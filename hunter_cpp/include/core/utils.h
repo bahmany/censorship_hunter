@@ -13,6 +13,7 @@
 #include <regex>
 #include <ctime>
 #include <mutex>
+#include <atomic>
 
 // ─── Platform network headers (must be before namespace) ───
 #ifdef _WIN32
@@ -194,6 +195,12 @@ std::string dirName(const std::string& path);
 bool isPortAlive(int port, int timeout_ms = 1000);
 
 /**
+ * @brief Check if a port can be bound (truly free, not just not-listening).
+ *        Uses actual socket bind() to detect TIME_WAIT and other states.
+ */
+bool isPortFree(int port);
+
+/**
  * @brief Wait until a local TCP port becomes responsive within the timeout window
  */
 bool waitForPortAlive(int port, int timeout_ms = 5000, int probe_interval_ms = 100);
@@ -250,6 +257,35 @@ float getMemoryPercent();
  * @brief Get number of CPU cores
  */
 int getCpuCount();
+
+/**
+ * @brief Get system CPU usage percentage (0-100).
+ *        Reads /proc/stat on Linux, returns 0 on other platforms.
+ */
+float getCpuPercent();
+
+/**
+ * @brief Kill a child process and reap it without blocking forever.
+ *
+ * Sends SIGTERM, polls waitpid(WNOHANG) for up to |grace_ms|, then
+ * escalates to SIGKILL and does a final bounded reap. This NEVER blocks
+ * indefinitely — if the child is truly stuck, it is SIGKILLed and any
+ * remaining zombie is reaped non-blockingly.
+ *
+ * @param pid  Child process PID (must be a direct child of this process)
+ * @param grace_ms  Grace period in ms before escalating to SIGKILL (default 2000)
+ * @return true if the process was reaped (exited or already gone), false if still alive
+ */
+bool killAndWait(int pid, int grace_ms = 2000);
+
+/**
+ * @brief Reap any dead child process without blocking (zombie cleanup).
+ *
+ * Calls waitpid(-1, ..., WNOHANG) in a loop until no more zombies are found.
+ * Safe to call from any thread; intended to be called periodically to
+ * prevent zombie accumulation when child PIDs are not tracked.
+ */
+void reapZombies();
 
 /**
  * @brief Simple JSON builder helpers

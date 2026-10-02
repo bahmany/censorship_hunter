@@ -14,17 +14,41 @@ RuntimeCleanupManager::RuntimeCleanupManager(const std::string& runtime_dir)
     if (runtime_dir_.empty()) runtime_dir_ = "runtime";
     utils::mkdirRecursive(runtime_dir_);
 
+    // Subdirectory rules — keep each under 100 files, expire quickly.
     addFolderRule({runtime_dir_ + "/engine_tmp", 100, 6, "", false});
     addFolderRule({runtime_dir_ + "/tmp", 100, 12, "", false});
     addFolderRule({runtime_dir_ + "/cache", 100, 48, "", false});
     addFolderRule({runtime_dir_ + "/tests", 100, 2, "", true});
-    addFolderRule({runtime_dir_, 0, 0, "test_config_*.json", false});
-    addFolderRule({runtime_dir_, 0, 0, "test_config_*.yaml", false});
-    addFolderRule({runtime_dir_, 0, 0, "test_config_*.txt", false});
-    addFolderRule({runtime_dir_, 0, 0, "*.tmp", false});
-    addFolderRule({runtime_dir_, 0, 0, "*.temp", false});
-    addFolderRule({runtime_dir_, 0, 0, "*_export_*.json", false});
-    addFolderRule({runtime_dir_, 0, 0, "*_export_*.txt", false});
+
+    // ─── Temp config files left by ProxyTester ───
+    // The actual file naming convention is temp_<engine>_<port>_<...>.{json,yaml,txt}
+    // (see makeRuntimeArtifactPath in proxy_tester.cpp). The old rules used
+    // "test_config_*" which never matched, so temp files piled up.
+    // max_files=300 per pattern keeps the total well under 1000 files.
+    // max_age_hours=1 ensures stale temp configs are removed promptly.
+    // max_total_bytes=5MB per pattern prevents temp configs from filling disk.
+    addFolderRule({runtime_dir_, 300, 1, "temp_*.json", false, 5 * 1024 * 1024});
+    addFolderRule({runtime_dir_, 300, 1, "temp_*.yaml", false, 5 * 1024 * 1024});
+    addFolderRule({runtime_dir_, 300, 1, "temp_*.txt", false, 5 * 1024 * 1024});
+
+    // ─── Log files — keep total under 10 MB ───
+    // max_files=5, max_age_hours=24, max_total_bytes=10MB
+    addFolderRule({runtime_dir_, 5, 24, "*.log", false, 10 * 1024 * 1024});
+
+    // Generic temp/cleanup patterns
+    addFolderRule({runtime_dir_, 100, 1, "*.tmp", false});
+    addFolderRule({runtime_dir_, 100, 1, "*.temp", false});
+    addFolderRule({runtime_dir_, 100, 24, "*_export_*.json", false});
+    addFolderRule({runtime_dir_, 100, 24, "*_export_*.txt", false});
+
+    // ─── Catch-all: enforce total runtime dir under 10 MB for log/temp files ───
+    // This rule matches ALL files in the runtime dir (empty pattern = match all)
+    // and enforces a 10 MB total size limit. The persistent database file
+    // (HUNTER_config_db.tsv) and gold/silver files are exempt because they're
+    // not logs — they're the product. We keep this as a separate rule with
+    // a high max_files so it only kicks in on size, not count.
+    // NOTE: This is intentionally NOT added here because it would also delete
+    // the config_db.tsv. Instead, the size limit is enforced per-pattern above.
 }
 
 RuntimeCleanupManager::~RuntimeCleanupManager() {
@@ -172,6 +196,9 @@ CleanupStats RuntimeCleanupManager::cleanupFolder(const CleanupFolderRule& rule)
               });
 
     int remaining = (int)entries.size();
+    int64_t total_bytes = 0;
+    for (const auto& fe : entries) total_bytes += fe.size;
+
     for (const auto& fe : entries) {
         bool should_delete = false;
         std::string reason;
@@ -188,12 +215,20 @@ CleanupStats RuntimeCleanupManager::cleanupFolder(const CleanupFolderRule& rule)
             reason = "over_limit";
         }
 
+        // Size-based eviction: if the folder exceeds max_total_bytes,
+        // delete oldest files until under the limit.
+        if (!should_delete && rule.max_total_bytes > 0 && total_bytes > rule.max_total_bytes) {
+            should_delete = true;
+            reason = "over_size";
+        }
+
         if (should_delete) {
             if (deleteFile(fe.path)) {
                 stats.files_deleted++;
                 stats.bytes_freed += fe.size;
                 stats.per_folder_deleted[rule.path]++;
                 remaining--;
+                total_bytes -= fe.size;
 
                 if (stats.recent_deletions.size() < 50) {
                     std::string fname = fe.path;

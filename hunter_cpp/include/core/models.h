@@ -32,7 +32,11 @@ struct HardwareSnapshot {
     float cpu_percent = 0.0f;
     float ram_total_gb = 8.0f;
     float ram_used_gb = 4.0f;
+    float ram_free_gb = 4.0f;
     float ram_percent = 50.0f;
+    // Budget: 20% of free RAM/CPU — keeps the app from starving the system
+    float ram_budget_gb = 0.8f;   // 20% of free RAM
+    float cpu_budget_cores = 1.0f; // 20% of free CPU cores
     ResourceMode mode = ResourceMode::NORMAL;
     int io_pool_size = 12;
     int cpu_pool_size = 4;
@@ -135,6 +139,10 @@ struct ConfigHealthRecord {
     int total_tests = 0;
     int total_passes = 0;
     bool needs_retest = true;
+    // Gemini (Google AI) accessibility through this proxy.
+    // -1 = unknown/not checked, 0 = blocked, 1 = accessible
+    int gemini_status = -1;
+    double gemini_checked_at = 0.0;  // Timestamp of last Gemini check
 };
 
 /**
