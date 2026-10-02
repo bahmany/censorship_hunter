@@ -1,153 +1,108 @@
 package com.hunter.app;
 
+import android.Manifest;
 import android.app.Activity;
-import android.content.Context;
-import android.content.res.AssetManager;
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.net.VpnService;
+import android.os.Build;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.MotionEvent;
-import android.view.View;
-import android.view.WindowManager;
+import android.widget.Button;
 import android.widget.LinearLayout;
-
-import java.io.File;
-import java.io.FileOutputStream;
-import java.io.IOException;
-import java.io.InputStream;
-import java.io.OutputStream;
 
 public class MainActivity extends Activity {
 
     private static final String TAG = "HunterMainActivity";
+    private static final int REQ_VPN = 100;
+    private static final int REQ_NOTIF = 101;
 
     static {
         System.loadLibrary("hunter");
     }
 
     private HunterView view;
+    private Button vpnButton;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         setContentView(R.layout.activity_main);
+        LinearLayout layout = findViewById(R.id.main_layout);
 
-        // Extract bundled engine binaries from APK assets to filesDir.
-        // The engines are stored as uncompressed files in assets/engines/
-        // and extracted here so the native code can execute them.
-        File engineDir = extractEngines();
-
-        // Tell the native layer where the engines are BEFORE initializing.
-        if (engineDir != null) {
-            nativeSetEngineDir(engineDir.getAbsolutePath());
-        }
-
-        // Give the native layer access to APK assets so it can read the
-        // embedded config bundle (assets/configs.zst) at startup.
-        nativeSetAssetManager(getAssets());
+        vpnButton = new Button(this);
+        vpnButton.setOnClickListener(v -> onVpnButton());
+        layout.addView(vpnButton, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
         view = new HunterView(this);
-        LinearLayout layout = findViewById(R.id.main_layout);
-        layout.addView(view);
+        layout.addView(view, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        nativeInit();
+        // Core init (absolute filesDir, engines from nativeLibraryDir) off the UI thread.
+        // Idempotent: a no-op when HunterVpnService already started the core.
+        new Thread(() -> {
+            if (!HunterNative.init(this)) Log.e(TAG, "core init failed");
+        }, "hunter-init").start();
+        refreshButton();
     }
 
-    /**
-     * Extract engine binaries (xray, sing-box) from APK assets to
-     * getFilesDir()/engines/. Skips extraction if already present and
-     * the size matches (fast re-launch).
-     *
-     * Assets are stored uncompressed in the APK (no compression flag)
-     * so they can be directly mmap'd/copied without decompression.
-     *
-     * @return The engines directory, or null on failure.
-     */
-    private File extractEngines() {
-        File enginesDir = new File(getFilesDir(), "engines");
-        if (!enginesDir.exists()) {
-            enginesDir.mkdirs();
-        }
-
-        String[] engineNames = {"xray", "sing-box"};
-        AssetManager am = getAssets();
-
-        for (String name : engineNames) {
-            File target = new File(enginesDir, name);
-            String assetPath = "engines/" + name;
-
-            try {
-                // Check if already extracted (size match).
-                InputStream check = am.open(assetPath);
-                long assetSize = check.available();
-                check.close();
-
-                if (target.exists() && target.length() == assetSize) {
-                    Log.i(TAG, "Engine " + name + " already extracted (" + assetSize + " bytes)");
-                    // Ensure executable permission.
-                    target.setExecutable(true, true);
-                    continue;
-                }
-
-                // Extract from assets.
-                Log.i(TAG, "Extracting engine " + name + " from APK assets (" + assetSize + " bytes)");
-                InputStream is = am.open(assetPath);
-                FileOutputStream os = new FileOutputStream(target);
-                byte[] buf = new byte[8192];
-                int len;
-                while ((len = is.read(buf)) > 0) {
-                    os.write(buf, 0, len);
-                }
-                os.close();
-                is.close();
-
-                // Set executable permission (owner only).
-                target.setExecutable(true, true);
-                Log.i(TAG, "Engine " + name + " extracted to " + target.getAbsolutePath());
-
-            } catch (IOException e) {
-                Log.e(TAG, "Failed to extract engine " + name + ": " + e.getMessage());
-            }
-        }
-
-        // Write a manifest for transparency (same as desktop single-file mode).
-        writeManifest(enginesDir);
-
-        return enginesDir;
+    private void refreshButton() {
+        vpnButton.setText(HunterVpnService.isRunning() ? R.string.vpn_disconnect : R.string.vpn_connect);
     }
 
-    /**
-     * Write a MANIFEST.txt in the engines directory for AV transparency.
-     */
-    private void writeManifest(File dir) {
-        File manifest = new File(dir, "MANIFEST.txt");
-        StringBuilder sb = new StringBuilder();
-        sb.append("================================================================\n");
-        sb.append("  Hunter — Embedded Engine Extraction Manifest (Android)\n");
-        sb.append("================================================================\n\n");
-        sb.append("This directory contains proxy engine binaries extracted from\n");
-        sb.append("the Hunter APK assets. They are NOT malware.\n\n");
-        sb.append("Hunter is an open-source anti-censorship proxy tool:\n");
-        sb.append("  https://github.com/bahmany/censorship_hunter\n\n");
-        sb.append("Engines:\n");
-        sb.append("  xray     — https://github.com/XTLS/Xray-core/releases\n");
-        sb.append("  sing-box — https://github.com/SagerNet/sing-box/releases\n\n");
-        sb.append("To verify: sha256sum <engine_name>\n");
-        sb.append("================================================================\n");
-
-        try {
-            FileOutputStream fos = new FileOutputStream(manifest);
-            fos.write(sb.toString().getBytes());
-            fos.close();
-        } catch (IOException e) {
-            Log.e(TAG, "Failed to write manifest: " + e.getMessage());
+    private void onVpnButton() {
+        if (HunterVpnService.isRunning()) {
+            startService(new Intent(this, HunterVpnService.class).setAction(HunterVpnService.ACTION_STOP));
+            vpnButton.postDelayed(this::refreshButton, 500);
+            return;
         }
+        // 1) notification permission (Android 13+) so the foreground notification is visible.
+        if (Build.VERSION.SDK_INT >= 33
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, REQ_NOTIF);
+            return;
+        }
+        requestVpnPermissionAndStart();
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
+        super.onRequestPermissionsResult(code, perms, results);
+        // Proceed even if denied: the VPN still works, only the notification is hidden.
+        if (code == REQ_NOTIF) requestVpnPermissionAndStart();
+    }
+
+    private void requestVpnPermissionAndStart() {
+        Intent prepare = VpnService.prepare(this);   // null if already granted
+        if (prepare != null) {
+            startActivityForResult(prepare, REQ_VPN);
+        } else {
+            startVpn();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int req, int result, Intent data) {
+        super.onActivityResult(req, result, data);
+        if (req == REQ_VPN && result == RESULT_OK) startVpn();
+        else if (req == REQ_VPN) Log.w(TAG, "VPN permission denied");
+    }
+
+    private void startVpn() {
+        Intent i = new Intent(this, HunterVpnService.class).setAction(HunterVpnService.ACTION_START);
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(i); else startService(i);
+        vpnButton.postDelayed(this::refreshButton, 500);
     }
 
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        nativeShutdown();
+        nativeShutdown();                       // UI (ImGui) teardown only
+        // The service owns the engines while the VPN is up; otherwise stop the core with the UI.
+        if (!HunterVpnService.isRunning() && isFinishing()) {
+            HunterNative.stopCore();
+        }
     }
 
     @Override
@@ -160,6 +115,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         nativeResume();
+        refreshButton();
     }
 
     public void sendTouchEvent(int action, float x, float y) {
@@ -170,9 +126,6 @@ public class MainActivity extends Activity {
         nativeKeyEvent(action, keyCode);
     }
 
-    private static native void nativeSetEngineDir(String dir);
-    private static native void nativeSetAssetManager(AssetManager assetManager);
-    private static native void nativeInit();
     private static native void nativeShutdown();
     private static native void nativePause();
     private static native void nativeResume();

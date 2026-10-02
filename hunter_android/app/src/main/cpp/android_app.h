@@ -40,5 +40,11 @@ private:
     int height_ = 800;
 };
 
+// Core accessors (implemented in android_app.cpp; used by vpn_jni.cpp)
+void androidSetDataDir(const std::string& dir);
+const std::string& androidDataDir();
+HunterOrchestrator* androidOrchestrator();
+bool androidCoreRunning();
+
 } // namespace gui
 } // namespace hunter

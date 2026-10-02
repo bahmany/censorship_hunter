@@ -132,10 +132,12 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          packages: 'ndk;27.0.12077973 cmake;3.22.1'
+      - name: Setup Android SDK packages
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM="$(ls -d "$ANDROID_HOME"/cmdline-tools/*/bin/sdkmanager | sort -V | tail -1)"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" "ndk;27.0.12077973" "cmake;3.22.1" "platforms;android-34" "build-tools;34.0.0"
 
       - name: Build APK
         working-directory: hunter_android

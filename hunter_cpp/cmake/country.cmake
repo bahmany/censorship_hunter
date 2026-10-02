@@ -27,7 +27,7 @@ if(HUNTER_EMBED_GEO)
         add_custom_command(
             OUTPUT ${HUNTER_GEO_DB_PATH}
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}"
-            COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_country_db.py
+            COMMAND ${Python3_EXECUTABLE} -X utf8 ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_country_db.py
                     --out ${HUNTER_GEO_DB_PATH}
             DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_country_db.py
             COMMENT "Downloading and building DB-IP HCGEO1 country database"
@@ -42,7 +42,7 @@ if(HUNTER_EMBED_GEO)
             ${HUNTER_GEO_EMBED_OUT_DIR}/geo_meta.json
             ${HUNTER_GEO_EMBED_OUT_DIR}/country.zst
         COMMAND ${CMAKE_COMMAND} -E make_directory ${HUNTER_GEO_EMBED_OUT_DIR}
-        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_country_db.py
+        COMMAND ${Python3_EXECUTABLE} -X utf8 ${CMAKE_CURRENT_SOURCE_DIR}/tools/build_country_db.py
                 --embed-db ${HUNTER_GEO_DB_PATH}
                 --embed-outdir ${HUNTER_GEO_EMBED_OUT_DIR}
                 --platform ${_geo_embed_platform}

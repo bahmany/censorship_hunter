@@ -117,7 +117,7 @@ def main():
         header_lines.append(f"static const unsigned long  {sym}OrigLen = {it['orig_size']};")
         header_lines.append("")
     header_lines += ["#ifdef __cplusplus", "}", "#endif", ""]
-    (out_dir / "gl_fallback_embedded.h").write_text("\n".join(header_lines))
+    (out_dir / "gl_fallback_embedded.h").write_text("\n".join(header_lines), encoding="utf-8")
 
     # ─── assembler (.incbin) — custom section, same reasoning as engine embed ───
     asm_lines = [
@@ -146,7 +146,7 @@ def main():
             asm_lines.append(f"{sym}ZstLen:")
             asm_lines.append(f"    .quad 0")
         asm_lines.append("")
-    (out_dir / "gl_fallback_embedded.S").write_text("\n".join(asm_lines))
+    (out_dir / "gl_fallback_embedded.S").write_text("\n".join(asm_lines), encoding="utf-8")
 
     meta = {
         "app": "Hunter Censorship Hunter",
@@ -156,7 +156,7 @@ def main():
         "source_url": SOURCE_URL,
         "files": {it["filename"]: {k: v for k, v in it.items() if k != "filename"} for it in items},
     }
-    (out_dir / "gl_fallback_meta.json").write_text(json.dumps(meta, indent=2))
+    (out_dir / "gl_fallback_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
     print(f"[gl-fallback-embed] wrote gl_fallback_embedded.h/.S, gl_fallback_meta.json to {out_dir}")
     print(f"[gl-fallback-embed] HUNTER_GL_FALLBACK_EMBEDDED={1 if have_all else 0}")

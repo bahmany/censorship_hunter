@@ -316,7 +316,7 @@ def generate_embed_files(out_dir: Path, zst_filename: str, comp_size: int, raw_s
         "#endif",
         "",
     ]
-    (out_dir / "geo_embedded.h").write_text("\n".join(header_lines))
+    (out_dir / "geo_embedded.h").write_text("\n".join(header_lines), encoding="utf-8")
 
     # Assembler file .S
     asm_lines = [
@@ -341,7 +341,7 @@ def generate_embed_files(out_dir: Path, zst_filename: str, comp_size: int, raw_s
     if not target_win:
         asm_lines.append('    .section .note.GNU-stack,"",@progbits')
         asm_lines.append("")
-    (out_dir / "geo_embedded.S").write_text("\n".join(asm_lines))
+    (out_dir / "geo_embedded.S").write_text("\n".join(asm_lines), encoding="utf-8")
 
     # Metadata JSON
     meta = {
@@ -359,7 +359,7 @@ def generate_embed_files(out_dir: Path, zst_filename: str, comp_size: int, raw_s
         "attribution": "IP Geolocation by DB-IP (https://db-ip.com)",
         "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
     }
-    (out_dir / "geo_meta.json").write_text(json.dumps(meta, indent=2))
+    (out_dir / "geo_meta.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
     print(f"[geo-build] Generated embed files in {out_dir}")
 
 

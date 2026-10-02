@@ -8,6 +8,8 @@
 #include <android/log.h>
 #include <GLES3/gl3.h>
 #include <memory>
+#include <string>
+#include <mutex>
 
 #define TAG "HunterApp"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -24,6 +26,13 @@ static std::unique_ptr<HunterConfig> g_config;
 static std::unique_ptr<HunterOrchestrator> g_orchestrator;
 static std::unique_ptr<HunterGuiApp> g_gui_app;
 static bool g_im_initialized = false;
+static std::string g_data_dir;   // absolute app filesDir, set from JNI before init
+static std::mutex g_core_mu;
+
+void androidSetDataDir(const std::string& dir) { g_data_dir = dir; }
+const std::string& androidDataDir() { return g_data_dir; }
+HunterOrchestrator* androidOrchestrator() { return g_orchestrator.get(); }
+bool androidCoreRunning() { return g_orchestrator != nullptr; }
 
 AndroidApp::AndroidApp(HunterOrchestrator& orch) : orch_(orch) {}
 
@@ -106,13 +115,22 @@ void AndroidApp::renderFrame() {
 // ─── Global initialization functions called from JNI ───
 
 bool androidAppInitImpl() {
+    std::lock_guard<std::mutex> lk(g_core_mu);
     if (g_orchestrator) return true;  // already initialized
+    if (g_data_dir.empty() || g_data_dir[0] != '/') {
+        LOGE("data dir not set (must be absolute); refusing to start core");
+        return false;
+    }
 
-    LOGI("Initializing Hunter app...");
+    LOGI("Initializing Hunter app (data dir %s)...", g_data_dir.c_str());
 
-    // Create config and orchestrator
+    // Create config and orchestrator. All persisted paths are absolute under filesDir.
     g_config = std::make_unique<HunterConfig>();
-    g_config->loadFromFile("runtime/hunter_config.json");
+    const std::string rt = g_data_dir + "/runtime";
+    g_config->loadFromFile(rt + "/hunter_config.json");
+    g_config->set("state_file", rt + "/hunter_state.json");
+    g_config->set("gold_file", rt + "/gold.txt");
+    g_config->set("silver_file", rt + "/silver.txt");
 
     g_orchestrator = std::make_unique<HunterOrchestrator>(*g_config);
     g_gui_app = std::make_unique<HunterGuiApp>(*g_orchestrator);
@@ -120,36 +138,36 @@ bool androidAppInitImpl() {
     // Start the orchestrator on background thread
     g_gui_app->startOrchestrator();
 
-    // Start auto-update checker (background thread, fully automatic)
-    hunter::core::SelfUpdateManager::instance().startAutoCheck(21600, 15);
+    // The self-updater cannot install APKs on Android (stub), so it is not started.
 
     LOGI("Hunter app initialized");
     return true;
 }
 
-void androidAppShutdownImpl() {
-    LOGI("Shutting down Hunter app...");
-
-    hunter::core::SelfUpdateManager::instance().stopAutoCheck();
-
+void androidCoreShutdownImpl() {
+    std::lock_guard<std::mutex> lk(g_core_mu);
+    LOGI("Stopping Hunter core...");
     if (g_gui_app) {
-        g_gui_app->stopOrchestrator();
+        g_gui_app->stopOrchestrator();   // stops orchestrator + local proxies/engines
         g_gui_app.reset();
     }
+    if (g_orchestrator) g_orchestrator->proxyServerManager().stopAll();
     g_orchestrator.reset();
     g_config.reset();
+    LOGI("Hunter core stopped");
+}
 
+void androidUiShutdownImpl() {
     if (g_im_initialized) {
         ImGui_ImplOpenGL3_Shutdown();
         ImGui_ImplAndroid_Shutdown();
         ImGui::DestroyContext();
         g_im_initialized = false;
     }
-
-    LOGI("Hunter app shut down");
 }
 
 void androidRenderFrameImpl() {
+    std::lock_guard<std::mutex> lk(g_core_mu);
     if (g_gui_app) {
         g_gui_app->pollProxyServers();
         g_gui_app->renderFrame();
@@ -165,7 +183,11 @@ extern "C" bool androidAppInit() {
 }
 
 extern "C" void androidAppShutdown() {
-    hunter::gui::androidAppShutdownImpl();
+    hunter::gui::androidCoreShutdownImpl();
+}
+
+extern "C" void androidUiShutdown() {
+    hunter::gui::androidUiShutdownImpl();
 }
 
 extern "C" void androidRenderFrame() {

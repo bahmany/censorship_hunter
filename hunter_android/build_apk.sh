@@ -4,7 +4,7 @@
 #
 # This script:
 #   1. Downloads ARM64 (arm64-v8a) xray and sing-box binaries from upstream
-#   2. Copies them to APK assets/engines/
+#   2. Installs them as jniLibs/lib*.so (exec from nativeLibraryDir)
 #   3. Bundles a zstd-compressed proxy-config bundle into APK assets/configs.zst
 #   4. Builds the release APK via Gradle
 #   5. Copies the final APK to bin/android/hunter.apk
@@ -59,45 +59,12 @@ echo "Project: $PROJECT_ROOT"
 echo "Assets:  $ASSETS_DIR"
 echo ""
 
-# ─── Step 1: Download ARM64 engine binaries ───
-XRAY_VERSION="v26.3.27"
-SINGBOX_VERSION="v1.13.16"
-
-mkdir -p "$ASSETS_DIR"
-
-download_xray() {
-    local target="$ASSETS_DIR/xray"
-    if [[ -f "$target" ]]; then
-        echo "[1/5] xray already present ($(du -h "$target" | cut -f1))"
-        return
-    fi
-    echo "[1/5] Downloading Xray $XRAY_VERSION (android arm64)..."
-    local url="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VERSION}/Xray-android-arm64-v8a.zip"
-    curl -sL "$url" -o "$TMP_DIR/xray.zip"
-    unzip -o "$TMP_DIR/xray.zip" xray -d "$TMP_DIR"
-    cp "$TMP_DIR/xray" "$target"
-    chmod +x "$target"
-    echo "      Done: $(du -h "$target" | cut -f1)"
-}
-
-download_singbox() {
-    local target="$ASSETS_DIR/sing-box"
-    if [[ -f "$target" ]]; then
-        echo "[2/5] sing-box already present ($(du -h "$target" | cut -f1))"
-        return
-    fi
-    echo "[2/5] Downloading sing-box $SINGBOX_VERSION (android arm64)..."
-    local url="https://github.com/SagerNet/sing-box/releases/download/${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-android-arm64.tar.gz"
-    curl -sL "$url" -o "$TMP_DIR/singbox.tar.gz"
-    tar xzf "$TMP_DIR/singbox.tar.gz" -C "$TMP_DIR"
-    local extracted=$(find "$TMP_DIR" -name 'sing-box' -type f | head -1)
-    cp "$extracted" "$target"
-    chmod +x "$target"
-    echo "      Done: $(du -h "$target" | cut -f1)"
-}
-
-download_xray
-download_singbox
+# ─── Step 1: engines + native deps (pinned, SHA256-verified) ───
+# Engines ship as jniLibs/lib{xray,singbox}.so so they run from nativeLibraryDir.
+mkdir -p "$ASSETS_DIR/.."
+"$SCRIPT_DIR/scripts/fetch_engines.sh"
+"$SCRIPT_DIR/scripts/build_deps.sh" arm64-v8a
+"$SCRIPT_DIR/scripts/fetch_hev.sh"
 
 # ─── Step 2: Bundle proxy configs ───
 # Produce APK assets/configs.zst (zstd-compressed, one URI per line).
