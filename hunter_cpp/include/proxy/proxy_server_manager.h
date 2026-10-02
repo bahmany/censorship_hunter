@@ -1,176 +1,146 @@
 #pragma once
 
-#include <string>
-#include <vector>
-#include <map>
-#include <mutex>
 #include <atomic>
-#include <thread>
 #include <chrono>
+#include <condition_variable>
+#include <functional>
+#include <map>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <thread>
+#include <vector>
+
+#include "proxy/health_monitor.h"
 
 namespace hunter {
+namespace network { class ConfigDatabase; }
 namespace proxy {
 
 /**
- * @brief Status of a running proxy server instance
+ * @brief Legacy coarse status kept for source compatibility with the current GUI table.
+ *        Mapping from SessionState: Connected->Running; Starting/Degraded/Switching/Restarting/
+ *        Paused->Starting; Unavailable/Failed->Error; Stopped/Stopping->Stopped.
+ *        "Running" therefore means "last real-traffic probe on the user port passed" - never just
+ *        "process alive / port listening". New UI code should use snapshot().
  */
-enum class ProxyStatus {
-    Stopped = 0,
-    Starting,
-    Running,
-    Error
-};
+enum class ProxyStatus { Stopped = 0, Starting, Running, Error };
 
-/**
- * @brief Represents one running proxy server instance
- */
 struct ProxyInstance {
-    std::string uri;          // Config URI being proxied
-    int port = 0;             // Local SOCKS5 port (3110-3120)
-    std::string engine;       // "xray" or "sing-box"
-    std::string config_path;  // Path to temp config file
+    std::string uri;          // config URI the session was started with (GUI row key)
+    int port = 0;             // user-facing local SOCKS5 port
+    std::string engine;
+    std::string config_path;  // unused (configs are owned by the engine guard); kept for compatibility
     ProxyStatus status = ProxyStatus::Stopped;
     std::string error_message;
-    int pid = 0;              // Process ID (0 = not running)
-    double started_at = 0.0;  // Timestamp when started
-    // Traffic tracking (cumulative bytes since proxy start)
-    unsigned long long bytes_in = 0;   // Total bytes received (download)
-    unsigned long long bytes_out = 0;  // Total bytes sent (upload)
-    unsigned long long last_rchar = 0;  // Previous /proc/<pid>/io rchar
-    unsigned long long last_wchar = 0;  // Previous /proc/<pid>/io wchar
-    double last_traffic_poll = 0.0;     // Timestamp of last traffic poll
+    int pid = 0;
+    double started_at = 0.0;
+    // Informational only (Linux /proc rchar/wchar of the engine process): includes the engine's own
+    // control/DNS I/O and is NOT used for any health decision.
+    unsigned long long bytes_in = 0;
+    unsigned long long bytes_out = 0;
+    unsigned long long last_rchar = 0;
+    unsigned long long last_wchar = 0;
+    double last_traffic_poll = 0.0;
+};
+
+/// Injection points (all optional; empty = production default). Used by tests.
+struct ManagerDeps {
+    MonitorDeps monitor;                       // any empty field is filled with the production default
+    std::function<bool(int)> port_free;        // default utils::isPortFree
+    bool start_watchdog = true;                // false: tests drive step() themselves
+    int port_first = 3110;
+    int port_last = 3139;
 };
 
 /**
- * @brief Manages persistent local proxy servers for live configs.
+ * @brief Manages persistent local proxy servers with a health watchdog and automatic failover.
  *
- * Allows the user to start a local SOCKS5 proxy on a port in the
- * range [3110, 3120] that routes traffic through a selected proxy
- * config. Multiple instances can run simultaneously on different
- * ports. External applications (AI clients, browsers, CLI tools)
- * can connect to localhost:<port> and use the proxy.
+ * startProxy()/stopProxy() never block the caller (no engine wait, no mutex held across waits).
+ * Each session is a HealthMonitor (see health_monitor.h); a manager-owned watchdog thread ticks
+ * every session once per second, independent of the GUI frame loop.
  */
 class ProxyServerManager {
 public:
     static constexpr int PORT_RANGE_START = 3110;
-    static constexpr int PORT_RANGE_END = 3120;  // inclusive
+    static constexpr int PORT_RANGE_END = 3139;  // inclusive (was 3110-3120)
 
     ProxyServerManager();
+    explicit ProxyServerManager(ManagerDeps deps, MonitorConfig cfg = MonitorConfig());
     ~ProxyServerManager();
 
     ProxyServerManager(const ProxyServerManager&) = delete;
     ProxyServerManager& operator=(const ProxyServerManager&) = delete;
 
-    /**
-     * @brief Start a proxy server for the given config URI.
-     * @param uri Proxy config URI (vmess://, vless://, ss://, trojan://, etc.)
-     * @return Port number assigned (3110-3120), or 0 on error.
-     *         On error, check getError(uri) for details.
-     */
-    int startProxy(const std::string& uri);
-
-    /**
-     * @brief Stop a proxy server for the given config URI.
-     * @param uri Proxy config URI
-     * @return true if stopped, false if not running
-     */
+    /// Asynchronous. Reserves a user-facing port and returns it immediately (0 + getError() if none
+    /// is free). The session is "Starting" until a real-traffic probe through the port passes.
+    int startProxy(const std::string& uri, SwitchMode mode = SwitchMode::Auto);
+    /// Asynchronous cancel (generation bump). true if a session was active.
     bool stopProxy(const std::string& uri);
-
-    /**
-     * @brief Stop proxy by port number.
-     * @param port The port to stop
-     * @return true if stopped, false if not running on that port
-     */
     bool stopProxyByPort(int port);
-
-    /**
-     * @brief Stop all running proxy servers.
-     */
     void stopAll();
+    /// Wait until every session finished teardown (children reaped, ports released).
+    bool waitAllStopped(double timeout_s);
 
-    /**
-     * @brief Check if a proxy is running for the given URI.
-     */
-    bool isRunning(const std::string& uri) const;
-
-    /**
-     * @brief Get the port for a running proxy by URI.
-     * @return Port number, or 0 if not running
-     */
-    int getPort(const std::string& uri) const;
-
-    /**
-     * @brief Get the status of a proxy by URI.
-     */
+    bool isRunning(const std::string& uri) const;      // state == Connected
+    int getPort(const std::string& uri) const;         // user port while the session is active, else 0
     ProxyStatus getStatus(const std::string& uri) const;
-
-    /**
-     * @brief Get error message for a URI (if status is Error).
-     */
     std::string getError(const std::string& uri) const;
-
-    /**
-     * @brief Get traffic stats (bytes_in, bytes_out) for a proxy by URI.
-     * @return pair of {bytes_in, bytes_out}, or {0,0} if not running
-     */
-    std::pair<unsigned long long, unsigned long long> getTraffic(const std::string& uri) const;
-
-    /**
-     * @brief Get a snapshot of all running proxy instances.
-     *        Used by the GUI to render the table.
-     */
+    std::pair<unsigned long long, unsigned long long> getTraffic(const std::string& uri) const;  // informational
     std::vector<ProxyInstance> getInstances() const;
+    void poll();   // informational traffic counters only; health is owned by the watchdog
 
-    /**
-     * @brief Monitor running proxy processes and update status.
-     *        Called periodically from the GUI refresh loop.
-     */
-    void poll();
+    // ── Snapshot + event API (for batch C2) ──
+    bool snapshot(const std::string& uri, SessionSnapshot* out) const;
+    std::vector<std::pair<std::string, SessionSnapshot>> snapshots() const;   // {session key (start URI), snapshot}
+    /// Manual pin: true = never switch to another config (restarts of the same config still happen).
+    bool setPinned(const std::string& uri, bool pinned);
+    using SessionEventCallback = std::function<void(const std::string& session_uri, const SessionEvent&)>;
+    void setEventCallback(SessionEventCallback cb);   // called from worker/watchdog threads, no locks held
+    /// Use the database for failover candidates and to record every probe result (applyProbeResult).
+    void attachDatabase(network::ConfigDatabase* db);
+    void setCandidateProvider(std::function<std::vector<Candidate>()> fn);
+
+    /// Test/driver hook: tick every session once (the internal watchdog does this every second).
+    void tickAll();
 
 private:
-    /**
-     * @brief Find the first available port in [3110, 3120].
-     * @return Available port, or 0 if none available.
-     */
-    int findFreePort() const;
-
-    /**
-     * @brief Generate config JSON for a URI on a given SOCKS port.
-     *        Tries xray first, then sing-box. Sets engine_out to the
-     *        engine name that should be used.
-     */
-    std::string generateConfig(const std::string& uri, int socks_port,
-                               std::string& engine_out);
-
-    /**
-     * @brief Kill a process by PID (platform-specific).
-     */
-    void killProcess(int pid);
-
-    /**
-     * @brief Check if a process is still alive.
-     */
-    bool isProcessAlive(int pid) const;
-
-    /**
-     * @brief Read process I/O counters from /proc/<pid>/io (Linux).
-     *        Returns {rchar, wchar} = bytes read/written by the process.
-     *        On non-Linux, returns {0,0}.
-     */
-    std::pair<unsigned long long, unsigned long long> readProcessIo(int pid) const;
-
-    /**
-     * @brief Resolve engine binary paths (same logic as ProxyTester).
-     */
+    struct Session {
+        std::shared_ptr<HealthMonitor> mon;
+        std::string uri;
+        int port = 0;
+        unsigned long long bytes_in = 0, bytes_out = 0, last_r = 0, last_w = 0;
+        double last_poll = 0.0;
+    };
+    void init();
+    int findFreePortLocked() const;
+    static bool occupies(const Session& s);
+    void watchdogLoop();
     void resolveEnginePaths();
+    BuiltConfig buildEngineConfig(const std::string& uri, int port);
+    std::pair<unsigned long long, unsigned long long> readProcessIo(int pid) const;
+    ProxyInstance toInstance(const Session& s, const SessionSnapshot& snap) const;
+    void pruneRetiredLocked();
 
-    mutable std::mutex mutex_;
-    std::map<std::string, ProxyInstance> instances_;  // keyed by URI
+    ManagerDeps deps_;
+    MonitorConfig mcfg_;
+    mutable std::mutex mutex_;     // guards sessions_/retired_/errors_ only; never held across waits
+    std::map<std::string, Session> sessions_;
+    std::vector<Session> retired_;
+    std::map<std::string, std::string> errors_;
+    SessionEventCallback event_cb_;
+    std::function<std::vector<Candidate>()> candidate_fn_;
+    std::atomic<network::ConfigDatabase*> db_{nullptr};
+    std::shared_ptr<network::EngineLauncher> launcher_;
 
-    std::string xray_path_;
-    std::string singbox_path_;
+    std::string xray_path_, singbox_path_;
     bool paths_resolved_ = false;
+
+    std::thread watchdog_;
+    std::mutex wd_mu_;
+    std::condition_variable wd_cv_;
+    bool wd_stop_ = false;
 };
 
-} // namespace proxy
-} // namespace hunter
+}  // namespace proxy
+}  // namespace hunter

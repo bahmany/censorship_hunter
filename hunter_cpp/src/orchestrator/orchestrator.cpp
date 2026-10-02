@@ -209,6 +209,8 @@ HunterOrchestrator::~HunterOrchestrator() {
 void HunterOrchestrator::initComponents() {
     // Config database
     config_db_ = std::make_unique<network::ConfigDatabase>(constants::CONFIG_DB_MAX_SIZE);
+    // Failover candidates come from, and every live-session probe is recorded in, this database.
+    proxy_server_manager_.attachDatabase(config_db_.get());
     
     // Load persisted config database from disk (survives restarts)
     {
@@ -264,22 +266,10 @@ void HunterOrchestrator::start() {
     if (runtime_dir.empty()) runtime_dir = "runtime";
     const std::string stop_flag = runtime_dir + "/stop.flag";
 
-    // ═══ PHASE 0a: Kill orphaned test processes from previous runs ═══
-    // When the app is killed (e.g. pkill -9), child xray/sing-box processes
-    // become orphans and keep holding ports + RAM. Kill them before starting.
-    {
-        int killed = 0;
-        // pkill -f "temp_xray_test|temp_singbox_test|temp_mihomo_test|proxy_server"
-        // We use the system call since we need pattern matching on the cmdline.
-        int rc = std::system("pkill -9 -f 'temp_xray_test' 2>/dev/null; "
-                             "pkill -9 -f 'temp_singbox_test' 2>/dev/null; "
-                             "pkill -9 -f 'temp_mihomo_test' 2>/dev/null; "
-                             "pkill -9 -f 'proxy_server_' 2>/dev/null");
-        (void)rc;  // pkill returns non-zero if no processes matched
-        std::cout << "[Startup] Cleaned up orphaned test processes" << std::endl;
-        utils::LogRingBuffer::instance().push(
-            "[Startup] Cleaned up orphaned test processes (" + std::to_string(killed) + ")");
-    }
+    // ═══ PHASE 0a: orphaned engines ═══
+    // No `pkill`: engines are bound to this process (PR_SET_PDEATHSIG on POSIX, a
+    // KILL_ON_JOB_CLOSE Job object on Windows) and always reaped, so nothing is left behind and
+    // other Hunter instances' engines are never touched.
 
     // ═══ PHASE 0: Runtime cleanup — remove stale temp files ═══
     if (cleanup_manager_) {
