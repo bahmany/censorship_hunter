@@ -1,6 +1,7 @@
 #include "orchestrator/orchestrator.h"
 #include "orchestrator/thread_manager.h"
 #include "core/utils.h"
+#include "core/endpoint_key.h"
 #include "core/constants.h"
 #include "core/task_manager.h"
 #include "core/win_compat.h"
@@ -66,39 +67,6 @@ std::string jsonEscape(const std::string& value) {
     }
     out << "]";
     return out.str();
-}
-
-bool looksLikeLiteralIp(const std::string& address) {
-    if (address.empty()) return false;
-    if (address.find(':') != std::string::npos) {
-        for (unsigned char c : address) {
-            if (!(std::isxdigit(c) || c == ':' || c == '.' || c == '[' || c == ']')) return false;
-        }
-        return true;
-    }
-    bool has_dot = false;
-    for (unsigned char c : address) {
-        if (c == '.') {
-            has_dot = true;
-            continue;
-        }
-        if (!std::isdigit(c)) return false;
-    }
-    return has_dot;
-}
-
-std::string endpointKeyForUri(const std::string& uri) {
-    auto parsed = network::UriParser::parse(uri);
-    if (parsed.has_value() && parsed->isValid()) {
-        std::string address = utils::trim(parsed->address);
-        std::transform(address.begin(), address.end(), address.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (looksLikeLiteralIp(address)) return address;
-    }
-    std::string fallback = utils::trim(uri);
-    std::transform(fallback.begin(), fallback.end(), fallback.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return fallback;
 }
 
 std::vector<std::string> dedupeUrisByEndpoint(const std::vector<std::string>& uris) {

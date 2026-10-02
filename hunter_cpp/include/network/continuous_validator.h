@@ -8,6 +8,8 @@
 #include <atomic>
 
 #include "core/models.h"
+#include "core/health_score.h"
+#include "core/db_format.h"
 
 namespace hunter {
 namespace network {
@@ -35,7 +37,61 @@ public:
                                int* promoted_existing = nullptr);
 
     /**
-     * @brief Update health status after a test
+     * @brief Apply one typed probe round (D1/D2). Thread-safe. Duplicate run IDs, stale
+     *        generations and out-of-order results are discarded; excluded outcomes
+     *        (local outage, engine errors, ...) never change health or failure counters.
+     */
+    ApplyEffect applyProbeResult(const ProbeResult& result);
+
+    /** @brief Unknown -> Testing when a scheduled round starts. */
+    void markTestingRound(const std::string& endpoint_key);
+
+    /** @brief Country result with timestamp / network-generation compare-and-set. */
+    struct CountryUpdate {
+        bool is_exit = false;          // false => server-IP country
+        std::string country;           // ISO-3166 alpha-2 or "" (unknown)
+        std::string ip;                // exit ip (exit only)
+        std::string source;
+        double at = 0.0;
+        uint64_t network_generation = 0;   // exit only
+        std::string geo_db_version;        // server only
+        std::vector<std::string> server_ips;  // server only
+    };
+    bool applyCountryResult(const std::string& endpoint_key, const CountryUpdate& update);
+
+    /** @brief Records whose stability is Stable, ranked by the shared evaluator. */
+    std::vector<ConfigHealthRecord> getRecommendedRecords(int max_count = 50);
+    HealthEvaluation evaluate(const ConfigHealthRecord& rec) const;
+    bool getRecord(const std::string& uri_or_key, ConfigHealthRecord* out) const;
+
+    /// Injectable clock (UTC seconds) and thresholds, for deterministic tests / tuning.
+    void setClock(ClockFn clock);
+    void setThresholds(const HealthThresholds& th);
+    HealthThresholds thresholds() const;
+    static std::string keyFor(const std::string& uri);  // EndpointKeyV1
+
+    struct LoadReport {
+        bool ok = false;
+        int loaded = 0;
+        int rejected = 0;
+        int source_version = 0;     // 1..4 (DB) or live-cache version
+        bool migrated = false;      // legacy file rewritten as V4
+        std::string backup_path;
+        std::string error;          // visible failure reason (unknown version, I/O, ...)
+        std::string warning;        // e.g. another instance owns the data directory (read-only)
+    };
+    LoadReport lastLoadReport() const;
+    std::string lastSaveError() const;
+
+    /// Read-only mode: set (sticky) when another process owns the data directory, the on-disk
+    /// layout is unsupported, or a protective backup failed. All saves are refused while set.
+    bool readOnly() const;
+    std::string readOnlyReason() const;
+    void clearReadOnly();  // explicit operator resolution
+
+    /**
+     * @brief Legacy adapter for pre-V4 callers (removed once A2 rewires them):
+     *        alive -> full Pass, !alive -> attributable RemoteFailure.
      */
     void updateHealth(const std::string& uri, bool alive, float latency_ms = 0.0f,
                       const std::string& engine_used = "", bool force_dead = false,
@@ -161,16 +217,17 @@ public:
     int evictDead();
 
     /**
-     * @brief Save entire database to disk (JSON lines format)
-     * @param filepath Path to save file
-     * @return Number of records saved
+     * @brief Save entire database as TSV V4 (atomic temp+fsync+rename). A pre-V4 file at
+     *        the path is first copied to <path>.v<N>.bak. A file with an unknown/newer
+     *        version header is never overwritten.
+     * @return Number of records saved, or -1 if refused/failed (see lastSaveError())
      */
     int saveToDisk(const std::string& filepath) const;
 
     /**
-     * @brief Load database from disk
-     * @param filepath Path to saved file
-     * @return Number of records loaded
+     * @brief Load database from disk (V4 strict; V3/V2/V1 are migrated: URIs re-keyed,
+     *        health reset to Unknown, file atomically rewritten as V4 with a .v<N>.bak).
+     * @return Number of records loaded (details in lastLoadReport())
      */
     int loadFromDisk(const std::string& filepath);
 
@@ -215,11 +272,26 @@ public:
 
 private:
     int max_size_;
-    std::map<std::string, ConfigHealthRecord> db_;  // keyed by URI hash
+    std::map<std::string, ConfigHealthRecord> db_;  // keyed by EndpointKeyV1
     mutable std::mutex mutex_;
+    ClockFn clock_;
+    HealthThresholds th_;
+    LoadReport load_report_;
+    std::string save_error_;
+    mutable bool read_only_ = false;
+    mutable std::string read_only_reason_;
+    mutable size_t last_written_hash_ = 0;  // hash of the bytes this instance last published (DB file)
 
-    std::string hashUri(const std::string& uri) const;
+    bool acquireWriteAccessLocked(const std::string& filepath, std::string* err) const;
+    bool checkDestinationLocked(const std::string& filepath, bool is_live, std::string* err) const;
+    void setReadOnlyLocked(const std::string& why) const;
+
     void evictStale();
+    ApplyEffect applyLocked(ConfigHealthRecord& rec, const ProbeResult& r);
+    RankKey rankKeyLocked(const ConfigHealthRecord& rec, double now) const;
+    void sortRankedLocked(std::vector<ConfigHealthRecord>& v, double now) const;
+    // Merge a parsed record (load paths); `overwrite_newer` governs live-cache merging.
+    bool mergeLoadedLocked(ConfigHealthRecord&& rec, bool legacy_source);
 };
 
 /**
