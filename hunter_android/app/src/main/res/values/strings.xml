@@ -1,3 +1,9 @@
 <resources>
     <string name="app_name">Hunter</string>
+    <string name="vpn_connect">Connect VPN</string>
+    <string name="vpn_disconnect">Disconnect</string>
+    <string name="vpn_connecting">Starting...</string>
+    <string name="vpn_searching">Searching for a working config...</string>
+    <string name="vpn_connected">Connected</string>
+    <string name="vpn_reconnecting">Reconnecting...</string>
 </resources>

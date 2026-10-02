@@ -4,10 +4,25 @@ project(hunter_android VERSION 2.0.0 LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Paths
-set(HUNTER_SRC_DIR /home/mohammad/Documents/projects/censorship_hunter/hunter_cpp)
-set(CROSS_PREFIX /home/mohammad/Documents/projects/censorship_hunter/cross_build/android/install)
+# Paths (all relative to this file; no machine-specific locations)
+get_filename_component(HUNTER_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../hunter_cpp" ABSOLUTE)
+get_filename_component(HUNTER_ANDROID_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../.." ABSOLUTE)
+# Prebuilt static zlib/mbedTLS/libcurl produced by scripts/build_deps.sh
+set(HUNTER_ANDROID_DEPS "${HUNTER_ANDROID_ROOT}/.deps" CACHE PATH "Dependency work dir")
+set(CROSS_PREFIX ${HUNTER_ANDROID_DEPS}/install/${ANDROID_ABI})
+if(NOT EXISTS ${CROSS_PREFIX}/lib/libcurl.a)
+    message(FATAL_ERROR "Missing ${CROSS_PREFIX}/lib/libcurl.a - run hunter_android/scripts/build_deps.sh (Gradle does this automatically)")
+endif()
 set(IMGUI_DIR ${HUNTER_SRC_DIR}/third_party/imgui)
+if(NOT EXISTS ${IMGUI_DIR}/imgui.cpp)
+    # Submodule not checked out: fetch the exact pinned commit instead.
+    include(FetchContent)
+    FetchContent_Declare(imgui_src
+        GIT_REPOSITORY https://github.com/ocornut/imgui.git
+        GIT_TAG d15966ff6cb48adacaae2f6d40230b4194d8ea70)
+    FetchContent_MakeAvailable(imgui_src)
+    set(IMGUI_DIR ${imgui_src_SOURCE_DIR})
+endif()
 set(QR_DIR ${HUNTER_SRC_DIR}/third_party/qrcodegen)
 
 # Include directories
@@ -82,6 +97,9 @@ target_compile_definitions(hunter_core PUBLIC CURL_STATICLIB)
 target_include_directories(hunter_core PUBLIC ${ZSTD_DIR} ${EMBED_OUT_DIR})
 target_link_libraries(hunter_core PUBLIC
     ${CROSS_PREFIX}/lib/libcurl.a
+    ${CROSS_PREFIX}/lib/libmbedtls.a
+    ${CROSS_PREFIX}/lib/libmbedx509.a
+    ${CROSS_PREFIX}/lib/libmbedcrypto.a
     ${CROSS_PREFIX}/lib/libz.a
     log
     android
@@ -105,8 +123,12 @@ set(JNI_SOURCES
     imgui_impl_android_custom.cpp
     android_app.cpp
     config_embed_android.cpp
+    vpn_jni.cpp
     ${HUNTER_SRC_DIR}/src/gui/app.cpp
 )
+
+set_source_files_properties(${HUNTER_SRC_DIR}/src/gui/app.cpp PROPERTIES
+    COMPILE_OPTIONS "-include;${CMAKE_CURRENT_SOURCE_DIR}/android_compat_shim.h")
 
 # ─── Native shared library ───
 add_library(hunter SHARED
