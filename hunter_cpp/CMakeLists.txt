@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
+# Windows targets (MinGW cross or MSYS2) use the dedicated file.
+if(WIN32)
+    include(${CMAKE_CURRENT_LIST_DIR}/CMakeListsMingw.txt)
+    return()
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -32,6 +38,16 @@ include_directories(${CMAKE_SOURCE_DIR})
 option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" OFF)
 set(HUNTER_EMBED_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin" CACHE PATH "Directory containing engine binaries to embed")
 set(HUNTER_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded" CACHE PATH "Output dir for generated embed files")
+
+option(HUNTER_FETCH_ENGINES "Download pinned+SHA256-verified xray/sing-box when HUNTER_EMBED_ENGINES=ON and bin/ lacks them" ON)
+if(HUNTER_EMBED_ENGINES AND HUNTER_FETCH_ENGINES)
+    list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
+    include(HunterEngines)
+    if(NOT EXISTS "${HUNTER_EMBED_BIN_DIR}/xray" OR NOT EXISTS "${HUNTER_EMBED_BIN_DIR}/sing-box")
+        set(HUNTER_EMBED_BIN_DIR "${CMAKE_BINARY_DIR}/engines")
+    endif()
+    hunter_fetch_engines(PLATFORM linux OUT_DIR "${HUNTER_EMBED_BIN_DIR}")
+endif()
 
 if(HUNTER_EMBED_ENGINES)
     # Determine target platform for .S section directives.
@@ -163,6 +179,9 @@ set(ZSTD_SOURCES ${ZSTD_DIR}/zstddeclib.c)
 set(CORE_SOURCES
     src/core/config.cpp
     src/core/models.cpp
+    src/core/endpoint_key.cpp
+    src/core/health_score.cpp
+    src/core/db_format.cpp
     src/core/utils.cpp
     src/core/task_manager.cpp
     src/core/seed_data.cpp
@@ -177,7 +196,12 @@ set(NETWORK_SOURCES
     src/network/uri_parser.cpp
     src/network/config_fetcher.cpp
     src/network/continuous_validator.cpp
+    src/network/config_db_store.cpp
     src/network/proxy_tester.cpp
+    src/network/traffic_probe.cpp
+    src/network/connectivity_baseline.cpp
+    src/network/port_lease.cpp
+    src/network/engine_launcher.cpp
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp
     src/network/sys_proxy.cpp
@@ -193,6 +217,9 @@ set(PROXY_SOURCES
     src/proxy/xray_manager.cpp
     src/proxy/proxy_server_manager.cpp
 )
+# Stage 4 B: process runner (Job object / reaping), health monitor (watchdog + failover)
+include(cmake/runtime_health.cmake)
+list(APPEND PROXY_SOURCES ${HUNTER_RUNTIME_HEALTH_SOURCES})
 
 # ─── Cache Library Sources ───
 set(CACHE_SOURCES
@@ -236,6 +263,9 @@ target_include_directories(hunter_core PUBLIC ${HUNTER_EMBED_INCLUDE_DIR})
 
 # Add embedded config header include dir (always — stub or real, config_embed.cpp needs it).
 target_include_directories(hunter_core PUBLIC ${HUNTER_CONFIG_EMBED_INCLUDE_DIR})
+
+# ─── Country Database Support (Stage 4 Batch C) ───
+include(cmake/country.cmake)
 
 # Static link C++ runtime
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -static-libgcc -static-libstdc++")
@@ -320,6 +350,54 @@ add_executable(test_embed
 )
 target_link_options(test_embed PRIVATE -static-libgcc -static-libstdc++)
 target_link_libraries(test_embed PRIVATE hunter_core)
+
+# Stage 4 A1 unit suites (pure logic, no network)
+foreach(_t test_endpoint_key test_health_score test_config_db_v4)
+    add_executable(${_t} tests/${_t}.cpp)
+    target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(${_t} PRIVATE hunter_core)
+endforeach()
+
+# Stage 4 A2 suites (fake transports / loopback only: no public network)
+foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
+           test_uri_parser test_curl_transport test_engine_launcher)
+    add_executable(${_t} tests/${_t}.cpp)
+    target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(${_t} PRIVATE hunter_core)
+endforeach()
+
+# Opt-in integration test: real xray against a local test server (needs HUNTER_XRAY_PATH).
+option(HUNTER_INTEGRATION_TESTS "Register opt-in integration tests (real engines, loopback only)" OFF)
+if(HUNTER_INTEGRATION_TESTS)
+    add_executable(test_engine_integration tests/test_engine_integration.cpp)
+    target_link_options(test_engine_integration PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(test_engine_integration PRIVATE hunter_core)
+    add_executable(test_singbox_schema tests/test_singbox_schema.cpp)
+    target_link_options(test_singbox_schema PRIVATE -static-libgcc -static-libstdc++)
+    target_link_libraries(test_singbox_schema PRIVATE hunter_core)
+endif()
+
+# Stage 4 B suites (fake probe/launcher/clock; no public network)
+hunter_add_runtime_health_tests()
+
+# CTest registration
+enable_testing()
+add_test(NAME hunter_tests COMMAND hunter_tests)
+add_test(NAME test_endpoint_key COMMAND test_endpoint_key)
+add_test(NAME test_health_score COMMAND test_health_score)
+add_test(NAME test_config_db_v4 COMMAND test_config_db_v4)
+add_test(NAME test_embed COMMAND test_embed)
+foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
+           test_uri_parser test_curl_transport test_engine_launcher)
+    add_test(NAME ${_t} COMMAND ${_t})
+    set_tests_properties(${_t} PROPERTIES TIMEOUT 120)
+endforeach()
+if(HUNTER_INTEGRATION_TESTS)
+    add_test(NAME test_engine_integration COMMAND test_engine_integration)
+    set_tests_properties(test_engine_integration PROPERTIES LABELS integration TIMEOUT 120 SKIP_RETURN_CODE 77)
+    add_test(NAME test_singbox_schema COMMAND test_singbox_schema)
+    set_tests_properties(test_singbox_schema PROPERTIES LABELS integration TIMEOUT 300 SKIP_RETURN_CODE 77)
+endif()
 
 # Install targets
 install(TARGETS hunter

@@ -30,6 +30,34 @@ void HunterConfig::setDefaults() {
     data_["singbox_path"] = "bin/sing-box.exe";
     data_["mihomo_path"] = "bin/mihomo-windows-amd64-compatible.exe";
     data_["tor_path"] = "bin/tor.exe";
+    data_["exit_country_target"] = "";
+    data_["exit_country_strict"] = "false";
+    data_["country_exploration_ratio"] = "0.2";
+    data_["country_doh_enabled"] = "false";
+    data_["direct_baseline_enabled"] = "true";
+    data_["exit_country_fresh_s"] = "1800";
+    data_["country_doh_max_ttl_s"] = "3600";
+}
+
+std::string HunterConfig::exitCountryTarget() const {
+    std::string v = getString("exit_country_target", "");
+    if (v.size() != 2 || !std::isupper((unsigned char)v[0]) || !std::isupper((unsigned char)v[1])) return "";
+    return v;
+}
+
+bool HunterConfig::setExitCountryTarget(const std::string& iso) {
+    std::string v;
+    for (char c : iso) if (!std::isspace((unsigned char)c)) v.push_back((char)std::toupper((unsigned char)c));
+    if (!v.empty() && (v.size() != 2 || !std::isupper((unsigned char)v[0]) || !std::isupper((unsigned char)v[1]))) return false;
+    set("exit_country_target", v);
+    return true;
+}
+
+float HunterConfig::countryExplorationRatio() const {
+    float r = getFloat("country_exploration_ratio", 0.2f);
+    if (!(r >= 0.2f)) r = 0.2f;   // also catches NaN
+    if (r > 0.9f) r = 0.9f;
+    return r;
 }
 
 bool HunterConfig::loadFromFile(const std::string& path) {

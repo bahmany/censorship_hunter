@@ -73,6 +73,16 @@ public:
     static std::string generateConfig(const ParsedConfig& parsed, int socks_port, int http_port = 0);
 
     /**
+     * @brief Single outbound construction shared by live, test and batch configs (A2).
+     *        Returns "" if xray cannot express the config. The TLS-fragment policy
+     *        (sockopt.dialerProxy -> "fragment-out") is applied here and nowhere else;
+     *        callers must add fragmentOutboundJson() when needsFragmentOutbound() is true.
+     */
+    static std::string buildProxyOutbound(const ParsedConfig& parsed, const std::string& tag);
+    static bool needsFragmentOutbound(const ParsedConfig& parsed);
+    static std::string fragmentOutboundJson();
+
+    /**
      * @brief Generate a LEAN XRay test config for liveness checking.
      *
      * Unlike generateConfig (which is for the live proxy and adds a

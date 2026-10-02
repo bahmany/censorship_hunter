@@ -1,6 +1,7 @@
 #include "orchestrator/orchestrator.h"
 #include "orchestrator/thread_manager.h"
 #include "core/utils.h"
+#include "core/endpoint_key.h"
 #include "core/constants.h"
 #include "core/task_manager.h"
 #include "core/win_compat.h"
@@ -25,13 +26,6 @@
 namespace hunter {
 
 namespace {
-
-static const char* LIVE_RECHECK_URLS[] = {
-    "https://www.gstatic.com/generate_204",
-    "https://speed.cloudflare.com/__down?bytes=5120",
-    "https://cachefly.cachefly.net/1mb.test",
-};
-static constexpr int LIVE_RECHECK_URL_COUNT = 3;
 
 struct LiveRecheckItem {
     std::string uri;
@@ -68,39 +62,6 @@ std::string jsonEscape(const std::string& value) {
     return out.str();
 }
 
-bool looksLikeLiteralIp(const std::string& address) {
-    if (address.empty()) return false;
-    if (address.find(':') != std::string::npos) {
-        for (unsigned char c : address) {
-            if (!(std::isxdigit(c) || c == ':' || c == '.' || c == '[' || c == ']')) return false;
-        }
-        return true;
-    }
-    bool has_dot = false;
-    for (unsigned char c : address) {
-        if (c == '.') {
-            has_dot = true;
-            continue;
-        }
-        if (!std::isdigit(c)) return false;
-    }
-    return has_dot;
-}
-
-std::string endpointKeyForUri(const std::string& uri) {
-    auto parsed = network::UriParser::parse(uri);
-    if (parsed.has_value() && parsed->isValid()) {
-        std::string address = utils::trim(parsed->address);
-        std::transform(address.begin(), address.end(), address.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (looksLikeLiteralIp(address)) return address;
-    }
-    std::string fallback = utils::trim(uri);
-    std::transform(fallback.begin(), fallback.end(), fallback.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    return fallback;
-}
-
 std::vector<std::string> dedupeUrisByEndpoint(const std::vector<std::string>& uris) {
     std::set<std::string> seen_endpoints;
     std::vector<std::string> deduped;
@@ -123,31 +84,6 @@ void dedupeBenchResultsByEndpoint(std::vector<BenchResult>& results) {
         if (seen_endpoints.insert(key).second) deduped.push_back(result);
     }
     results.swap(deduped);
-}
-
-[[maybe_unused]] int reserveTemporaryListenPort() {
-    static std::mutex port_mutex;
-    static int next_port = 21000;
-    std::lock_guard<std::mutex> lock(port_mutex);
-    for (int attempts = 0; attempts < 12000; ++attempts) {
-        const int candidate = next_port++;
-        if (next_port > 45000) next_port = 21000;
-        if (!utils::isPortAlive(candidate, 100)) {
-            return candidate;
-        }
-    }
-    return 0;
-}
-
-[[maybe_unused]] float testProvisionedPortDownload(int port, int timeout_seconds) {
-    const int quick_timeout = std::max(3, std::min(timeout_seconds, 8));
-    const int download_timeout = std::max(8, timeout_seconds);
-    float speed = -1.0f;
-    for (int i = 0; i < LIVE_RECHECK_URL_COUNT && speed <= 0.0f; ++i) {
-        const int url_timeout = i == 0 ? quick_timeout : download_timeout;
-        speed = utils::downloadSpeedViaSocks5(LIVE_RECHECK_URLS[i], "127.0.0.1", port, url_timeout);
-    }
-    return speed;
 }
 
 bool isImportableProxyUri(const std::string& uri) {
@@ -273,6 +209,8 @@ HunterOrchestrator::~HunterOrchestrator() {
 void HunterOrchestrator::initComponents() {
     // Config database
     config_db_ = std::make_unique<network::ConfigDatabase>(constants::CONFIG_DB_MAX_SIZE);
+    // Failover candidates come from, and every live-session probe is recorded in, this database.
+    proxy_server_manager_.attachDatabase(config_db_.get());
     
     // Load persisted config database from disk (survives restarts)
     {
@@ -328,22 +266,10 @@ void HunterOrchestrator::start() {
     if (runtime_dir.empty()) runtime_dir = "runtime";
     const std::string stop_flag = runtime_dir + "/stop.flag";
 
-    // ═══ PHASE 0a: Kill orphaned test processes from previous runs ═══
-    // When the app is killed (e.g. pkill -9), child xray/sing-box processes
-    // become orphans and keep holding ports + RAM. Kill them before starting.
-    {
-        int killed = 0;
-        // pkill -f "temp_xray_test|temp_singbox_test|temp_mihomo_test|proxy_server"
-        // We use the system call since we need pattern matching on the cmdline.
-        int rc = std::system("pkill -9 -f 'temp_xray_test' 2>/dev/null; "
-                             "pkill -9 -f 'temp_singbox_test' 2>/dev/null; "
-                             "pkill -9 -f 'temp_mihomo_test' 2>/dev/null; "
-                             "pkill -9 -f 'proxy_server_' 2>/dev/null");
-        (void)rc;  // pkill returns non-zero if no processes matched
-        std::cout << "[Startup] Cleaned up orphaned test processes" << std::endl;
-        utils::LogRingBuffer::instance().push(
-            "[Startup] Cleaned up orphaned test processes (" + std::to_string(killed) + ")");
-    }
+    // ═══ PHASE 0a: orphaned engines ═══
+    // No `pkill`: engines are bound to this process (PR_SET_PDEATHSIG on POSIX, a
+    // KILL_ON_JOB_CLOSE Job object on Windows) and always reaped, so nothing is left behind and
+    // other Hunter instances' engines are never touched.
 
     // ═══ PHASE 0: Runtime cleanup — remove stale temp files ═══
     if (cleanup_manager_) {
@@ -1043,7 +969,7 @@ HunterOrchestrator::ScrapeResult HunterOrchestrator::scrapeConfigs() {
 }
 
 std::vector<BenchResult> HunterOrchestrator::validateConfigs(
-    const std::vector<std::string>& configs, const std::string& label, int base_port_offset) {
+    const std::vector<std::string>& configs, const std::string& label, int /*base_port_offset: ports are leased*/) {
 
     if (configs.empty()) return {};
 
@@ -1067,19 +993,15 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
     { std::ostringstream _ls; _ls << "[Bench-" << label << "] Testing " << deduped.size() << " configs (batch mode)";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
-    // ─── Batch testing: single xray process with N inbounds ───
-    // Instead of spawning one xray/sing-box process per config (slow, RAM-heavy),
-    // we use batchTestWithXray which starts ONE xray process with all configs as
-    // inbounds on unique SOCKS ports, then tests them all in parallel. This is
-    // 10-50x faster and uses far less RAM.
-    //
-    // Batch size: limited by available ports (500 per batch) and free RAM.
-    // Each inbound adds ~2-5MB to the xray process, so 100 inbounds ≈ 500MB.
+    // ─── Batch testing through ProxyTester::testBatch ───
+    // xray-compatible configs share bisected xray processes; hysteria2/tuic run in isolated
+    // sing-box workers. Every verdict is a typed ProbeResult (leased ports, strict A/B traffic
+    // probes, direct-baseline attribution) applied to the database - engine, config and
+    // local-network problems never count against a server.
     const int timeout_s = speed_test_timeout_.load();
-    const int base_port = constants::DEFAULT_BENCHMARK_BASE_PORT + base_port_offset;
 
     // Dynamic batch size based on free RAM
-    size_t batch_size = 100;  // default: 100 configs per batch (1 xray process)
+    size_t batch_size = 100;  // default: 100 configs per batch
     if (hw.ram_free_gb < 0.5f) batch_size = 10;
     else if (hw.ram_free_gb < 1.0f) batch_size = 25;
     else if (hw.ram_free_gb < 2.0f) batch_size = 50;
@@ -1102,59 +1024,68 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
         size_t end = std::min(offset + batch_size, deduped.size());
         std::vector<std::string> batch_configs(deduped.begin() + offset, deduped.begin() + end);
 
-        // Use a unique base port per batch to avoid conflicts with previous batches
-        int batch_base_port = base_port + static_cast<int>(offset);
-
         { std::ostringstream _ls; _ls << "[Bench-" << label << "] Batch " << (offset / batch_size + 1)
-          << ": testing " << batch_configs.size() << " configs (ports " << batch_base_port << "+)";
+          << ": testing " << batch_configs.size() << " configs";
           utils::LogRingBuffer::instance().push(_ls.str()); }
+
+        // The database must know the endpoint before a typed result can be applied.
+        if (config_db_) {
+            std::set<std::string> unknown;
+            for (const auto& uri : batch_configs) {
+                ConfigHealthRecord probe_rec;
+                if (!config_db_->getRecord(uri, &probe_rec)) unknown.insert(uri);
+            }
+            if (!unknown.empty()) config_db_->addConfigs(unknown, "bench");
+            for (const auto& uri : batch_configs) config_db_->markTestingRound(network::ConfigDatabase::keyFor(uri));
+        }
 
         std::vector<network::ProxyTestResult> batch_results;
         try {
-            batch_results = tester.batchTestWithXray(batch_configs, batch_base_port, timeout_s);
+            network::BatchTestOptions bo;
+            bo.timeout_seconds = timeout_s;
+            bo.bulk = true;   // benchmark candidates also confirm the 64 KiB transfer
+            batch_results = tester.testBatch(batch_configs, bo);
         } catch (const std::exception& ex) {
             utils::LogRingBuffer::instance().push("[Bench-" + label + "] Batch exception: " + std::string(ex.what()));
-            for (size_t i = 0; i < batch_configs.size(); i++) {
-                BenchResult br;
-                br.uri = batch_configs[i];
-                br.error = std::string("Batch exception: ") + ex.what();
-                br.tier = "dead";
-                results.push_back(br);
-            }
-            continue;
         } catch (...) {
             utils::LogRingBuffer::instance().push("[Bench-" + label + "] Batch unknown exception");
-            for (size_t i = 0; i < batch_configs.size(); i++) {
-                BenchResult br;
-                br.uri = batch_configs[i];
-                br.error = "Batch unknown exception";
-                br.tier = "dead";
-                results.push_back(br);
-            }
-            continue;
         }
 
-        // Convert ProxyTestResult → BenchResult
+        // Convert ProxyTestResult -> BenchResult and apply the typed result
         for (size_t i = 0; i < batch_results.size() && i < batch_configs.size(); i++) {
             BenchResult br;
             br.uri = batch_configs[i];
             const auto& r = batch_results[i];
+            bool applied = false;
 
-            br.success = r.success && !r.telegram_only && r.download_speed_kbps > 0.0f;
-            br.telegram_only = r.success && r.telegram_only;
+            br.success = r.success;
+            br.telegram_only = false;   // Telegram is optional capability metadata, not health
             if (br.success) {
-                br.latency_ms = r.download_speed_kbps > 0 ? 1000.0f / r.download_speed_kbps : 5000.0f;
-                br.tier = br.latency_ms <= 3000 ? "gold" : "silver";
-            } else if (br.telegram_only) {
-                br.latency_ms = 0;
-                br.tier = "telegram";
+                br.latency_ms = static_cast<float>(r.latency_ms);   // real max(A,B) wall time
+                br.tier = br.latency_ms <= constants::GOLD_LATENCY_MS ? "gold" : "silver";
             } else {
                 br.latency_ms = 0;
-                br.tier = "dead";
+                // "dead" is a Stability verdict from accumulated evidence, never a single failed or
+                // excluded round: typed outcome / current DB stability decide the label.
+                br.tier = "untested";
+                if (config_db_ && r.has_probe) {
+                    config_db_->applyProbeResult(r.probe);
+                    ConfigHealthRecord rec;
+                    if (config_db_->getRecord(br.uri, &rec)) {
+                        switch (config_db_->evaluate(rec).stability) {
+                            case Stability::Dead: br.tier = "dead"; break;
+                            case Stability::Unstable: br.tier = "unstable"; break;
+                            default: br.tier = "untested"; break;
+                        }
+                    }
+                    applied = true;
+                }
             }
             br.engine_used = r.engine_used;
             br.error = r.error_message;
             results.push_back(br);
+
+            if (config_db_ && r.has_probe && !applied) config_db_->applyProbeResult(r.probe);
         }
 
         if (offset + batch_size < deduped.size()) {
@@ -1165,21 +1096,11 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
 
     dedupeBenchResultsByEndpoint(results);
 
-    // Sort by latency (successful first)
+    // Sort by measured latency (successful first)
     std::sort(results.begin(), results.end(), [](const BenchResult& a, const BenchResult& b) {
         if (a.success != b.success) return a.success > b.success;
-        if (a.telegram_only != b.telegram_only) return a.telegram_only > b.telegram_only;
         return a.latency_ms < b.latency_ms;
     });
-
-    // Update ConfigDB with results
-    if (config_db_) {
-        for (auto& r : results) {
-            config_db_->updateHealth(r.uri, r.success || r.telegram_only,
-                                     r.success ? r.latency_ms : 0.0f,
-                                     r.engine_used, false, r.telegram_only);
-        }
-    }
 
     return results;
 }

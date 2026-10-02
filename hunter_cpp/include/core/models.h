@@ -9,6 +9,8 @@
 #include <mutex>
 #include <atomic>
 
+#include "core/health_score.h"
+
 namespace hunter {
 
 /**
@@ -67,7 +69,8 @@ struct ParsedConfig {
     std::string flow;             // XTLS flow (xtls-rprx-vision)
     std::string ps;               // Remark/name
     std::string type;             // Header type (http, none)
-    std::map<std::string, std::string> extra;  // Extra params
+    std::map<std::string, std::string> extra;  // Extra params (serviceName, plugin, obfs, ...)
+    std::map<std::string, std::string> options;  // FULL option map as parsed (query / vmess JSON); nothing dropped
 
     static bool hasBadChars_(const std::string& s) {
         for (unsigned char c : s) {
@@ -77,11 +80,40 @@ struct ParsedConfig {
     }
     bool isValid() const {
         if (protocol.empty() || address.empty() || port < 1 || port > 65535) return false;
+        // Every field spliced into generated JSON must be free of quotes/backslashes/control chars.
         if (hasBadChars_(address) || hasBadChars_(uuid) || hasBadChars_(sni) ||
-            hasBadChars_(host) || hasBadChars_(encryption)) return false;
+            hasBadChars_(host) || hasBadChars_(encryption) || hasBadChars_(path) ||
+            hasBadChars_(fingerprint) || hasBadChars_(public_key) || hasBadChars_(short_id) ||
+            hasBadChars_(flow) || hasBadChars_(type) || hasBadChars_(network) || hasBadChars_(security))
+            return false;
+        for (const auto& kv : extra) if (hasBadChars_(kv.second)) return false;
+        for (const char* k : {"alpn", "obfs", "obfs-password", "pinSHA256", "congestion_control", "udp_relay_mode"}) {
+            auto it = options.find(k);
+            if (it != options.end() && hasBadChars_(it->second)) return false;
+        }
         if (address.size() > 253 || uuid.size() > 512) return false;
         if ((protocol == "vmess" || protocol == "vless") && uuid.empty()) return false;
         return true;
+    }
+    /// True when the link explicitly asks to skip upstream certificate verification
+    /// (allowInsecure / insecure / skip-cert-verify aliases). Default is verified TLS.
+    bool insecureTls() const {
+        for (const char* k : {"allowInsecure", "insecure", "allow_insecure", "skip-cert-verify", "skip_cert_verify"}) {
+            auto it = options.find(k);
+            if (it != options.end() && (it->second == "1" || it->second == "true" || it->second == "True")) return true;
+        }
+        return false;
+    }
+    std::string option(const char* key, const std::string& def = "") const {
+        auto it = options.find(key);
+        if (it != options.end()) return it->second;
+        it = extra.find(key);
+        return it == extra.end() ? def : it->second;
+    }
+    std::string grpcServiceName() const {
+        auto it = extra.find("serviceName");
+        if (it != extra.end() && !it->second.empty()) return it->second;
+        return path;
     }
     bool isReality() const { return security == "reality"; }
     bool isTLS() const { return security == "tls"; }
@@ -90,6 +122,10 @@ struct ParsedConfig {
     }
 
     // Generate XRay-compatible JSON outbound
+    /// Engine capability gate ("xray" | "sing-box" | "mihomo"). Returns "" when this engine can
+    /// represent EVERY requested policy of the link (transport, plugin, pin, obfs, ...), otherwise a
+    /// human reason. Generators return "" for unrepresentable links: no silent substitution.
+    std::string unsupportedReason(const std::string& engine) const;
     std::string toXrayOutboundJson(int socks_port) const;
     
     // Generate full Xray config JSON with SOCKS inbound
@@ -109,7 +145,7 @@ struct BenchResult {
     std::string uri;
     float latency_ms = 0.0f;
     bool success = false;
-    std::string tier;             // "gold", "silver", "dead"
+    std::string tier;             // "gold","silver" on pass; else "dead"/"unstable" (Stability verdict) or "untested" (excluded/insufficient evidence)
     std::string ps;               // Config remark
     std::string protocol;
     std::string engine_used;
@@ -125,7 +161,9 @@ struct BenchResult {
  */
 struct ConfigHealthRecord {
     std::string uri;
-    std::string uri_hash;         // SHA1 of URI
+    std::string uri_hash;         // == endpoint_key (kept for source compatibility)
+    std::string endpoint_key;     // EndpointKeyV1 ("ek1:<sha256>")
+    int key_version = 1;
     std::string tag;              // Source tag (scrape, github_bg, harvest)
     std::string engine_used;
     double first_seen = 0.0;
@@ -143,6 +181,26 @@ struct ConfigHealthRecord {
     // -1 = unknown/not checked, 0 = blocked, 1 = accessible
     int gemini_status = -1;
     double gemini_checked_at = 0.0;  // Timestamp of last Gemini check
+
+    // ── Stage 4 / D2: typed health evidence (source of truth). The legacy fields above
+    // (alive, latency_ms, consecutive_fails, last_alive_time, ...) are derived from it
+    // by ConfigDatabase and are hints only for records without evidence.
+    HealthEvidence ev;
+    // Session-only scheduling state (not persisted)
+    double next_retry_at = 0.0;   // backoff after excluded (infrastructure/local) rounds
+    int excluded_streak = 0;
+    int legacy_fails = 0;         // consecutive failures reported through the legacy adapter
+    // Country (D4 columns; written by later batches via applyCountryResult)
+    std::vector<std::string> server_ips;
+    std::string server_country;
+    std::string server_country_source;
+    double server_country_at = 0.0;
+    std::string geo_db_version;
+    std::string exit_ip;
+    std::string exit_country;
+    std::string exit_country_source;
+    double exit_country_at = 0.0;
+    uint64_t network_generation = 0;
 };
 
 /**

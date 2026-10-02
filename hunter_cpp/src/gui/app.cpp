@@ -30,8 +30,13 @@
 
 #include "core/constants.h"
 #include "core/utils.h"
+#include "geo/country_database.h"
+#include "geo/country_service.h"
 #include "gui/qr_renderer.h"
+#include "network/connectivity_baseline.h"
 #include "network/continuous_validator.h"
+#include "network/country_provider.h"
+#include "network/traffic_probe.h"
 #include "network/uri_parser.h"
 #include "orchestrator/orchestrator.h"
 
@@ -58,6 +63,7 @@ namespace {
 //
 // We provide multiple sizes (16, 32, 48, 64, 128, 256) so the window
 // manager can pick the best fit for each context.
+#ifndef _WIN32  // Windows: icon comes from resources.rc; stb_image is not included there.
 void setWindowIcon(GLFWwindow* window) {
     // Search for the icon next to the executable, then in common locations.
     std::vector<std::string> search_paths = {
@@ -116,6 +122,7 @@ void setWindowIcon(GLFWwindow* window) {
 
     stbi_image_free(pixels);
 }
+#endif  // !_WIN32
 
 // Portable time function - uses glfwGetTime() on desktop, chrono on Android
 #ifdef __ANDROID__
@@ -127,17 +134,88 @@ inline double portableGetTime() {
 #define glfwGetTime portableGetTime
 #endif
 
-const char* tierLabel(const ConfigHealthRecord& r) {
-    if (!r.alive) return r.total_tests > 0 ? "dead" : "untested";
-    if (r.latency_ms > 0 && r.latency_ms <= constants::GOLD_LATENCY_MS) return "gold";
-    return "silver";
+// ─── Health presentation (Stage 4): real health state / stability / score replace gold/silver ───
+const char* healthLabel(HealthState st) {
+    switch (st) {
+        case HealthState::Healthy: return "Healthy";
+        case HealthState::Degraded: return "Degraded";
+        case HealthState::Unstable: return "Unstable";
+        case HealthState::Dead: return "Dead";
+        case HealthState::Testing: return "Testing";
+        default: return "Unknown";
+    }
 }
 
-ImVec4 tierColor(const char* tier) {
-    if (std::strcmp(tier, "gold") == 0) return ImVec4(0.95f, 0.78f, 0.20f, 1.0f);
-    if (std::strcmp(tier, "silver") == 0) return ImVec4(0.75f, 0.78f, 0.82f, 1.0f);
-    if (std::strcmp(tier, "dead") == 0) return ImVec4(0.85f, 0.35f, 0.35f, 1.0f);
-    return ImVec4(0.55f, 0.55f, 0.55f, 1.0f); // untested
+ImVec4 healthColor(HealthState st) {
+    switch (st) {
+        case HealthState::Healthy: return ImVec4(0.30f, 0.80f, 0.40f, 1.0f);
+        case HealthState::Degraded: return ImVec4(0.90f, 0.78f, 0.25f, 1.0f);
+        case HealthState::Unstable: return ImVec4(0.95f, 0.55f, 0.20f, 1.0f);
+        case HealthState::Dead: return ImVec4(0.85f, 0.35f, 0.35f, 1.0f);
+        case HealthState::Testing: return ImVec4(0.45f, 0.65f, 0.95f, 1.0f);
+        default: return ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+    }
+}
+
+// Stable / Provisional (healthy but not yet certified) / Unstable / Dead / Unrated.
+const char* stabilityLabel(const ConfigHealthRecord& r, const HealthEvaluation& ev) {
+    if (ev.stable) return "Stable";
+    if (r.ev.state == HealthState::Healthy) return "Provisional";
+    switch (ev.stability) {
+        case Stability::Dead: return "Dead";
+        case Stability::Unstable: return "Unstable";
+        case Stability::Stable: return "Stable";
+        default: return "Unrated";
+    }
+}
+
+ImVec4 stabilityColor(const char* label) {
+    if (std::strcmp(label, "Stable") == 0) return ImVec4(0.30f, 0.85f, 0.45f, 1.0f);
+    if (std::strcmp(label, "Provisional") == 0) return ImVec4(0.55f, 0.80f, 0.90f, 1.0f);
+    if (std::strcmp(label, "Unstable") == 0) return ImVec4(0.95f, 0.55f, 0.20f, 1.0f);
+    if (std::strcmp(label, "Dead") == 0) return ImVec4(0.85f, 0.35f, 0.35f, 1.0f);
+    return ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
+}
+
+int healthSortOrder(HealthState st) {
+    switch (st) {
+        case HealthState::Healthy: return 0;
+        case HealthState::Degraded: return 1;
+        case HealthState::Testing: return 2;
+        case HealthState::Unknown: return 3;
+        case HealthState::Unstable: return 4;
+        default: return 5;
+    }
+}
+
+// Cheap, allocation-free case-insensitive substring test (needle already lower-case).
+bool icontains(const std::string& hay, const std::string& needle) {
+    if (needle.empty()) return true;
+    if (hay.size() < needle.size()) return false;
+    for (size_t i = 0; i + needle.size() <= hay.size(); i++) {
+        size_t j = 0;
+        while (j < needle.size() && std::tolower((unsigned char)hay[i + j]) == (unsigned char)needle[j]) j++;
+        if (j == needle.size()) return true;
+    }
+    return false;
+}
+
+// Exit/server country cell text and tooltip with provenance + freshness (D4).
+std::string countryCell(const std::string& iso) {
+    if (iso.empty()) return "Unknown";
+    if (iso == geo::kMixed) return "Mixed";
+    std::string n = geo::countryName(iso);
+    return n.empty() ? iso : iso + " " + n;
+}
+
+const char* sourceDescription(const std::string& src) {
+    if (src == geo::kSrcTrace) return "Cloudflare trace through the tunnel (measured)";
+    if (src == geo::kSrcTraceFallback) return "one.one.one.one trace through the tunnel (measured)";
+    if (src == geo::kSrcOfflineExit) return "exit IP via ipify + offline DB (lower confidence)";
+    if (src == geo::kSrcOfflineIp) return "server IP via offline DB-IP database (hint)";
+    if (src == geo::kSrcDohOffline) return "domain resolved by verified DoH + offline DB (hint)";
+    if (src == geo::kSrcNone) return "could not be determined";
+    return src.empty() ? "not determined yet" : src.c_str();
 }
 
 std::string formatAge(double now, double ts) {
@@ -153,15 +231,86 @@ std::string formatAge(double now, double ts) {
 } // namespace
 
 HunterGuiApp::HunterGuiApp(HunterOrchestrator& orchestrator) : orch_(orchestrator) {
+    // Country service: offline DB-IP provider (registered explicitly, no work done at creation).
+    network::registerBuiltinCountryProviders();
+    auto provider = network::CountryProviderRegistry::instance().create("offline");
+    HunterConfig& cfg = orch_.config();
+    geo::CountryServiceOptions copt;
+    copt.doh_enabled = cfg.countryDohEnabled();
+    copt.doh_max_ttl_s = std::min(3600.0, (double)std::max(60, cfg.dohMaxTtlSeconds()));
+    copt.exit_fresh_s = (double)std::max(60, cfg.exitCountryFreshSeconds());
+    auto transport = network::makeCurlTransport();
+    country_service_ = std::make_shared<geo::CountryService>(
+        provider, geo::makeCloudflareDohResolver(transport), transport, nullptr, copt);
+    target_state_ = std::make_shared<geo::CountryTargetState>();
+    doh_enabled_ui_ = cfg.countryDohEnabled();
+    baseline_enabled_ui_ = cfg.directBaselineEnabled();
+    if (!baseline_enabled_ui_) network::ConnectivityBaseline::shared()->setEnabled(false);
+    std::string tgt = cfg.exitCountryTarget();
+    std::snprintf(target_input_, sizeof(target_input_), "%s", tgt.c_str());
+    target_strict_ui_ = cfg.exitCountryStrict();
+    applyExitTarget(tgt, target_strict_ui_);
+
+    // Country-targeted discovery: reorder the validator's candidate pool (D4).
+    if (auto* db = orch_.configDb()) {
+        auto state = target_state_;
+        ClockFn clock = systemClock();
+        db->setBatchPrioritizer([state, clock](std::vector<ConfigHealthRecord>& pool, int batch) {
+            geo::prioritizeForTarget(pool, batch, state->get(), clock());
+        });
+    }
+
+    // Test/smoke hook: HUNTER_GUI_VIEW=all, HUNTER_GUI_QUERY="exit:DE", HUNTER_GUI_MODE=exit|server.
+    if (const char* v = std::getenv("HUNTER_GUI_VIEW")) { if (std::string(v) == "all") { view_all_ui_ = 1; view_spec_.all_view = true; } }
+    if (const char* q = std::getenv("HUNTER_GUI_QUERY")) {
+        std::snprintf(filter_text_, sizeof(filter_text_), "%s", q);
+        view_spec_.query = filter_text_;
+    }
+    if (const char* m = std::getenv("HUNTER_GUI_MODE")) {
+        std::string ms = m;
+        country_mode_ui_ = ms == "exit" ? 1 : ms == "server" ? 2 : 0;
+        view_spec_.mode = (geo::CountryMode)country_mode_ui_;
+    }
+
     // Runs for the whole life of the app, not just while the orchestrator is
     // running: with the orchestrator stopped the database is still there and
     // the table must keep reflecting it.
     startSnapshotWorker();
+    country_thread_ = std::thread([this]() { countryWorker(); });
+    baseline_thread_ = std::thread([this]() { baselineWorker(); });
 }
 
 HunterGuiApp::~HunterGuiApp() {
-    stopSnapshotWorker();
+    stopSnapshotWorker();   // also stops the country + baseline workers
+    if (auto* db = orch_.configDb()) db->setBatchPrioritizer(nullptr);
     stopOrchestrator();
+}
+
+void HunterGuiApp::markViewDirty() {
+    {
+        std::lock_guard<std::mutex> lk(view_mutex_);
+        view_spec_.version++;
+    }
+    view_dirty_ = true;
+    snapshot_cv_.notify_all();
+}
+
+void HunterGuiApp::applyExitTarget(const std::string& iso, bool strict) {
+    HunterConfig& cfg = orch_.config();
+    cfg.setExitCountryTarget(iso);
+    cfg.setExitCountryStrict(strict);
+    geo::CountryTarget t;
+    t.iso = cfg.exitCountryTarget();
+    t.strict = strict && !t.iso.empty();
+    t.exploration = cfg.countryExplorationRatio();
+    t.exit_fresh_s = (double)std::max(60, cfg.exitCountryFreshSeconds());
+    target_state_->set(t);
+}
+
+void HunterGuiApp::saveConfigNow() {
+    std::error_code ec;
+    std::filesystem::create_directories("runtime", ec);
+    orch_.config().saveToFile("runtime/hunter_config.json");
 }
 
 void HunterGuiApp::startOrchestrator() {
@@ -232,26 +381,181 @@ void HunterGuiApp::startSnapshotWorker() {
 }
 
 void HunterGuiApp::stopSnapshotWorker() {
-    if (!snapshot_thread_.joinable()) return;
     snapshot_stop_ = true;
     snapshot_cv_.notify_all();
-    snapshot_thread_.join();
+    if (snapshot_thread_.joinable()) snapshot_thread_.join();
+    if (country_thread_.joinable()) country_thread_.join();
+    if (baseline_thread_.joinable()) baseline_thread_.join();
+}
+
+// Fills server-IP countries (offline DB; verified DoH for domains only if enabled) in the
+// background. Never touches the GUI thread; the DB is only locked for short, bounded passes.
+void HunterGuiApp::countryWorker() {
+    while (!snapshot_stop_.load()) {
+        auto* db = orch_.configDb();
+        if (db && country_service_) {
+            try {
+                country_service_->setDohEnabled(doh_enabled_ui_);
+                country_filled_ += country_service_->refreshServerCountries(*db, 400);
+            } catch (...) {}
+        }
+        std::unique_lock<std::mutex> lock(snapshot_mutex_);
+        snapshot_cv_.wait_for(lock, std::chrono::seconds(3), [this]() { return snapshot_stop_.load(); });
+    }
+}
+
+// Local connectivity overlay (M5): direct baseline, only while the orchestrator runs.
+void HunterGuiApp::baselineWorker() {
+    while (!snapshot_stop_.load()) {
+        auto base = network::ConnectivityBaseline::shared();
+        if (!baseline_enabled_ui_) {
+            baseline_state_ = 4;
+        } else if (orchestrator_running_.load()) {
+            try {
+                auto snap = base->current(30.0);
+                baseline_at_ = snap.at;
+                switch (snap.state) {
+                    case network::BaselineState::Online: baseline_state_ = 1; break;
+                    case network::BaselineState::Offline: baseline_state_ = 2; break;
+                    default: baseline_state_ = 3; break;
+                }
+            } catch (...) {}
+        } else {
+            baseline_state_ = 0;
+        }
+        std::unique_lock<std::mutex> lock(snapshot_mutex_);
+        snapshot_cv_.wait_for(lock, std::chrono::seconds(10), [this]() { return snapshot_stop_.load(); });
+    }
 }
 
 void HunterGuiApp::snapshotWorker() {
+    // Per-key cache of the searchable text of base64-wrapped URIs (vmess) whose address is not
+    // visible in the raw URI; filled outside the DB lock.
+    std::unordered_map<std::string, std::string> meta_cache;
+    std::unordered_map<std::string, std::tuple<std::string, std::string, std::string, int>> parsed_cache;
     while (!snapshot_stop_.load()) {
+        view_dirty_ = false;
+        ViewSpec spec;
+        {
+            std::lock_guard<std::mutex> lk(view_mutex_);
+            spec = view_spec_;
+        }
         auto* db = orch_.configDb();
+        double next_wait = kSnapshotIntervalSeconds;
         if (db) {
-            // Both calls take the database mutex and walk every record. That
-            // is why this runs here and not on the render thread.
             auto snap = std::make_shared<UiSnapshot>();
+            snap->spec_version = spec.version;
             try {
-                snap->alive = db->getAliveRecords(kMaxAliveRows);
-                auto stats = db->getStats();
-                snap->total = stats.total;
-                snap->alive_count = stats.alive;
-                snap->tested = stats.tested_unique;
-                snap->avg_latency_ms = stats.avg_latency_ms;
+                const auto t0 = std::chrono::steady_clock::now();
+                const HealthThresholds th = db->thresholds();
+                const double now = systemClock()();
+                const auto terms = geo::parseSearchQuery(spec.query);
+
+                // Phase 1 (DB lock held, cheap per-record work only): count + select + cheap rank key.
+                struct Item { int cls; double lfs; float lat; std::string key; };
+                std::vector<Item> items;
+                std::vector<std::pair<std::string, std::string>> need_meta;   // key, uri
+                double lat_sum = 0.0; int lat_n = 0;
+                db->forEachRecord([&](const ConfigHealthRecord& r) {
+                    snap->total++;
+                    if (r.total_tests > 0) snap->tested++;
+                    if (r.alive) { snap->alive_count++; if (r.latency_ms > 0) { lat_sum += r.latency_ms; lat_n++; } }
+                    switch (r.ev.state) {
+                        case HealthState::Healthy: snap->healthy++; break;
+                        case HealthState::Degraded: snap->degraded++; break;
+                        case HealthState::Unstable: snap->unstable++; break;
+                        case HealthState::Dead: snap->dead++; break;
+                        default: snap->unknown++; break;
+                    }
+                    if (!r.exit_country.empty()) snap->exit_counts[r.exit_country]++;
+                    if (!r.server_country.empty()) snap->server_counts[r.server_country]++;
+
+                    if (!spec.all_view && !r.alive) return;
+                    if (!geo::passesCountryFilter(spec.mode, spec.choice, r.exit_country, r.server_country)) return;
+                    if (!terms.empty()) {
+                        auto mc = meta_cache.find(r.endpoint_key);
+                        const std::string empty;
+                        const std::string& cached = mc != meta_cache.end() ? mc->second : empty;
+                        auto text_has = [&](const std::string& t) {
+                            return icontains(r.uri, t) || icontains(r.tag, t) || icontains(cached, t) ||
+                                   (t == "gemini-ok" && r.gemini_status == 1) ||
+                                   (t == "gemini-blocked" && r.gemini_status == 0);
+                        };
+                        if (!geo::matchesSearchQuery(terms, text_has, spec.mode, r.exit_country, r.server_country)) {
+                            // vmess URIs hide the address in base64: parse once (outside the lock) and retry.
+                            if (mc == meta_cache.end() && need_meta.size() < 2000 && r.uri.compare(0, 8, "vmess://") == 0)
+                                need_meta.emplace_back(r.endpoint_key, r.uri);
+                            return;
+                        }
+                    }
+                    Item it;
+                    it.cls = healthSortOrder(r.ev.state);
+                    it.lfs = r.ev.last_full_success;
+                    it.lat = r.latency_ms > 0 ? r.latency_ms : 1e9f;
+                    it.key = r.endpoint_key;
+                    items.push_back(std::move(it));
+                });
+                snap->avg_latency_ms = lat_n ? (float)(lat_sum / lat_n) : 0.0f;
+                snap->matched = (int)items.size();
+
+                // Phase 1b (lock released): parse the few base64-wrapped URIs we could not search.
+                for (auto& kv : need_meta) {
+                    std::string hay;
+                    if (auto pc = network::UriParser::parse(kv.second)) hay = pc->protocol + " " + pc->address + " " + pc->ps;
+                    meta_cache[kv.first] = hay;
+                }
+                if (!need_meta.empty()) view_dirty_ = true;   // re-run immediately with the new metadata
+
+                // Phase 2: rank, cap.
+                const size_t cap = spec.all_view ? (size_t)kMaxAllRows : (size_t)kMaxLiveRows;
+                auto cmp = [](const Item& a, const Item& b) {
+                    if (a.cls != b.cls) return a.cls < b.cls;
+                    if (a.lfs != b.lfs) return a.lfs > b.lfs;
+                    if (a.lat != b.lat) return a.lat < b.lat;
+                    return a.key < b.key;
+                };
+                if (items.size() > cap) {
+                    std::partial_sort(items.begin(), items.begin() + cap, items.end(), cmp);
+                    items.resize(cap);
+                } else {
+                    std::sort(items.begin(), items.end(), cmp);
+                }
+
+                // Phase 3: fetch the visible rows (short individual locks) and evaluate with the shared evaluator.
+                snap->rows.reserve(items.size());
+                for (const auto& it : items) {
+                    if (snapshot_stop_.load()) break;
+                    UiRow row;
+                    if (!db->getRecord(it.key, &row.rec)) continue;
+                    row.ev = evaluateHealth(row.rec.ev, now, th);
+                    auto pc = parsed_cache.find(row.rec.endpoint_key);
+                    if (pc == parsed_cache.end()) {
+                        std::tuple<std::string, std::string, std::string, int> t;
+                        if (auto parsed = network::UriParser::parse(row.rec.uri)) {
+                            t = {parsed->protocol, parsed->address, parsed->ps, parsed->port};
+                        } else {
+                            t = {"?", row.rec.uri.substr(0, std::min<size_t>(row.rec.uri.size(), 40)), "", 0};
+                        }
+                        if (parsed_cache.size() > 20000) parsed_cache.clear();
+                        pc = parsed_cache.emplace(row.rec.endpoint_key, std::move(t)).first;
+                    }
+                    row.protocol = std::get<0>(pc->second);
+                    row.address = std::get<1>(pc->second);
+                    row.ps = std::get<2>(pc->second);
+                    row.port = std::get<3>(pc->second);
+                    snap->rows.push_back(std::move(row));
+                }
+                // Default order = the shared ranking used by DB/failover (tier, score, last success, key).
+                std::stable_sort(snap->rows.begin(), snap->rows.end(), [](const UiRow& a, const UiRow& b) {
+                    RankKey ka, kb;
+                    ka.tier = a.ev.tier; ka.score = a.ev.score; ka.last_full_success = a.rec.ev.last_full_success; ka.key = a.rec.endpoint_key;
+                    kb.tier = b.ev.tier; kb.score = b.ev.score; kb.last_full_success = b.rec.ev.last_full_success; kb.key = b.rec.endpoint_key;
+                    return rankedBefore(ka, kb);
+                });
+                for (const auto& r : snap->rows) if (r.ev.stable) snap->stable++;
+                snap->scan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+                // Adaptive cadence: a slow scan (huge DB) backs off instead of contending with validators.
+                next_wait = std::max(kSnapshotIntervalSeconds, snap->scan_ms / 1000.0 * 8.0);
 
                 std::lock_guard<std::mutex> lock(snapshot_mutex_);
                 latest_snapshot_ = std::move(snap);
@@ -261,9 +565,8 @@ void HunterGuiApp::snapshotWorker() {
         }
 
         std::unique_lock<std::mutex> lock(snapshot_mutex_);
-        snapshot_cv_.wait_for(lock,
-            std::chrono::milliseconds((int)(kSnapshotIntervalSeconds * 1000)),
-            [this]() { return snapshot_stop_.load(); });
+        snapshot_cv_.wait_for(lock, std::chrono::milliseconds((int)(next_wait * 1000)),
+            [this]() { return snapshot_stop_.load() || view_dirty_.load(); });
     }
 }
 
@@ -278,12 +581,19 @@ void HunterGuiApp::refreshSnapshotIfDue() {
 
     if (latest && latest != applied_snapshot_) {
         applied_snapshot_ = latest;
-        snapshot_ = latest->alive;
+        snapshot_ = latest->rows;
         cached_total_ = latest->total;
         cached_alive_ = latest->alive_count;
         cached_tested_ = latest->tested;
         cached_avg_latency_ms_ = latest->avg_latency_ms;
-        for (const auto& r : snapshot_) parsedFor(r.uri);
+        cached_matched_ = latest->matched;
+        cached_stable_ = latest->stable;
+        cached_healthy_ = latest->healthy;
+        cached_dead_ = latest->dead;
+        cached_unknown_ = latest->unknown;
+        cached_scan_ms_ = latest->scan_ms;
+        cached_exit_counts_ = latest->exit_counts;
+        cached_server_counts_ = latest->server_counts;
         rows_dirty_ = true;
     }
 
@@ -301,55 +611,44 @@ void HunterGuiApp::pollProxyServers() {
 }
 
 void HunterGuiApp::rebuildVisibleRowsIfDirty(int sort_col, bool sort_asc) {
-    std::string filter_now(filter_text_);
-    if (!rows_dirty_ && filter_now == last_filter_applied_ &&
-        sort_col == sort_column_ && sort_asc == sort_ascending_) {
-        return;
-    }
+    if (!rows_dirty_ && sort_col == sort_column_ && sort_asc == sort_ascending_) return;
 
-    std::string filter_lower = filter_now;
-    std::transform(filter_lower.begin(), filter_lower.end(), filter_lower.begin(), ::tolower);
-
-    // snapshot_ already contains only alive records (see refreshSnapshotIfDue),
-    // so there is no status filtering to do here — just apply the text filter.
+    // Filtering/search/country selection happen in the snapshot worker (whole DB, off the render
+    // thread); here we only apply the column sort to the published rows.
     visible_rows_.clear();
     visible_rows_.reserve(snapshot_.size());
-    for (const auto& r : snapshot_) {
-        if (!filter_lower.empty()) {
-            const ParsedConfig& pc = parsedFor(r.uri);
-            std::string hay = pc.protocol + " " + pc.address + " " + pc.ps + " " + r.tag;
-            if (r.gemini_status == 1) hay += " gemini-ok";
-            else if (r.gemini_status == 0) hay += " gemini-blocked";
-            std::transform(hay.begin(), hay.end(), hay.begin(), ::tolower);
-            if (hay.find(filter_lower) == std::string::npos) continue;
-        }
-        visible_rows_.push_back(&r);
-    }
+    for (const auto& r : snapshot_) visible_rows_.push_back(&r);
 
     if (sort_col >= 0) {
-        std::sort(visible_rows_.begin(), visible_rows_.end(),
-                  [&](const ConfigHealthRecord* a, const ConfigHealthRecord* b) {
-            bool less = false;
+        std::stable_sort(visible_rows_.begin(), visible_rows_.end(),
+                  [&](const UiRow* a, const UiRow* b) {
+            int c = 0;   // <0: a before b (ascending)
+            auto cmpd = [&](double x, double y) { return x < y ? -1 : (x > y ? 1 : 0); };
             switch (sort_col) {
-                case 0: less = std::strcmp(tierLabel(*a), tierLabel(*b)) < 0; break;
-                case 1: less = parsedFor(a->uri).protocol < parsedFor(b->uri).protocol; break;
-                case 2: less = parsedFor(a->uri).address < parsedFor(b->uri).address; break;
-                case 3: less = a->latency_ms < b->latency_ms; break;
-                case 4: less = a->engine_used < b->engine_used; break;
-                case 5: less = a->last_tested < b->last_tested; break;
-                case 6: less = a->tag < b->tag; break;
-                case 7: less = a->gemini_status < b->gemini_status; break;
-                case 8: {
+                case 0: c = healthSortOrder(a->rec.ev.state) - healthSortOrder(b->rec.ev.state); break;
+                case 1: c = std::strcmp(stabilityLabel(a->rec, a->ev), stabilityLabel(b->rec, b->ev)); break;
+                case 2: c = cmpd(a->ev.score, b->ev.score); break;
+                case 3: c = cmpd(a->ev.has_p90 ? a->ev.p90_ms : 1e18, b->ev.has_p90 ? b->ev.p90_ms : 1e18); break;
+                case 4: c = cmpd(a->rec.latency_ms, b->rec.latency_ms); break;
+                case 5: c = countryCell(a->rec.exit_country).compare(countryCell(b->rec.exit_country)); break;
+                case 6: c = countryCell(a->rec.server_country).compare(countryCell(b->rec.server_country)); break;
+                case 7: c = a->protocol.compare(b->protocol); break;
+                case 8: c = a->address.compare(b->address); break;
+                case 9: c = a->rec.engine_used.compare(b->rec.engine_used); break;
+                case 10: c = cmpd(a->rec.last_tested, b->rec.last_tested); break;
+                case 11: c = a->rec.tag.compare(b->rec.tag); break;
+                case 12: c = a->rec.gemini_status - b->rec.gemini_status; break;
+                case 13: {
                     auto& psm = orch_.proxyServerManager();
-                    less = (int)psm.getStatus(a->uri) < (int)psm.getStatus(b->uri);
+                    c = (int)psm.getStatus(a->rec.uri) - (int)psm.getStatus(b->rec.uri);
                     break;
                 }
             }
-            return sort_asc ? less : !less;
+            if (c == 0) return a->rec.endpoint_key < b->rec.endpoint_key;   // stable, key tie-break
+            return sort_asc ? c < 0 : c > 0;
         });
     }
 
-    last_filter_applied_ = filter_now;
     sort_column_ = sort_col;
     sort_ascending_ = sort_asc;
     rows_dirty_ = false;
@@ -357,7 +656,8 @@ void HunterGuiApp::rebuildVisibleRowsIfDirty(int sort_col, bool sort_asc) {
 
 std::string HunterGuiApp::buildClipboardText(bool selected_only) const {
     std::string out;
-    for (const auto& r : snapshot_) {
+    for (const auto& row : snapshot_) {
+        const auto& r = row.rec;
         if (!r.alive) continue;
         if (selected_only && selected_uris_.find(r.uri) == selected_uris_.end()) continue;
         out += r.uri;
@@ -368,7 +668,8 @@ std::string HunterGuiApp::buildClipboardText(bool selected_only) const {
 
 std::string HunterGuiApp::buildGeminiOkClipboardText() const {
     std::string out;
-    for (const auto& r : snapshot_) {
+    for (const auto& row : snapshot_) {
+        const auto& r = row.rec;
         if (!r.alive) continue;
         if (r.gemini_status != 1) continue;  // only Gemini-accessible
         out += r.uri;
@@ -378,7 +679,7 @@ std::string HunterGuiApp::buildGeminiOkClipboardText() const {
 }
 
 std::string HunterGuiApp::buildExportText() const {
-    // Export includes a header comment + all alive config URIs, one per line.
+    // Export includes a header comment + the visible alive config URIs, one per line.
     // This is suitable for importing into v2rayN, v2rayNG, Clash, etc.
     std::time_t now = std::time(nullptr);
     char timebuf[64];
@@ -391,9 +692,9 @@ std::string HunterGuiApp::buildExportText() const {
     out += "\n# Alive count: ";
     out += std::to_string(cached_alive_);
     out += "\n\n";
-    for (const auto& r : snapshot_) {
-        if (!r.alive) continue;
-        out += r.uri;
+    for (const auto& row : snapshot_) {
+        if (!row.rec.alive) continue;
+        out += row.rec.uri;
         out += '\n';
     }
     return out;
@@ -432,12 +733,15 @@ void HunterGuiApp::renderHeader() {
     ImGui::TextDisabled("- live v2ray configs");
     ImGui::Separator();
 
-    // Uses cached stats from refreshSnapshotIfDue() — NOT a live getStats()
-    // call, which is O(N) over the full DB under the mutex and would stall
-    // the UI if invoked every frame.
+    // Uses cached stats from refreshSnapshotIfDue() — NOT a live getStats() call, which is O(N)
+    // over the full DB under the mutex and would stall the UI if invoked every frame.
     ImGui::Text("Total: %d", cached_total_);
     ImGui::SameLine(0, 24);
-    ImGui::TextColored(tierColor("gold"), "Alive: %d", cached_alive_);
+    ImGui::TextColored(healthColor(HealthState::Healthy), "Alive: %d", cached_alive_);
+    ImGui::SameLine(0, 24);
+    ImGui::TextColored(stabilityColor("Stable"), "Stable: %d", cached_stable_);
+    ImGui::SameLine(0, 24);
+    ImGui::TextColored(healthColor(HealthState::Dead), "Dead: %d", cached_dead_);
     ImGui::SameLine(0, 24);
     ImGui::Text("Tested: %d / %d", cached_tested_, cached_total_);
     ImGui::SameLine(0, 24);
@@ -448,6 +752,21 @@ void HunterGuiApp::renderHeader() {
     if (!orchestrator_running_.load()) {
         ImGui::SameLine(0, 24);
         ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.35f, 1.0f), "STOPPED");
+    }
+
+    // Local connectivity overlay: does NOT change any server's stored health (D1); it only explains
+    // why probes are being excluded / not penalized right now.
+    ImGui::SameLine(0, 24);
+    switch (baseline_state_.load()) {
+        case 1: ImGui::TextColored(ImVec4(0.30f, 0.80f, 0.40f, 1.0f), "Local network: online"); break;
+        case 2: ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.35f, 1.0f), "Local network: OFFLINE (penalties suspended)"); break;
+        case 3: ImGui::TextColored(ImVec4(0.90f, 0.78f, 0.25f, 1.0f), "Local connectivity unconfirmed"); break;
+        case 4: ImGui::TextDisabled("Direct baseline off"); break;
+        default: ImGui::TextDisabled("Local network: idle"); break;
+    }
+    if (ImGui::IsItemHovered()) {
+        ImGui::SetTooltip("Direct (non-proxied) baseline. Offline/unconfirmed rounds never mark servers dead.\n"
+                          "Disable under Configs > 'Direct baseline probes' for privacy.");
     }
 }
 
@@ -473,12 +792,11 @@ void HunterGuiApp::renderControls() {
     ImGui::EndDisabled();
 
     ImGui::SameLine(0, 24);
-    ImGui::SetNextItemWidth(180);
-    ImGui::InputTextWithHint("##filter", "filter live configs...", filter_text_, sizeof(filter_text_));
+    ImGui::TextDisabled("%d shown / %d match", (int)snapshot_.size(), cached_matched_);
 
     // ─── Copy / Export ───
     ImGui::SameLine(0, 16);
-    if (ImGui::Button("Copy All Live")) {
+    if (ImGui::Button("Copy Live")) {
         std::string text = buildClipboardText(false);
         ImGui::SetClipboardText(text.c_str());
         showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " live configs to clipboard");
@@ -491,7 +809,7 @@ void HunterGuiApp::renderControls() {
         showToast("Copied " + std::to_string(count) + " Gemini OK configs to clipboard");
     }
     ImGui::SameLine();
-    if (ImGui::Button("Export All Live")) {
+    if (ImGui::Button("Export Live")) {
         exportToFile(buildExportText(), "hunter_live_configs");
     }
     ImGui::SameLine();
@@ -529,29 +847,145 @@ void HunterGuiApp::renderControls() {
         ImGui::SameLine(0, 16);
         ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "%s", toast_message_.c_str());
     }
+
+    renderFilterBar();
+}
+
+void HunterGuiApp::renderFilterBar() {
+    // View: live only vs every record (Unknown/Unrated/Dead included).
+    bool changed = false;
+    ImGui::SetNextItemWidth(130);
+    const char* views[] = {"Live configs", "All configs"};
+    if (ImGui::Combo("##view", &view_all_ui_, views, 2)) changed = true;
+    if (ImGui::IsItemHovered()) ImGui::SetTooltip("All configs includes Unknown, Unrated and Dead records");
+
+    // Country mode: which column the country filter and bare country searches apply to.
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(120);
+    const char* modes[] = {"Any country", "Exit", "Server"};
+    if (ImGui::Combo("##cmode", &country_mode_ui_, modes, 3)) changed = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Exit = measured through the tunnel. Server = offline IP-database hint (not an exit guarantee).");
+
+    // Country choice: Any / Unknown / Mixed / each country present in the database.
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(190);
+    std::string preview = country_choice_ui_.empty() ? "All countries"
+                          : country_choice_ui_ == "?" ? "Unknown"
+                          : country_choice_ui_ == "~" ? "Mixed" : countryCell(country_choice_ui_);
+    if (ImGui::BeginCombo("##ccountry", preview.c_str())) {
+        if (ImGui::Selectable("All countries", country_choice_ui_.empty())) { country_choice_ui_.clear(); changed = true; }
+        if (ImGui::Selectable("Unknown", country_choice_ui_ == "?")) { country_choice_ui_ = "?"; changed = true; }
+        if (country_mode_ui_ != 1 && ImGui::Selectable("Mixed (server hints disagree)", country_choice_ui_ == "~")) {
+            country_choice_ui_ = "~"; changed = true;
+        }
+        std::map<std::string, int> merged;
+        if (country_mode_ui_ != 2) for (auto& kv : cached_exit_counts_) merged[kv.first] += kv.second;
+        if (country_mode_ui_ != 1) for (auto& kv : cached_server_counts_) if (kv.first != geo::kMixed) merged[kv.first] += kv.second;
+        for (auto& kv : merged) {
+            std::string label = countryCell(kv.first) + "  (" + std::to_string(kv.second) + ")";
+            if (ImGui::Selectable(label.c_str(), country_choice_ui_ == kv.first)) { country_choice_ui_ = kv.first; changed = true; }
+        }
+        ImGui::EndCombo();
+    }
+
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(260);
+    if (ImGui::InputTextWithHint("##filter", "search: text, DE, germany, exit:DE, server:US", filter_text_, sizeof(filter_text_)))
+        changed = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Terms are AND-combined. exit:DE / server:US restrict one column;\n"
+                          "values may be an ISO code, a country name, 'unknown' or (server only) 'mixed'.");
+
+    if (changed) {
+        {
+            std::lock_guard<std::mutex> lk(view_mutex_);
+            view_spec_.all_view = view_all_ui_ == 1;
+            view_spec_.mode = (geo::CountryMode)country_mode_ui_;
+            view_spec_.choice = geo::CountryChoice();
+            if (country_choice_ui_ == "?") view_spec_.choice.kind = geo::CountryChoice::Unknown;
+            else if (country_choice_ui_ == "~") view_spec_.choice.kind = geo::CountryChoice::Mixed;
+            else if (!country_choice_ui_.empty()) { view_spec_.choice.kind = geo::CountryChoice::Specific; view_spec_.choice.iso = country_choice_ui_; }
+            view_spec_.query = filter_text_;
+        }
+        markViewDirty();
+    }
+
+    // Country-targeted discovery + strict exit target (persisted; consumed by failover).
+    ImGui::SameLine(0, 20);
+    ImGui::TextDisabled("Exit target:");
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(40);
+    bool tgt_changed = ImGui::InputText("##target", target_input_, sizeof(target_input_),
+                                        ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank |
+                                        ImGuiInputTextFlags_EnterReturnsTrue);
+    if (ImGui::IsItemDeactivatedAfterEdit()) tgt_changed = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Two-letter country (e.g. DE). Discovery tests fresh matching exits first, then server hints,\n"
+                          "then Unknown (at least 20%% exploration). Empty = no target.");
+    ImGui::SameLine();
+    if (ImGui::Checkbox("Strict", &target_strict_ui_)) tgt_changed = true;
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Strict: recommendations and failover may only use a FRESH MEASURED exit in the target.\n"
+                          "If none exists: 'No verified exit in target'. Never silently switches outside it.");
+    if (tgt_changed) {
+        std::string iso = target_input_;
+        if (!iso.empty() && !geo::isValidIso(iso)) {
+            showToast("Unknown country code: " + iso);
+            std::string cur = orch_.config().exitCountryTarget();
+            std::snprintf(target_input_, sizeof(target_input_), "%s", cur.c_str());
+        } else {
+            applyExitTarget(iso, target_strict_ui_);
+            saveConfigNow();
+            showToast(iso.empty() ? "Exit target cleared" : "Exit target: " + countryCell(iso));
+        }
+    }
+    if (!orch_.config().exitCountryTarget().empty() && target_strict_ui_) {
+        ImGui::SameLine();
+        ImGui::TextColored(ImVec4(0.90f, 0.78f, 0.25f, 1.0f), "strict %s", orch_.config().exitCountryTarget().c_str());
+    }
+
+    // M5 direct-baseline toggle (privacy): when off, attribution uses control tunnels only.
+    ImGui::SameLine(0, 20);
+    if (ImGui::Checkbox("Direct baseline probes", &baseline_enabled_ui_)) {
+        network::ConnectivityBaseline::shared()->setEnabled(baseline_enabled_ui_);
+        orch_.config().set("direct_baseline_enabled", baseline_enabled_ui_);
+        saveConfigNow();
+        if (!baseline_enabled_ui_) baseline_state_ = 4;
+    }
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Direct (non-proxied) connectivity checks to tell local outages from dead servers.\n"
+                          "Off: only already-confirmed control tunnels attribute failures, otherwise rounds are 'Indeterminate'.");
 }
 
 void HunterGuiApp::renderTable() {
     static ImGuiTableFlags flags =
         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
-        ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
-        ImGuiTableFlags_ContextMenuInBody;
+        ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX | ImGuiTableFlags_Sortable |
+        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ContextMenuInBody |
+        ImGuiTableFlags_Hideable | ImGuiTableFlags_Reorderable;
 
     // Leave space at the bottom for the log panel + status bar.
     // Tab bar (~35px) + status bar (~40px) + log panel (~180px) + spacing
     float table_height = ImGui::GetContentRegionAvail().y - 260.0f;
     if (table_height < 100.0f) table_height = 100.0f;
 
-    if (!ImGui::BeginTable("configs", 9, flags, ImVec2(0, table_height))) return;
+    if (!ImGui::BeginTable("configs", 14, flags, ImVec2(0, table_height))) return;
 
-    ImGui::TableSetupColumn("Status", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-    ImGui::TableSetupColumn("Protocol", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-    ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch, 3.0f);
-    ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-    ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-    ImGui::TableSetupColumn("Last tested", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-    ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-    ImGui::TableSetupColumn("Gemini", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+    ImGui::TableSetupColumn("Health", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("Stability", ImGuiTableColumnFlags_WidthFixed, 84.0f);
+    ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed |
+                                     ImGuiTableColumnFlags_PreferSortDescending, 52.0f);
+    ImGui::TableSetupColumn("p90", ImGuiTableColumnFlags_WidthFixed, 66.0f);
+    ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+    ImGui::TableSetupColumn("Exit country", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+    ImGui::TableSetupColumn("Server country", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+    ImGui::TableSetupColumn("Protocol", ImGuiTableColumnFlags_WidthFixed, 72.0f);
+    ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 280.0f);
+    ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 70.0f);
+    ImGui::TableSetupColumn("Last tested", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+    ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, 80.0f);
+    ImGui::TableSetupColumn("Gemini", ImGuiTableColumnFlags_WidthFixed, 60.0f);
     ImGui::TableSetupColumn("Proxy", ImGuiTableColumnFlags_WidthFixed, 140.0f);
     ImGui::TableSetupScrollFreeze(0, 1);
     ImGui::TableHeadersRow();
@@ -567,30 +1001,31 @@ void HunterGuiApp::renderTable() {
     rebuildVisibleRowsIfDirty(sort_col, sort_asc);
     const auto& rows = visible_rows_;
 
-    double now = utils::nowTimestamp();
+    const double now = utils::nowTimestamp();
+    const double exit_fresh_s = (double)std::max(60, orch_.config().exitCountryFreshSeconds());
     ImGuiListClipper clipper;
     clipper.Begin(static_cast<int>(rows.size()));
     while (clipper.Step()) {
         for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-            const ConfigHealthRecord& r = *rows[i];
-            const ParsedConfig& pc = parsedFor(r.uri);
-            const char* tier = tierLabel(r);
+            const UiRow& row = *rows[i];
+            const ConfigHealthRecord& r = row.rec;
+            const HealthEvaluation& ev = row.ev;
             bool selected = selected_uris_.count(r.uri) != 0;
 
             ImGui::TableNextRow();
             ImGui::TableNextColumn();
             ImGui::PushID(r.uri.c_str());
-            ImGuiSelectableFlags sel_flags = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowItemOverlap;
+            ImGuiSelectableFlags sel_flags = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap;
             if (ImGui::Selectable("##row", selected, sel_flags)) {
                 ImGuiIO& io = ImGui::GetIO();
                 if (io.KeyCtrl) {
                     if (selected) selected_uris_.erase(r.uri); else selected_uris_.insert(r.uri);
                 } else if (io.KeyShift && !last_clicked_uri_.empty()) {
-                    auto it_a = std::find_if(rows.begin(), rows.end(), [&](auto* p) { return p->uri == last_clicked_uri_; });
+                    auto it_a = std::find_if(rows.begin(), rows.end(), [&](auto* p) { return p->rec.uri == last_clicked_uri_; });
                     auto it_b = rows.begin() + i;
                     if (it_a != rows.end()) {
                         auto [lo, hi] = std::minmax(it_a, it_b);
-                        for (auto it = lo; it <= hi; ++it) selected_uris_.insert((*it)->uri);
+                        for (auto it = lo; it <= hi; ++it) selected_uris_.insert((*it)->rec.uri);
                     }
                 } else {
                     selected_uris_.clear();
@@ -599,7 +1034,18 @@ void HunterGuiApp::renderTable() {
                 last_clicked_uri_ = r.uri;
             }
             ImGui::SameLine();
-            ImGui::TextColored(tierColor(tier), "%s", tier);
+            ImGui::TextColored(healthColor(r.ev.state), "%s", healthLabel(r.ev.state));
+            if (ImGui::IsItemHovered()) {
+                ImGui::BeginTooltip();
+                ImGui::Text("State: %s   Last outcome: %s", healthLabel(r.ev.state),
+                            r.ev.last_outcome.empty() ? "-" : r.ev.last_outcome.c_str());
+                ImGui::Text("Failure streak: %u   Success streak: %u   Eligible rounds: %u",
+                            r.ev.failure_streak, r.ev.success_streak, r.ev.eligible_count);
+                ImGui::Text("EWMA success: %.2f   Freshness: %.2f   Protocol factor: %.1f",
+                            ev.ewma, ev.freshness, ev.protocol_factor);
+                if (!r.ev.session_confirmed) ImGui::TextDisabled("Not yet re-confirmed in this session");
+                ImGui::EndTooltip();
+            }
             ImGui::PopID();
 
             // ─── Right-click context menu per row ───
@@ -616,16 +1062,68 @@ void HunterGuiApp::renderTable() {
             }
 
             ImGui::TableNextColumn();
-            ImGui::TextUnformatted(pc.protocol.empty() ? "-" : pc.protocol.c_str());
+            const char* stab = stabilityLabel(r, ev);
+            ImGui::TextColored(stabilityColor(stab), "%s", stab);
 
             ImGui::TableNextColumn();
-            std::string addr = pc.address.empty() ? r.uri : (pc.address + ":" + std::to_string(pc.port));
-            if (!pc.ps.empty()) addr += "  (" + pc.ps + ")";
-            ImGui::TextUnformatted(addr.c_str());
+            if (r.ev.eligible_count > 0) ImGui::Text("%.0f", ev.score); else ImGui::TextDisabled("-");
+
+            ImGui::TableNextColumn();
+            if (ev.has_p90) ImGui::Text("%.0f ms", ev.p90_ms); else ImGui::TextDisabled("-");
 
             ImGui::TableNextColumn();
             if (r.alive && r.latency_ms > 0) ImGui::Text("%.0f ms", r.latency_ms);
             else ImGui::TextUnformatted("-");
+
+            // ─── Exit country (measured through the tunnel) ───
+            ImGui::TableNextColumn();
+            {
+                const bool known = !r.exit_country.empty();
+                const bool stale = known && (now - r.exit_country_at) > exit_fresh_s;
+                if (!known) ImGui::TextDisabled("Unknown");
+                else if (stale) ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.55f, 1.0f), "%s ~", countryCell(r.exit_country).c_str());
+                else ImGui::TextUnformatted(countryCell(r.exit_country).c_str());
+                if (ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("Exit country: %s", countryCell(r.exit_country).c_str());
+                    ImGui::Text("Source: %s", sourceDescription(r.exit_country_source));
+                    if (!r.exit_ip.empty()) ImGui::Text("Exit IP: %s", r.exit_ip.c_str());
+                    ImGui::Text("Measured: %s%s", formatAge(now, r.exit_country_at).c_str(),
+                                stale ? "  (STALE - unconfirmed for strict targets)" : "");
+                    ImGui::EndTooltip();
+                }
+            }
+
+            // ─── Server country (offline DB hint; not an exit guarantee) ───
+            ImGui::TableNextColumn();
+            {
+                const bool known = !r.server_country.empty();
+                if (!known) ImGui::TextDisabled("Unknown");
+                else if (r.server_country == geo::kMixed) ImGui::TextColored(ImVec4(0.90f, 0.78f, 0.25f, 1.0f), "Mixed");
+                else ImGui::TextUnformatted(countryCell(r.server_country).c_str());
+                if (ImGui::IsItemHovered()) {
+                    ImGui::BeginTooltip();
+                    ImGui::Text("Server country (hint): %s", countryCell(r.server_country).c_str());
+                    ImGui::Text("Source: %s", sourceDescription(r.server_country_source));
+                    if (!r.server_ips.empty()) {
+                        std::string ips;
+                        for (size_t k = 0; k < r.server_ips.size() && k < 6; k++) ips += (k ? ", " : "") + r.server_ips[k];
+                        ImGui::Text("IPs: %s", ips.c_str());
+                    }
+                    ImGui::Text("Determined: %s   DB: %s", formatAge(now, r.server_country_at).c_str(),
+                                r.geo_db_version.empty() ? "-" : r.geo_db_version.c_str());
+                    ImGui::TextDisabled("Server location is only a hint; the exit may differ.");
+                    ImGui::EndTooltip();
+                }
+            }
+
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(row.protocol.empty() ? "-" : row.protocol.c_str());
+
+            ImGui::TableNextColumn();
+            std::string addr = row.address.empty() ? r.uri : (row.address + ":" + std::to_string(row.port));
+            if (!row.ps.empty()) addr += "  (" + row.ps + ")";
+            ImGui::TextUnformatted(addr.c_str());
 
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(r.engine_used.empty() ? "-" : r.engine_used.c_str());
@@ -1214,6 +1712,29 @@ void HunterGuiApp::renderSettingsTab() {
     ImGui::Separator();
     ImGui::Spacing();
 
+    // Country detection
+    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Country detection");
+    ImGui::Spacing();
+    if (ImGui::Checkbox("Resolve domain endpoints with verified DoH (server-country hints)", &doh_enabled_ui_)) {
+        orch_.config().set("country_doh_enabled", doh_enabled_ui_);
+        if (country_service_) country_service_->setDohEnabled(doh_enabled_ui_);
+        saveConfigNow();
+    }
+    ImGui::TextDisabled("Off by default: sends endpoint hostnames to the DoH provider (1.1.1.1, TLS-verified). Local DNS is never used.");
+    if (ImGui::Checkbox("Direct baseline probes (local connectivity checks)", &baseline_enabled_ui_)) {
+        network::ConnectivityBaseline::shared()->setEnabled(baseline_enabled_ui_);
+        orch_.config().set("direct_baseline_enabled", baseline_enabled_ui_);
+        saveConfigNow();
+    }
+    ImGui::TextDisabled("Server countries filled so far: %d   Exit target: %s%s",
+                        country_filled_.load(),
+                        orch_.config().exitCountryTarget().empty() ? "none" : orch_.config().exitCountryTarget().c_str(),
+                        target_strict_ui_ ? " (strict)" : "");
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
     // Export options
     ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Export");
     ImGui::Spacing();
@@ -1288,6 +1809,29 @@ void HunterGuiApp::renderAboutTab() {
     );
     ImGui::Spacing();
     ImGui::TextDisabled("License: MIT");
+
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Attribution");
+    ImGui::Spacing();
+    ImGui::TextUnformatted("IP Geolocation by DB-IP");
+    ImGui::TextDisabled("https://db-ip.com  -  IP to Country Lite, licensed CC BY 4.0");
+    ImGui::TextDisabled("https://creativecommons.org/licenses/by/4.0/");
+    {
+        auto& gdb = geo::CountryDatabase::instance();
+        if (gdb.isLoaded()) {
+            ImGui::TextDisabled("Database: %s  (%zu IPv4 + %zu IPv6 ranges, %zu countries)", gdb.dbVersion().c_str(),
+                                gdb.ipv4Count(), gdb.ipv6Count(), gdb.countryCount());
+        } else {
+            ImGui::TextDisabled("Offline country database not embedded in this build (server countries stay Unknown).");
+        }
+    }
+    ImGui::TextWrapped(
+        "The database was converted from the vendor CSV into a compact binary range table (HCGEO1) and "
+        "compressed; no ranges were otherwise modified. Country values are approximate hints: a server's "
+        "location does not determine where its traffic exits. Exit countries are measured through the tunnel. "
+        "See THIRD_PARTY_NOTICES.md.");
 }
 
 void HunterGuiApp::renderUpdatePanel() {

@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: recursive
 
       - name: Install dependencies
         run: |
@@ -32,9 +34,78 @@ jobs:
         working-directory: hunter_cpp
         run: cmake --build build -j $(nproc)
 
-      - name: Run tests
+      - name: Run tests (ctest)
         working-directory: hunter_cpp
+        run: ctest --test-dir build --output-on-failure
+
+  # Reproducible static Windows build, cross-compiled with mingw-w64 on Ubuntu.
+  # Deps (zlib/curl+Schannel/GLFW) and engines (xray, sing-box) are pinned + SHA256-verified.
+  windows-cross-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install toolchain + wine
         run: |
-          if [ -f build/hunter_tests ]; then
-            ./build/hunter_tests
-          fi
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 cmake ninja-build python3 curl unzip xz-utils wine64
+
+      - name: Cache static Windows deps
+        uses: actions/cache@v4
+        with:
+          path: build/win-deps
+          key: win-deps-${{ hashFiles('hunter_cpp/scripts/fetch_windows_deps.sh', 'hunter_cpp/cmake/mingw-w64-toolchain.cmake') }}
+
+      - name: Build hunter.exe (static, engines embedded)
+        run: hunter_cpp/scripts/build_windows.sh
+
+      - name: Verify exe is static (system DLL imports only)
+        run: |
+          x86_64-w64-mingw32-objdump -p bin/windows/hunter.exe | grep 'DLL Name' | sort -u | tee imports.txt
+          if grep -i -E 'libcurl|zlib|glfw|libgcc|libstdc|libwinpthread|libssl|libcrypto' imports.txt; then
+            echo "non-system DLL import found"; exit 1; fi
+          ls -l bin/windows/hunter.exe
+
+      - name: Run test suite under wine
+        run: |
+          export WINEDEBUG=-all WINEPREFIX=$RUNNER_TEMP/wine
+          wineboot -i || true
+          ctest --test-dir build/win --output-on-failure
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hunter-windows-x64
+          path: |
+            bin/windows/hunter.exe
+            imports.txt
+
+  # Same sources built natively with MSYS2 MinGW-w64 (checks the non-cross path).
+  windows-msys2-build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python curl unzip xz tar git
+      - name: Build hunter.exe (static)
+        env:
+          HUNTER_NATIVE_MINGW: "1"
+        run: hunter_cpp/scripts/build_windows.sh
+      - name: Run tests
+        run: ctest --test-dir build/win --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: hunter-windows-x64-msys2
+          path: bin/windows/hunter.exe
