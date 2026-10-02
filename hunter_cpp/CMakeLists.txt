@@ -2,6 +2,12 @@ cmake_minimum_required(VERSION 3.16)
 
 project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
+# Windows targets (MinGW cross or MSYS2) use the dedicated file.
+if(WIN32)
+    include(${CMAKE_CURRENT_LIST_DIR}/CMakeListsMingw.txt)
+    return()
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
@@ -32,6 +38,16 @@ include_directories(${CMAKE_SOURCE_DIR})
 option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" OFF)
 set(HUNTER_EMBED_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin" CACHE PATH "Directory containing engine binaries to embed")
 set(HUNTER_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded" CACHE PATH "Output dir for generated embed files")
+
+option(HUNTER_FETCH_ENGINES "Download pinned+SHA256-verified xray/sing-box when HUNTER_EMBED_ENGINES=ON and bin/ lacks them" ON)
+if(HUNTER_EMBED_ENGINES AND HUNTER_FETCH_ENGINES)
+    list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_LIST_DIR}/cmake)
+    include(HunterEngines)
+    if(NOT EXISTS "${HUNTER_EMBED_BIN_DIR}/xray" OR NOT EXISTS "${HUNTER_EMBED_BIN_DIR}/sing-box")
+        set(HUNTER_EMBED_BIN_DIR "${CMAKE_BINARY_DIR}/engines")
+    endif()
+    hunter_fetch_engines(PLATFORM linux OUT_DIR "${HUNTER_EMBED_BIN_DIR}")
+endif()
 
 if(HUNTER_EMBED_ENGINES)
     # Determine target platform for .S section directives.

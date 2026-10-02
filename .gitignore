@@ -95,6 +95,9 @@ hunter_cpp/build_*/
 # ─── GUI Local State ───────────────────────────────────────
 imgui.ini
 
+# Out-of-tree build/deps output (scripts/build_windows.sh)
+/build/
+
 # ─── Geo Database Artifacts ────────────────────────────────
 *.bin.zst
 *.hcgeo
