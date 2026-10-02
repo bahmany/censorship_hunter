@@ -64,56 +64,41 @@ jobs:
           path: release-assets/
 
   # ═══════════════════════════════════════════════════════════════
-  # Windows Build (x86_64, MinGW)
+  # Windows Build (x86_64, mingw-w64 cross — reproducible static exe)
+  # Same pinned-deps path as CI windows-cross-build; MSYS2's packaged
+  # libcurl pulls unsatisfiable ngtcp2/nghttp3/openssl transitive deps.
   # ═══════════════════════════════════════════════════════════════
   build-windows:
-    runs-on: windows-2022
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      - name: Setup MSYS2
-        uses: msys2/setup-msys2@v2
-        with:
-          msystem: UCRT64
-          update: true
-          install: >-
-            base-devel
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-cmake
-            mingw-w64-ucrt-x86_64-ninja
-            mingw-w64-ucrt-x86_64-curl
-            mingw-w64-ucrt-x86_64-zlib
-            mingw-w64-ucrt-x86_64-glfw
-            mingw-w64-ucrt-x86_64-pkg-config
-
-      - name: Configure (CMake)
-        shell: msys2 {0}
-        working-directory: hunter_cpp
+      - name: Install toolchain
         run: |
-          cmake -S . -B build -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_CXX_STANDARD=17 \
-            -DCMAKE_MAKE_PROGRAM=ninja
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mingw-w64 cmake ninja-build python3 curl unzip xz-utils
 
-      - name: Build
-        shell: msys2 {0}
-        working-directory: hunter_cpp
-        run: cmake --build build -j $(nproc)
+      - name: Cache static Windows deps
+        uses: actions/cache@v4
+        with:
+          path: build/win-deps
+          key: win-deps-${{ hashFiles('hunter_cpp/scripts/fetch_windows_deps.sh', 'hunter_cpp/cmake/mingw-w64-toolchain.cmake') }}
+
+      - name: Build hunter.exe (static, engines embedded)
+        run: hunter_cpp/scripts/build_windows.sh
 
       - name: Prepare assets
-        shell: bash
         run: |
           mkdir -p release-assets
-          # GUI binary (WIN32 subsystem)
-          cp hunter_cpp/build/hunter.exe release-assets/hunter-windows-x64.exe
-          # Also include runtime engines if available
-          if [ -f bin/xray.exe ]; then
-            cp bin/xray.exe release-assets/xray-windows-x64.exe
+          cp bin/windows/hunter.exe release-assets/hunter-windows-x64.exe
+          if [ -f bin/windows/xray.exe ]; then
+            cp bin/windows/xray.exe release-assets/xray-windows-x64.exe
           fi
-          if [ -f bin/sing-box.exe ]; then
-            cp bin/sing-box.exe release-assets/sing-box-windows-x64.exe
+          if [ -f bin/windows/sing-box.exe ]; then
+            cp bin/windows/sing-box.exe release-assets/sing-box-windows-x64.exe
           fi
 
       - name: Upload artifact
