@@ -412,8 +412,16 @@ bool parseRecordV4(const std::string& line, const HealthThresholds& th, ConfigHe
     if (!pU64(f[k++], &r.network_generation)) return bad("bad network_generation");
     if (!pD(f[k++], &r.ev.dead_since)) return bad("bad dead_since");
 
+    // A Dead claim the history cannot certify is downgraded (never trusted, never evicted).
+    bool downgraded_dead = false;
+    if (r.ev.state == HealthState::Dead && !deadCertified(r.ev, th)) {
+        r.ev.state = (r.ev.eligible_count == 0 && r.ev.ring.empty()) ? HealthState::Unknown : HealthState::Degraded;
+        r.ev.dead_since = 0.0;
+        downgraded_dead = true;
+    }
     std::string why;
     if (!evidenceConsistent(r.ev, th, &why)) return bad("inconsistent evidence: " + why);
+    (void)downgraded_dead;
     // Identity: recompute and compare; static attributes always come from the URI.
     initRecordIdentity(&r);
     if (r.endpoint_key != stored_key) return bad("endpoint_key mismatch");

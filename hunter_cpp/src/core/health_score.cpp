@@ -169,6 +169,20 @@ ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThr
     return ApplyEffect::Applied;
 }
 
+bool deadCertified(const HealthEvidence& ev, const HealthThresholds& th) {
+    if (ev.state != HealthState::Dead || !(ev.dead_since > 0.0)) return false;
+    size_t run = 0;
+    double first = 0.0, last = 0.0;
+    for (const auto& s : ev.ring) {
+        if (s.success) { run = 0; continue; }
+        if (run == 0) first = s.t;
+        last = s.t;
+        run++;
+        if (run >= static_cast<size_t>(th.dead_failures) && last - first >= th.dead_min_span_s) return true;
+    }
+    return false;
+}
+
 bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, std::string* why) {
     auto bad = [&](const char* m) { if (why) *why = m; return false; };
     if (ev.ring.size() > static_cast<size_t>(std::max(1, th.ring_size))) return bad("ring too large");
@@ -204,6 +218,7 @@ bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, st
             if (ev.failure_streak != 0 || ev.last_full_success <= 0.0) return bad("healthy inconsistent");
             break;
         case HealthState::Dead:
+            if (!deadCertified(ev, th)) return bad("dead without certifying failures in history");
             if (!(ev.dead_since > 0.0)) return bad("dead without dead_since");
             break;
         case HealthState::Unstable:

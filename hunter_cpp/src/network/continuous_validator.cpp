@@ -582,7 +582,7 @@ void ConfigDatabase::evictStale() {
     // failures, old first_seen, or lost success timestamps are never death evidence.
     std::vector<std::string> dead_hashes;
     for (auto& [hash, rec] : db_)
-        if (rec.ev.state == HealthState::Dead && rec.ev.dead_since > 0.0 &&
+        if (rec.ev.state == HealthState::Dead && deadCertified(rec.ev, th_) &&
             (now - rec.ev.dead_since) > th_.dead_retention_s)
             dead_hashes.push_back(hash);
     for (auto& h : dead_hashes) db_.erase(h);
@@ -683,7 +683,7 @@ int ConfigDatabase::removeDeadLive(int dead_ttl_s) {
     for (auto it = db_.begin(); it != db_.end();) {
         const auto& ev = it->second.ev;
         // Only attributed Dead records, measured from entry into Dead.
-        if (ev.state == HealthState::Dead && ev.dead_since > 0.0 && (now - ev.dead_since) > ttl) {
+        if (ev.state == HealthState::Dead && deadCertified(ev, th_) && (now - ev.dead_since) > ttl) {
             it = db_.erase(it);
             removed++;
         } else ++it;

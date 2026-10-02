@@ -396,7 +396,6 @@ int main(int argc, char** argv) {
             {"tampered endpoint key", mutateCol(ra, K0, "ek1:" + std::string(64, '0'))},
             {"unsupported key_version", mutateCol(ra, K0 + 1, "2")},
             {"bad health state", mutateCol(ra, K0 + 2, "Zombie")},
-            {"Dead without failures", mutateCol(ra, K0 + 2, "Dead")},
             {"negative eligible", mutateCol(ra, K0 + 5, "-1")},
             {"streak > eligible", mutateCol(ra, K0 + 6, "99")},
             {"non-numeric timestamp", mutateCol(ra, K0 + 9, "yesterday")},
@@ -858,6 +857,49 @@ int main(int argc, char** argv) {
         for (auto& t : ts) t.join();
         ConfigDatabase x; setup(x);
         CHECK(bad == 0 && x.loadFromDisk(P("tsan.tsv")) == 20 && x.lastLoadReport().rejected == 0, "file valid, nothing lost");
+    }
+    T_END();
+
+    T_CASE("zero-evidence Dead is downgraded on load and never evicted; genuine Dead survives");
+    {
+        ConfigDatabase src; setup(src);
+        std::string u = vless(1);
+        src.addConfigs({u});
+        ConfigHealthRecord r; src.getRecord(u, &r);
+        r.ev.state = HealthState::Dead;
+        r.ev.dead_since = NOW - 10 * 86400;
+        auto write1 = [&](const char* name, const ConfigHealthRecord& rec) {
+            spit(P(name), std::string("#HUNTER_CONFIG_DB_V4\n") + v4ColumnsLine() + "\n" +
+                              serializeRecordV4(rec, NOW, src.thresholds()) + "\n");
+        };
+        write1("zero_dead.tsv", r);
+        ConfigDatabase d; setup(d);
+        CHECK(d.loadFromDisk(P("zero_dead.tsv")) == 1 && d.lastLoadReport().rejected == 0, "loads");
+        ConfigHealthRecord x; d.getRecord(u, &x);
+        CHECK(x.ev.state == HealthState::Unknown && x.ev.dead_since == 0.0 && x.needs_retest, "downgraded to Unknown, needs retest");
+        CHECK(d.evictDead() == 0 && d.removeDeadLive(1) == 0 && d.size() == 1, "not evicted");
+        // Dead claim with a ring that holds only successes
+        ConfigDatabase s2; setup(s2); s2.addConfigs({u});
+        s2.applyProbeResult(passFor(u, NOW - 100));
+        s2.applyProbeResult(passFor(u, NOW - 50));
+        ConfigHealthRecord r2; s2.getRecord(u, &r2);
+        r2.ev.state = HealthState::Dead; r2.ev.dead_since = NOW - 10 * 86400;
+        write1("success_dead.tsv", r2);
+        ConfigDatabase d2; setup(d2);
+        d2.loadFromDisk(P("success_dead.tsv"));
+        d2.getRecord(u, &x);
+        CHECK(x.ev.state == HealthState::Degraded && x.ev.dead_since == 0.0 && d2.evictDead() == 0, "success-only history cannot be Dead");
+        // Genuine Dead (3 attributed failures spanning >= min span) is kept through save/reload and evicted after retention
+        ConfigDatabase g; setup(g); g.addConfigs({u});
+        for (double t : {0.0, 15.0, 30.0}) g.applyProbeResult(failFor(u, NOW - 10 * 86400 + t));
+        g.getRecord(u, &x);
+        CHECK(x.ev.state == HealthState::Dead, "genuine Dead reached");
+        g.saveToDisk(P("genuine_dead.tsv"));
+        ConfigDatabase g2; setup(g2);
+        g2.loadFromDisk(P("genuine_dead.tsv"));
+        g2.getRecord(u, &x);
+        CHECK(x.ev.state == HealthState::Dead && x.ev.failure_streak == 0 && x.needs_retest, "reloads as Dead with inactive streak");
+        CHECK(g2.evictDead() == 1, "certified Dead past retention is evicted");
     }
     T_END();
 

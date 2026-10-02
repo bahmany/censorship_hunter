@@ -111,6 +111,10 @@ ApplyEffect applyProbe(HealthEvidence& ev, const ProbeResult& r, const HealthThr
 // Restart / network-generation boundary: drops session-dependent confirmation (success run,
 // bulk confirmation, certification) while keeping the historical ring for display.
 void resetSessionEvidence(HealthEvidence& ev);
+/// Dead is only valid if the history ring holds a run of >= dead_failures consecutive attributable
+/// failures spanning >= dead_min_span_s, and dead_since > 0. Used on load, in consistency checks
+/// and before any eviction.
+bool deadCertified(const HealthEvidence& ev, const HealthThresholds& th);
 // Checks internal consistency (states/streaks vs ring); used when loading files.
 bool evidenceConsistent(const HealthEvidence& ev, const HealthThresholds& th, std::string* why);
 
