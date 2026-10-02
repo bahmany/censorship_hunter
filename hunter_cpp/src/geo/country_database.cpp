@@ -141,6 +141,22 @@ inline uint32_t readU32LE(const uint8_t* p) {
            (static_cast<uint32_t>(p[3]) << 24);
 }
 
+inline void makeIpv4CacheKey(uint32_t ip, uint32_t db_version_id, CacheKey& key) noexcept {
+    key.db_version_id = db_version_id;
+    std::memset(key.ip, 0, 10);
+    key.ip[10] = 0xFF;
+    key.ip[11] = 0xFF;
+    key.ip[12] = static_cast<uint8_t>((ip >> 24) & 0xFF);
+    key.ip[13] = static_cast<uint8_t>((ip >> 16) & 0xFF);
+    key.ip[14] = static_cast<uint8_t>((ip >> 8) & 0xFF);
+    key.ip[15] = static_cast<uint8_t>(ip & 0xFF);
+}
+
+inline void makeIpv6CacheKey(const uint8_t ip16[16], uint32_t db_version_id, CacheKey& key) noexcept {
+    key.db_version_id = db_version_id;
+    std::memcpy(key.ip, ip16, 16);
+}
+
 } // namespace
 
 CountryDatabase::CountryDatabase()
@@ -155,11 +171,12 @@ CountryDatabase::CountryDatabase(CountryDatabase&& other) noexcept {
     std::lock_guard<std::mutex> lock(other.cache_mutex_);
     is_loaded_ = other.is_loaded_;
     db_version_ = std::move(other.db_version_);
+    db_version_id_ = other.db_version_id_;
     last_error_ = std::move(other.last_error_);
     countries_ = std::move(other.countries_);
     ipv4_entries_ = std::move(other.ipv4_entries_);
     ipv6_entries_ = std::move(other.ipv6_entries_);
-    max_cache_capacity_ = other.max_cache_capacity_;
+    max_cache_capacity_.store(other.max_cache_capacity_.load(std::memory_order_relaxed), std::memory_order_relaxed);
     cache_list_ = std::move(other.cache_list_);
     cache_map_ = std::move(other.cache_map_);
     other.is_loaded_ = false;
@@ -170,11 +187,12 @@ CountryDatabase& CountryDatabase::operator=(CountryDatabase&& other) noexcept {
         std::scoped_lock lock(cache_mutex_, other.cache_mutex_);
         is_loaded_ = other.is_loaded_;
         db_version_ = std::move(other.db_version_);
+        db_version_id_ = other.db_version_id_;
         last_error_ = std::move(other.last_error_);
         countries_ = std::move(other.countries_);
         ipv4_entries_ = std::move(other.ipv4_entries_);
         ipv6_entries_ = std::move(other.ipv6_entries_);
-        max_cache_capacity_ = other.max_cache_capacity_;
+        max_cache_capacity_.store(other.max_cache_capacity_.load(std::memory_order_relaxed), std::memory_order_relaxed);
         cache_list_ = std::move(other.cache_list_);
         cache_map_ = std::move(other.cache_map_);
         other.is_loaded_ = false;
@@ -410,6 +428,7 @@ bool CountryDatabase::loadFromBuffer(const uint8_t* data, size_t size) {
     ipv4_entries_ = std::move(new_v4);
     ipv6_entries_ = std::move(new_v6);
     db_version_ = source_date.empty() ? "unknown" : source_date;
+    db_version_id_++;
     is_loaded_ = true;
     last_error_.clear();
 
@@ -451,6 +470,10 @@ bool CountryDatabase::isLoaded() const {
 
 std::string CountryDatabase::dbVersion() const {
     return db_version_;
+}
+
+uint32_t CountryDatabase::dbVersionId() const {
+    return db_version_id_;
 }
 
 size_t CountryDatabase::ipv4Count() const {
@@ -499,34 +522,9 @@ std::string CountryDatabase::lookup(const std::string& ip_str) const {
         return kUnknown;
     }
 
-    if (isPrivateOrReserved(normalized)) {
-        return kUnknown;
-    }
-
-    std::string cache_key = normalized + "@" + db_version_;
-    {
-        std::lock_guard<std::mutex> lock(cache_mutex_);
-        auto it = cache_map_.find(cache_key);
-        if (it != cache_map_.end()) {
-            cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
-            return it->second->second;
-        }
-    }
-
-    if (!is_loaded_) {
-        return kUnknown;
-    }
-
     if (normalized.find(':') != std::string::npos) {
         uint8_t addr6[16];
         if (inet_pton(AF_INET6, normalized.c_str(), addr6) == 1) {
-            if (isIpv4Mapped(addr6)) {
-                uint32_t v4 = (static_cast<uint32_t>(addr6[12]) << 24) |
-                              (static_cast<uint32_t>(addr6[13]) << 16) |
-                              (static_cast<uint32_t>(addr6[14]) << 8) |
-                              static_cast<uint32_t>(addr6[15]);
-                return lookupIpv4(v4);
-            }
             return lookupIpv6(addr6);
         }
     } else {
@@ -560,14 +558,12 @@ std::string CountryDatabase::lookupIpv4(uint32_t ip) const {
         return kUnknown;
     }
 
-    char ip_buf[32];
-    std::snprintf(ip_buf, sizeof(ip_buf), "%u.%u.%u.%u",
-                  (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF);
-    std::string cache_key = std::string(ip_buf) + "@" + db_version_;
+    CacheKey key;
+    makeIpv4CacheKey(ip, db_version_id_, key);
 
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
-        auto it = cache_map_.find(cache_key);
+        auto it = cache_map_.find(key);
         if (it != cache_map_.end()) {
             cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
             return it->second->second;
@@ -598,15 +594,13 @@ std::string CountryDatabase::lookupIpv4(uint32_t ip) const {
         }
     }
 
-    putInCache(cache_key, result);
+    putInCache(key, result);
     return result;
 }
 
 std::string CountryDatabase::lookupIpv6(const uint8_t ip16[16]) const {
-    if (isPrivateOrReservedIpv6(ip16)) {
-        return kUnknown;
-    }
-
+    // 1. Transition mechanisms mapping to embedded IPv4:
+    // IPv4-mapped (::ffff:0:0/96)
     if (isIpv4Mapped(ip16)) {
         uint32_t v4 = (static_cast<uint32_t>(ip16[12]) << 24) |
                       (static_cast<uint32_t>(ip16[13]) << 16) |
@@ -615,13 +609,36 @@ std::string CountryDatabase::lookupIpv6(const uint8_t ip16[16]) const {
         return lookupIpv4(v4);
     }
 
-    char ip_buf[INET6_ADDRSTRLEN] = {0};
-    inet_ntop(AF_INET6, ip16, ip_buf, sizeof(ip_buf));
-    std::string cache_key = std::string(ip_buf) + "@" + db_version_;
+    // NAT64 Well-Known Prefix (64:ff9b::/96 RFC 6052)
+    if (isNat64(ip16)) {
+        uint32_t v4 = (static_cast<uint32_t>(ip16[12]) << 24) |
+                      (static_cast<uint32_t>(ip16[13]) << 16) |
+                      (static_cast<uint32_t>(ip16[14]) << 8) |
+                      static_cast<uint32_t>(ip16[15]);
+        return lookupIpv4(v4);
+    }
+
+    // 6to4 (2002::/16 RFC 3056)
+    if (is6to4(ip16)) {
+        uint32_t v4 = (static_cast<uint32_t>(ip16[2]) << 24) |
+                      (static_cast<uint32_t>(ip16[3]) << 16) |
+                      (static_cast<uint32_t>(ip16[4]) << 8) |
+                      static_cast<uint32_t>(ip16[5]);
+        return lookupIpv4(v4);
+    }
+
+    // 2. Reserved spaces (includes Teredo 2001::/32, documentation, ULA, link-local, multicast, etc.)
+    if (isPrivateOrReservedIpv6(ip16)) {
+        return kUnknown;
+    }
+
+    // 3. Thread-safe LRU cache lookup with raw 16-byte address + db_version_id
+    CacheKey key;
+    makeIpv6CacheKey(ip16, db_version_id_, key);
 
     {
         std::lock_guard<std::mutex> lock(cache_mutex_);
-        auto it = cache_map_.find(cache_key);
+        auto it = cache_map_.find(key);
         if (it != cache_map_.end()) {
             cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
             return it->second->second;
@@ -656,15 +673,36 @@ std::string CountryDatabase::lookupIpv6(const uint8_t ip16[16]) const {
         }
     }
 
-    putInCache(cache_key, result);
+    putInCache(key, result);
     return result;
 }
 
-bool CountryDatabase::isIpv4Mapped(const uint8_t ip[16]) {
+bool CountryDatabase::isIpv4Mapped(const uint8_t ip[16]) noexcept {
     for (int i = 0; i < 10; ++i) {
         if (ip[i] != 0) return false;
     }
     return (ip[10] == 0xFF && ip[11] == 0xFF);
+}
+
+bool CountryDatabase::isNat64(const uint8_t ip[16]) noexcept {
+    // 64:ff9b::/96 (RFC 6052): bytes 0..3 are 0x00, 0x64, 0xFF, 0x9B; bytes 4..11 are 0
+    if (ip[0] != 0x00 || ip[1] != 0x64 || ip[2] != 0xFF || ip[3] != 0x9B) {
+        return false;
+    }
+    for (int i = 4; i < 12; ++i) {
+        if (ip[i] != 0) return false;
+    }
+    return true;
+}
+
+bool CountryDatabase::is6to4(const uint8_t ip[16]) noexcept {
+    // 2002::/16 (RFC 3056)
+    return (ip[0] == 0x20 && ip[1] == 0x02);
+}
+
+bool CountryDatabase::isTeredo(const uint8_t ip[16]) noexcept {
+    // 2001::/32 (RFC 4380)
+    return (ip[0] == 0x20 && ip[1] == 0x01 && ip[2] == 0x00 && ip[3] == 0x00);
 }
 
 bool CountryDatabase::isPrivateOrReservedIpv4(uint32_t ip) {
@@ -703,6 +741,22 @@ bool CountryDatabase::isPrivateOrReservedIpv4(uint32_t ip) {
 }
 
 bool CountryDatabase::isPrivateOrReservedIpv6(const uint8_t ip[16]) {
+    // Check transition mechanisms that map to embedded IPv4
+    if (isIpv4Mapped(ip) || isNat64(ip)) {
+        uint32_t v4 = (static_cast<uint32_t>(ip[12]) << 24) |
+                      (static_cast<uint32_t>(ip[13]) << 16) |
+                      (static_cast<uint32_t>(ip[14]) << 8) |
+                      static_cast<uint32_t>(ip[15]);
+        return isPrivateOrReservedIpv4(v4);
+    }
+    if (is6to4(ip)) {
+        uint32_t v4 = (static_cast<uint32_t>(ip[2]) << 24) |
+                      (static_cast<uint32_t>(ip[3]) << 16) |
+                      (static_cast<uint32_t>(ip[4]) << 8) |
+                      static_cast<uint32_t>(ip[5]);
+        return isPrivateOrReservedIpv4(v4);
+    }
+
     // :: (unspecified, 16 zero bytes)
     static const uint8_t kUnspecified[16] = {0};
     if (std::memcmp(ip, kUnspecified, 16) == 0) return true;
@@ -718,6 +772,11 @@ bool CountryDatabase::isPrivateOrReservedIpv6(const uint8_t ip[16]) {
             if (ip[i] != 0) { zero = false; break; }
         }
         if (zero) return true;
+    }
+
+    // 2001::/32 (Teredo RFC 4380)
+    if (isTeredo(ip)) {
+        return true;
     }
 
     // 2001:db8::/32 (Documentation RFC 3849): 2001:0db8::
@@ -750,13 +809,6 @@ bool CountryDatabase::isPrivateOrReserved(const std::string& ip_str) {
     if (s.find(':') != std::string::npos) {
         uint8_t addr6[16];
         if (inet_pton(AF_INET6, s.c_str(), addr6) == 1) {
-            if (isIpv4Mapped(addr6)) {
-                uint32_t v4 = (static_cast<uint32_t>(addr6[12]) << 24) |
-                              (static_cast<uint32_t>(addr6[13]) << 16) |
-                              (static_cast<uint32_t>(addr6[14]) << 8) |
-                              static_cast<uint32_t>(addr6[15]);
-                return isPrivateOrReservedIpv4(v4);
-            }
             return isPrivateOrReservedIpv6(addr6);
         }
     } else {
@@ -769,22 +821,24 @@ bool CountryDatabase::isPrivateOrReserved(const std::string& ip_str) {
     return true; // Unparseable string treated as private/Unknown
 }
 
-void CountryDatabase::putInCache(const std::string& cache_key, const std::string& result) const {
-    if (max_cache_capacity_ == 0) return;
+void CountryDatabase::putInCache(const CacheKey& key, const std::string& result) const {
     std::lock_guard<std::mutex> lock(cache_mutex_);
-    auto it = cache_map_.find(cache_key);
+    size_t cap = max_cache_capacity_.load(std::memory_order_relaxed);
+    if (cap == 0) return;
+
+    auto it = cache_map_.find(key);
     if (it != cache_map_.end()) {
         cache_list_.splice(cache_list_.begin(), cache_list_, it->second);
         it->second->second = result;
         return;
     }
-    if (cache_list_.size() >= max_cache_capacity_) {
+    if (cache_list_.size() >= cap) {
         const auto& old_key = cache_list_.back().first;
         cache_map_.erase(old_key);
         cache_list_.pop_back();
     }
-    cache_list_.emplace_front(cache_key, result);
-    cache_map_[cache_key] = cache_list_.begin();
+    cache_list_.emplace_front(key, result);
+    cache_map_[key] = cache_list_.begin();
 }
 
 size_t CountryDatabase::cacheSize() const {
@@ -793,7 +847,7 @@ size_t CountryDatabase::cacheSize() const {
 }
 
 size_t CountryDatabase::cacheCapacity() const {
-    return max_cache_capacity_;
+    return max_cache_capacity_.load(std::memory_order_relaxed);
 }
 
 void CountryDatabase::clearCache() {
@@ -804,8 +858,8 @@ void CountryDatabase::clearCache() {
 
 void CountryDatabase::setCacheCapacity(size_t capacity) {
     std::lock_guard<std::mutex> lock(cache_mutex_);
-    max_cache_capacity_ = capacity;
-    while (cache_list_.size() > max_cache_capacity_) {
+    max_cache_capacity_.store(capacity, std::memory_order_relaxed);
+    while (cache_list_.size() > capacity) {
         const auto& old_key = cache_list_.back().first;
         cache_map_.erase(old_key);
         cache_list_.pop_back();

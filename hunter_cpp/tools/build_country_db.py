@@ -296,6 +296,7 @@ def generate_embed_files(out_dir: Path, zst_filename: str, comp_size: int, raw_s
         "// Embedded offline country database for Censorship Hunter.",
         "// Data source: IP Geolocation by DB-IP (https://db-ip.com), CC BY 4.0.",
         "#pragma once",
+        "#include <stdint.h>",
         "",
         "#define HUNTER_EMBED_HAS_GEO 1",
         "#define HUNTER_EMBED_GEO_USE_ZSTD 1",
@@ -305,10 +306,10 @@ def generate_embed_files(out_dir: Path, zst_filename: str, comp_size: int, raw_s
         "#endif",
         "",
         "extern const unsigned char kGeoZst[];",
-        "extern const unsigned long  kGeoZstLen;",
-        f"static const unsigned long  kGeoOrigLen = {raw_size};",
-        f'static const char           kGeoSha256[] = "{digest}";',
-        f'static const char           kGeoSourceDate[] = "{source_ym}";',
+        "extern const uint64_t      kGeoZstLen;",
+        f"static const uint64_t      kGeoOrigLen = {raw_size}ULL;",
+        f'static const char          kGeoSha256[] = "{digest}";',
+        f'static const char          kGeoSourceDate[] = "{source_ym}";',
         "",
         "#ifdef __cplusplus",
         "}",
@@ -332,10 +333,14 @@ def generate_embed_files(out_dir: Path, zst_filename: str, comp_size: int, raw_s
     asm_lines.append("    .global kGeoZst")
     asm_lines.append("kGeoZst:")
     asm_lines.append(f'    .incbin "{zst_filename}"')
+    asm_lines.append("    .balign 8")
     asm_lines.append("    .global kGeoZstLen")
     asm_lines.append("kGeoZstLen:")
     asm_lines.append(f"    .quad {comp_size}")
     asm_lines.append("")
+    if not target_win:
+        asm_lines.append('    .section .note.GNU-stack,"",@progbits')
+        asm_lines.append("")
     (out_dir / "geo_embedded.S").write_text("\n".join(asm_lines))
 
     # Metadata JSON

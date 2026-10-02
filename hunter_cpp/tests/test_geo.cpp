@@ -735,6 +735,39 @@ void test_embedded_database() {
     PASS();
 }
 
+void test_transition_mechanisms() {
+    TEST("CountryDatabase IPv6 transition mechanisms (NAT64, 6to4, Teredo, IPv4-mapped)");
+
+    CountryDatabase db;
+    CHECK(db.loadFromBuffer(kSyntheticCompressedDb, sizeof(kSyntheticCompressedDb)), "load failed");
+
+    // 1. NAT64 (64:ff9b::/96) -> maps to embedded IPv4
+    CHECK(db.lookup("64:ff9b::8.8.8.8") == "US", "NAT64 64:ff9b::8.8.8.8 should map to US");
+    CHECK(db.lookup("64:ff9b::1.1.1.100") == "AU", "NAT64 64:ff9b::1.1.1.100 should map to AU");
+    CHECK(db.lookup("64:ff9b::10.0.0.1") == CountryDatabase::kUnknown, "NAT64 with private IPv4 must be Unknown");
+
+    // 2. 6to4 (2002::/16) -> maps to embedded IPv4 (bytes 2..5)
+    // 2002:0808:0808:: encodes 8.8.8.8
+    CHECK(db.lookup("2002:0808:0808::") == "US", "6to4 2002:0808:0808:: should map to US");
+    // 2002:0101:0164:: encodes 1.1.1.100 (0x64 = 100)
+    CHECK(db.lookup("2002:0101:0164::") == "AU", "6to4 2002:0101:0164:: should map to AU");
+    // 2002:0a00:0001:: encodes 10.0.0.1
+    CHECK(db.lookup("2002:0a00:0001::") == CountryDatabase::kUnknown, "6to4 with private IPv4 must be Unknown");
+
+    // 3. Teredo (2001::/32) -> Unknown
+    CHECK(db.lookup("2001::1") == CountryDatabase::kUnknown, "Teredo 2001::1 must be Unknown");
+    CHECK(db.lookup("2001:0000:4136:e378:8000:63bf:3fff:fdd2") == CountryDatabase::kUnknown,
+          "Teredo full address must be Unknown");
+
+    // 4. IPv4-mapped IPv6 (::ffff:0:0/96) -> maps to IPv4
+    CHECK(db.lookup("::ffff:8.8.8.8") == "US", "IPv4-mapped ::ffff:8.8.8.8 should map to US");
+    CHECK(db.lookup("::ffff:1.1.1.100") == "AU", "IPv4-mapped ::ffff:1.1.1.100 should map to AU");
+    CHECK(db.lookup("::ffff:192.168.1.1") == CountryDatabase::kUnknown,
+          "IPv4-mapped private IPv4 must be Unknown");
+
+    PASS();
+}
+
 int main() {
     std::cout << "=== Running Offline Geo Database Tests (Stage 4 C1) ===" << std::endl;
 
@@ -749,6 +782,7 @@ int main() {
     test_thread_safe_cache();
     test_zstd_decompression();
     test_lookup_by_bytes_and_formatting();
+    test_transition_mechanisms();
     test_embedded_database();
 
     std::cout << "=== Test Results: " << tests_passed << "/" << tests_run << " passed";

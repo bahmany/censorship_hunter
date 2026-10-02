@@ -1,7 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <list>
 #include <memory>
 #include <mutex>
@@ -12,17 +14,56 @@
 namespace hunter::geo {
 
 /**
+ * @brief Raw 16-byte IP address + db_version_id cache key.
+ *
+ * Eliminates heap allocations and string conversions on cache lookups.
+ * IPv4 addresses are stored in standard IPv4-mapped IPv6 representation (RFC 4291).
+ */
+struct CacheKey {
+    uint8_t ip[16];
+    uint32_t db_version_id;
+
+    bool operator==(const CacheKey& other) const noexcept {
+        return db_version_id == other.db_version_id &&
+               std::memcmp(ip, other.ip, 16) == 0;
+    }
+};
+
+struct CacheKeyHash {
+    size_t operator()(const CacheKey& k) const noexcept {
+        // 64-bit FNV-1a hash over raw 20-byte struct
+        uint64_t h = 14695981039346656037ULL;
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&k);
+        for (size_t i = 0; i < sizeof(CacheKey); ++i) {
+            h ^= p[i];
+            h *= 1099511628211ULL;
+        }
+        return static_cast<size_t>(h);
+    }
+};
+
+/**
  * @brief Offline IP Geolocation Database using HCGEO1 format with LRU caching.
  *
  * Provides high-performance, thread-safe binary-search lookups for IPv4 and IPv6
  * addresses mapped to ISO-3166-1 alpha-2 country codes.
  *
  * Guarantees:
- * - Thread-safe LRU cache (default max 100k entries, keyed by ip + db_version)
+ * - Thread-safe LRU cache (default max 100k entries, keyed by raw IP bytes + db_version_id)
  * - Strict verification of header magic, version, endianness, payload SHA-256,
  *   dictionary codes, and non-overlapping sorted IP ranges.
- * - Private/reserved/loopback/multicast ranges map to "Unknown".
+ * - Private, reserved, loopback, multicast, and transition ranges handled:
+ *   - NAT64 (64:ff9b::/96) -> mapped to embedded IPv4
+ *   - 6to4 (2002::/16) -> mapped to embedded IPv4
+ *   - Teredo (2001::/32) -> Unknown
+ *   - IPv4-mapped (::ffff:0:0/96) -> mapped to IPv4
  * - Failures fail geo only, never crashing or interrupting network tasks.
+ *
+ * Concurrency:
+ * - Database loading methods (loadFromBuffer, loadFromFile, loadEmbedded) mutate database
+ *   state and should be called at startup or synchronized before concurrent lookups.
+ * - All query methods (lookup, lookupIpv4, lookupIpv6, isPrivateOrReserved, cacheSize)
+ *   are thread-safe and safe for concurrent calls from multiple threads.
  */
 class CountryDatabase {
 public:
@@ -71,6 +112,7 @@ public:
     // Query status and metadata
     bool isLoaded() const;
     std::string dbVersion() const;
+    uint32_t dbVersionId() const;
     size_t ipv4Count() const;
     size_t ipv6Count() const;
     size_t countryCount() const;
@@ -107,6 +149,12 @@ public:
     static bool isPrivateOrReservedIpv4(uint32_t ip_host_order);
     static bool isPrivateOrReservedIpv6(const uint8_t ip16[16]);
 
+    // Transition mechanism checkers
+    static bool isIpv4Mapped(const uint8_t ip[16]) noexcept;
+    static bool isNat64(const uint8_t ip[16]) noexcept;
+    static bool is6to4(const uint8_t ip[16]) noexcept;
+    static bool isTeredo(const uint8_t ip[16]) noexcept;
+
     // Cache management
     size_t cacheSize() const;
     size_t cacheCapacity() const;
@@ -127,21 +175,21 @@ private:
     };
 
     bool fail(const std::string& reason);
-    void putInCache(const std::string& cache_key, const std::string& result) const;
-    static bool isIpv4Mapped(const uint8_t ip[16]);
+    void putInCache(const CacheKey& key, const std::string& result) const;
     static std::string normalizeIpString(const std::string& ip_str);
 
     bool is_loaded_{false};
     std::string db_version_;
+    uint32_t db_version_id_{0};
     std::string last_error_;
     std::vector<std::string> countries_;
     std::vector<Ipv4Entry> ipv4_entries_;
     std::vector<Ipv6Entry> ipv6_entries_;
 
-    size_t max_cache_capacity_{kDefaultCacheCapacity};
+    std::atomic<size_t> max_cache_capacity_{kDefaultCacheCapacity};
     mutable std::mutex cache_mutex_;
-    mutable std::list<std::pair<std::string, std::string>> cache_list_;
-    mutable std::unordered_map<std::string, std::list<std::pair<std::string, std::string>>::iterator> cache_map_;
+    mutable std::list<std::pair<CacheKey, std::string>> cache_list_;
+    mutable std::unordered_map<CacheKey, std::list<std::pair<CacheKey, std::string>>::iterator, CacheKeyHash> cache_map_;
 };
 
 } // namespace hunter::geo
