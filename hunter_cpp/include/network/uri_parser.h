@@ -12,7 +12,7 @@ namespace network {
  * @brief Universal proxy URI parser
  * 
  * Parses vmess://, vless://, trojan://, ss://, ssr://,
- * hysteria2://, hy2://, tuic:// URIs into ParsedConfig structs.
+ * hysteria2://, hy2://, tuic://, wireguard:// URIs into ParsedConfig structs.
  */
 class UriParser {
 public:
@@ -41,8 +41,10 @@ private:
     static std::optional<ParsedConfig> parseVless(const std::string& uri);
     static std::optional<ParsedConfig> parseTrojan(const std::string& uri);
     static std::optional<ParsedConfig> parseShadowsocks(const std::string& uri);
+    static std::optional<ParsedConfig> parseShadowsocksr(const std::string& uri);
     static std::optional<ParsedConfig> parseHysteria2(const std::string& uri);
     static std::optional<ParsedConfig> parseTuic(const std::string& uri);
+    static std::optional<ParsedConfig> parseWireguard(const std::string& uri);
 };
 
 /**

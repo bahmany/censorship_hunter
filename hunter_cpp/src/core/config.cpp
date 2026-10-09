@@ -37,6 +37,12 @@ void HunterConfig::setDefaults() {
     data_["direct_baseline_enabled"] = "true";
     data_["exit_country_fresh_s"] = "1800";
     data_["country_doh_max_ttl_s"] = "3600";
+    
+    // Client mode configuration defaults
+    data_["client_listen_port"] = "10808";
+    data_["client_sysproxy_enabled"] = "false";
+    data_["sub_update_interval_min"] = "60";
+    data_["sub_autoupdate"] = "true";
 }
 
 std::string HunterConfig::exitCountryTarget() const {

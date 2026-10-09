@@ -10,6 +10,7 @@
 
 #include <string>
 #include <iostream>
+#include <algorithm>
 
 namespace hunter {
 namespace network {
@@ -156,11 +157,147 @@ bool SysProxy::isEnabled() {
 }
 
 #else
-// Non-Windows stubs
-bool SysProxy::set(int, int, const std::string&) { return false; }
-bool SysProxy::clear() { return false; }
-int SysProxy::getActivePort() { return 0; }
-bool SysProxy::isEnabled() { return false; }
+// Non-Windows implementations
+namespace {
+
+int runCmd(const std::string& cmd) {
+    return std::system(cmd.c_str());
+}
+
+std::string readCmd(const std::string& cmd) {
+    FILE* pipe = popen(cmd.c_str(), "r");
+    if (!pipe) return "";
+    char buf[256];
+    std::string out;
+    while (fgets(buf, sizeof(buf), pipe)) out += buf;
+    pclose(pipe);
+    return out;
+}
+
+#ifdef __APPLE__
+// Iterate enabled network services, invoking fn(service_name) for each.
+template <typename Fn>
+void forEachNetworkService(Fn&& fn) {
+    std::string out = readCmd("networksetup -listallnetworkservices 2>/dev/null");
+    std::istringstream iss(out);
+    std::string line;
+    bool first = true;
+    while (std::getline(iss, line)) {
+        if (first) { first = false; continue; }  // header line
+        if (!line.empty() && line[0] == '*') continue;  // disabled service
+        size_t b = line.find_first_not_of(" \t");
+        size_t e = line.find_last_not_of(" \t");
+        if (b == std::string::npos) continue;
+        fn(line.substr(b, e - b + 1));
+    }
+}
+#endif
+
+} // namespace
+
+bool SysProxy::set(int http_port, int socks_port, const std::string& bypass) {
+    if (http_port <= 0 && socks_port <= 0) return false;
+    (void)bypass;
+
+#ifdef __linux__
+    // GNOME: manual proxy mode with SOCKS (+HTTP when provided).
+    bool ok = true;
+    ok &= runCmd("gsettings set org.gnome.system.proxy mode 'manual' 2>/dev/null") == 0;
+    const int sp = socks_port > 0 ? socks_port : http_port;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.socks host '127.0.0.1' 2>/dev/null") == 0;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.socks port " + std::to_string(sp) + " 2>/dev/null") == 0;
+    if (http_port > 0) {
+        ok &= runCmd("gsettings set org.gnome.system.proxy.http host '127.0.0.1' 2>/dev/null") == 0;
+        ok &= runCmd("gsettings set org.gnome.system.proxy.http port " + std::to_string(http_port) + " 2>/dev/null") == 0;
+        ok &= runCmd("gsettings set org.gnome.system.proxy.https host '127.0.0.1' 2>/dev/null") == 0;
+        ok &= runCmd("gsettings set org.gnome.system.proxy.https port " + std::to_string(http_port) + " 2>/dev/null") == 0;
+    }
+    runCmd("gsettings set org.gnome.system.proxy ignore-hosts \"['localhost', '127.0.0.1', '::1']\" 2>/dev/null");
+    return ok;
+
+#elif defined(__APPLE__)
+    bool ok = true;
+    forEachNetworkService([&](const std::string& svc) {
+        if (socks_port > 0) {
+            ok &= runCmd("networksetup -setsocksfirewallproxy \"" + svc + "\" 127.0.0.1 " + std::to_string(socks_port) + " 2>/dev/null") == 0;
+            ok &= runCmd("networksetup -setsocksfirewallproxystate \"" + svc + "\" on 2>/dev/null") == 0;
+        }
+        if (http_port > 0) {
+            ok &= runCmd("networksetup -setwebproxy \"" + svc + "\" 127.0.0.1 " + std::to_string(http_port) + " 2>/dev/null") == 0;
+            ok &= runCmd("networksetup -setwebproxystate \"" + svc + "\" on 2>/dev/null") == 0;
+            ok &= runCmd("networksetup -setsecurewebproxy \"" + svc + "\" 127.0.0.1 " + std::to_string(http_port) + " 2>/dev/null") == 0;
+            ok &= runCmd("networksetup -setsecurewebproxystate \"" + svc + "\" on 2>/dev/null") == 0;
+        }
+    });
+    return ok;
+
+#else
+    return false;
+#endif
+}
+
+bool SysProxy::clear() {
+#ifdef __linux__
+    bool ok = true;
+    ok &= runCmd("gsettings set org.gnome.system.proxy mode 'none' 2>/dev/null") == 0;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.socks host '' 2>/dev/null") == 0;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.socks port 0 2>/dev/null") == 0;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.http host '' 2>/dev/null") == 0;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.http port 0 2>/dev/null") == 0;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.https host '' 2>/dev/null") == 0;
+    ok &= runCmd("gsettings set org.gnome.system.proxy.https port 0 2>/dev/null") == 0;
+    return ok;
+
+#elif defined(__APPLE__)
+    bool ok = true;
+    forEachNetworkService([&](const std::string& svc) {
+        ok &= runCmd("networksetup -setsocksfirewallproxystate \"" + svc + "\" off 2>/dev/null") == 0;
+        ok &= runCmd("networksetup -setwebproxystate \"" + svc + "\" off 2>/dev/null") == 0;
+        ok &= runCmd("networksetup -setsecurewebproxystate \"" + svc + "\" off 2>/dev/null") == 0;
+    });
+    return ok;
+
+#else
+    return false;
+#endif
+}
+
+int SysProxy::getActivePort() {
+#ifdef __linux__
+    // Manual mode + a nonzero socks port means we (or another client) set it.
+    std::string mode = readCmd("gsettings get org.gnome.system.proxy mode 2>/dev/null");
+    if (mode.find("manual") == std::string::npos) return 0;
+    std::string port = readCmd("gsettings get org.gnome.system.proxy.socks port 2>/dev/null");
+    try {
+        int p = std::stoi(port);
+        return p > 0 ? p : 0;
+    } catch (...) {
+        return 0;
+    }
+
+#elif defined(__APPLE__)
+    int port = 0;
+    forEachNetworkService([&](const std::string& svc) {
+        if (port > 0) return;
+        std::string out = readCmd("networksetup -getsocksfirewallproxy \"" + svc + "\" 2>/dev/null");
+        if (out.find("Enabled: Yes") == std::string::npos) return;
+        size_t pp = out.find("Port: ");
+        if (pp == std::string::npos) return;
+        try {
+            int p = std::stoi(out.substr(pp + 6));
+            if (p > 0) port = p;
+        } catch (...) {}
+    });
+    return port;
+
+#else
+    return 0;
+#endif
+}
+
+bool SysProxy::isEnabled() {
+    return getActivePort() > 0;
+}
 #endif
 
 } // namespace network

@@ -8,7 +8,7 @@ namespace hunter {
 namespace constants {
 
 // ─── Version ───
-constexpr const char* HUNTER_VERSION = "1.6.0";
+constexpr const char* HUNTER_VERSION = "1.7.0";
 constexpr const char* HUNTER_NAME = "Hunter C++";
 
 // ─── Network Defaults ───
@@ -57,7 +57,7 @@ constexpr int SILVER_LATENCY_MS = 5000;
 inline const std::vector<std::string>& supportedSchemes() {
     static const std::vector<std::string> schemes = {
         "vmess", "vless", "trojan", "ss", "ssr",
-        "hysteria2", "hy2", "tuic"
+        "hysteria2", "hy2", "tuic", "wireguard"
     };
     return schemes;
 }

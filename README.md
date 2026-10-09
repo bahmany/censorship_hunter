@@ -117,6 +117,40 @@ The native UI talks directly to the orchestrator and also exposes websocket-base
 - **Realtime Discovery View** — Live discovery logs and censorship diagnostics in the native app
 - **Native Windows Shell** — Win32 + DirectX9 rendering with no extra desktop runtime payload
 
+## Client Mode (v2rayN-style)
+
+Besides autonomous hunting, Hunter works as a regular proxy client — pick a
+server, connect on a stable local port, and point your apps at it. Open the
+**Client** tab in the UI.
+
+- **Profiles** — every config Hunter discovers (or you import) is a profile.
+  Connect with one click; the active profile holds a mixed SOCKS5+HTTP
+  listener on `client_listen_port` (default `10808`). Connecting a new
+  profile automatically replaces the previous one; rename via double-click,
+  delete via checkboxes.
+- **Subscriptions** — add subscription URLs in the Client tab; Hunter fetches
+  them with a `Hunter/<ver>` User-Agent, decodes base64 line lists and
+  Clash/Mihomo YAML, deduplicates into the config DB, and auto-updates on the
+  `sub_update_interval_min` interval (default 60 min). Sources persist in
+  `runtime/subscriptions.tsv`.
+- **Import** — clipboard share links (`vmess://`, `vless://`, `ss://`,
+  `trojan://`, `hysteria2://`, `hy2://`, `tuic://`, `wireguard://`) or a
+  subscription URL.
+- **System proxy** — optional `client_sysproxy_enabled`: Windows registry,
+  GNOME `gsettings` (Linux), or `networksetup` (macOS). Cleared on disconnect.
+- **Latency test** — TCP latency per selected profile (all when none
+  selected), off the UI thread, with sort-by-latency.
+- **Android** — VPN mode uses `HunterVpnService` + `hev-socks5-tunnel`;
+  subscription import/parsing works the same through the shared core.
+
+Client keys in `runtime/hunter_config.json` (or `HUNTER_*` env overrides):
+`client_listen_port` (10808), `client_sysproxy_enabled` (false),
+`sub_update_interval_min` (60), `sub_autoupdate` (true).
+
+**Engine notes:** Xray handles VMess/VLESS/Trojan/Shadowsocks; sing-box adds
+Hysteria2/TUIC/WireGuard. `ssr://` links are parsed for display but are not
+launchable by any bundled engine and are excluded from imports.
+
 ## Quick Start
 
 ### Using Pre-built Release
@@ -263,9 +297,10 @@ Configs are scored by anti-censorship features:
 | VLESS + Reality | `vless://...&security=reality` | XRay |
 | Trojan | `trojan://` | XRay |
 | Shadowsocks | `ss://` | XRay |
-| ShadowsocksR | `ssr://` | XRay |
+| ShadowsocksR | `ssr://` | Parsed only — no bundled engine |
 | Hysteria2 | `hysteria2://`, `hy2://` | Sing-box |
 | TUIC v5 | `tuic://` | Sing-box |
+| WireGuard | `wireguard://` | Sing-box |
 
 **Transport types:** TCP, WebSocket, gRPC, HTTP/2, SplitHTTP, HTTPUpgrade
 

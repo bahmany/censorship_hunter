@@ -448,7 +448,119 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
 #else
     return {0, 0};
 #endif
-}
+    }
+
+    int ProxyServerManager::startClientProxy(const std::string& uri, int port) {
+        std::lock_guard<std::mutex> lk(mutex_);
+        
+        // Check if port is already held by another managed session
+        std::string conflicting_uri;
+        for (const auto& [u, s] : sessions_) {
+            if (s.port == port && occupies(s)) {
+                conflicting_uri = u;
+                break;
+            }
+        }
+        
+        if (!conflicting_uri.empty()) {
+            // Stop the conflicting session first
+            stopProxy(conflicting_uri);
+        }
+        
+        // Check if port is free (not taken by foreign process)
+        if (!deps_.port_free || !deps_.port_free(port)) {
+            errors_[uri] = "port busy";
+            utils::LogRingBuffer::instance().push("[ProxyServer] Port " + std::to_string(port) + " is busy");
+            return -1;
+        }
+        
+        // Clear any previous error for this URI
+        errors_.erase(uri);
+        
+        // Use buildEngineConfig but for xray use generateConfig with same port for mixed inbound
+        MonitorDeps md = deps_.monitor;
+        if (!md.executor) md.executor = std::make_shared<ThreadPoolExecutor>(2);
+        auto mon = HealthMonitor::create(mcfg_, md);
+        
+        Session s; s.mon = mon; s.uri = uri; s.port = port;
+        sessions_[uri] = std::move(s);
+        
+        mon->setEventCallback([this, uri](const SessionEvent& e) {
+            SessionEventCallback cb;
+            { std::lock_guard<std::mutex> lk(mutex_); cb = event_cb_; }
+            if (e.kind == EventKind::StateChanged || e.kind == EventKind::FailoverSucceeded ||
+                e.kind == EventKind::FailoverFailed || e.kind == EventKind::EngineExited)
+                utils::LogRingBuffer::instance().push("[ProxyServer] " + std::string(eventKindName(e.kind)) + " " +
+                    sessionStateName(e.snapshot.state) + (e.detail.empty() ? "" : ": " + e.detail));
+            if (cb) cb(uri, e);
+        });
+        
+        // Build engine config - for client mode we want mixed inbound (same port for socks and http)
+        BuiltConfig out;
+        auto parsed = network::UriParser::parse(uri);
+        if (!parsed.has_value() || !parsed->isValid()) { 
+            out.error = "invalid or unsupported config URI"; 
+        } else {
+            ParsedConfig config = parsed.value();
+            const bool quic = config.protocol == "hysteria2" || config.protocol == "tuic";
+            const bool insecure = config.insecureTls();   // modern xray cannot honour allowInsecure
+            auto avail = [&](const char* e) { return launcher_ && launcher_->available(e); };
+
+            std::string xray_cfg;
+            if (!quic && !insecure) {
+                // Use generateConfig instead of generateTestConfig for mixed inbound
+                xray_cfg = XRayManager::generateConfig(config, port, port);
+            }
+            std::string sb_cfg = config.toSingBoxConfigJson(port);
+            
+            if (!xray_cfg.empty() && (avail("xray") || sb_cfg.empty())) {
+                out.ok = true; out.engine = "xray"; out.config_text = xray_cfg; 
+            } else if (!sb_cfg.empty()) {
+                out.ok = true; out.engine = "sing-box"; out.config_text = sb_cfg; 
+            } else {
+                std::string why = config.unsupportedReason(quic || insecure ? "sing-box" : "xray");
+                out.error = why.empty() ? "config cannot be expressed by any installed engine" : "unsupported: " + why;
+            }
+        }
+        
+        if (!out.ok) {
+            sessions_.erase(uri);
+            errors_[uri] = out.error;
+            utils::LogRingBuffer::instance().push("[ProxyServer] " + out.error);
+            return -1;
+        }
+        
+        // Start the monitor
+        s.mon->start(uri, port, SwitchMode::Auto);   // non-blocking: launch + first probe run
+        
+        // Track as active client proxy
+        active_client_uri_ = uri;
+        active_client_port_ = port;
+        
+        return port;
+    }
+
+    std::string ProxyServerManager::clientActiveUri() const {
+        std::lock_guard<std::mutex> lk(mutex_);
+        return active_client_uri_;
+    }
+
+    int ProxyServerManager::clientActivePort() const {
+        std::lock_guard<std::mutex> lk(mutex_);
+        return active_client_port_;
+    }
+
+    bool ProxyServerManager::stopClientProxy() {
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (active_client_uri_.empty()) return false;
+        
+        bool result = stopProxy(active_client_uri_);
+        if (result) {
+            active_client_uri_.clear();
+            active_client_port_ = 0;
+        }
+        return result;
+    }
 
 }  // namespace proxy
 }  // namespace hunter

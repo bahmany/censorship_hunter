@@ -9,6 +9,7 @@
 #include "core/config_embed.h"
 #include "network/proxy_tester.h"
 #include "network/sys_proxy.h"
+#include "network/import_filter.h"
 
 #include <iostream>
 #include <iomanip>
@@ -86,45 +87,6 @@ void dedupeBenchResultsByEndpoint(std::vector<BenchResult>& results) {
     results.swap(deduped);
 }
 
-bool isImportableProxyUri(const std::string& uri) {
-    if (uri.size() < 10) return false;
-    static const std::vector<std::string> schemes = {
-        "vmess://", "vless://", "trojan://", "ss://", "ssr://",
-        "hysteria2://", "hy2://", "tuic://"
-    };
-    bool has_scheme = false;
-    for (const auto& s : schemes) {
-        if (uri.compare(0, s.size(), s) == 0) {
-            has_scheme = true;
-            break;
-        }
-    }
-    if (!has_scheme) return false;
-    if (uri.compare(0, 8, "vmess://") == 0) {
-        std::string payload = uri.substr(8);
-        auto hash = payload.find('#');
-        if (hash != std::string::npos) payload = payload.substr(0, hash);
-        if (payload.size() < 10) return false;
-        std::string decoded = utils::base64Decode(payload);
-        if (decoded.empty() || decoded.find('{') == std::string::npos) return false;
-        return decoded.find("\"add\"") != std::string::npos;
-    }
-    auto sep = uri.find("://");
-    if (sep == std::string::npos) return false;
-    std::string payload = uri.substr(sep + 3);
-    auto hash = payload.find('#');
-    if (hash != std::string::npos) payload = payload.substr(0, hash);
-    if (payload.size() < 3) return false;
-    if (uri.compare(0, 8, "vless://") == 0 || uri.compare(0, 9, "trojan://") == 0) {
-        if (payload.find('@') == std::string::npos) return false;
-    }
-    if (uri.compare(0, 5, "ss://") == 0 && payload.find('@') == std::string::npos) {
-        std::string decoded = utils::base64Decode(payload);
-        if (decoded.empty() || decoded.find(':') == std::string::npos) return false;
-    }
-    return true;
-}
-
 [[maybe_unused]] bool loadImportCandidates(const std::string& file_path, std::set<std::string>& valid_configs, int& invalid_count) {
     std::ifstream input(file_path, std::ios::binary);
     if (!input.is_open()) return false;
@@ -149,13 +111,13 @@ bool isImportableProxyUri(const std::string& uri) {
         }
     }
 
-    for (const auto& uri : extracted) {
-        if (isImportableProxyUri(uri)) {
-            valid_configs.insert(uri);
-        } else {
-            invalid_count++;
-        }
-    }
+     for (const auto& uri : extracted) {
+         if (network::isImportableProxyUri(uri)) {
+             valid_configs.insert(uri);
+         } else {
+             invalid_count++;
+         }
+     }
     return true;
 }
 
@@ -178,24 +140,58 @@ std::set<std::string> extractDownloadConfigs(const std::string& content, int* in
         extracted.insert(decoded_line.begin(), decoded_line.end());
     }
 
-    std::set<std::string> valid;
-    int local_invalid = 0;
-    for (const auto& uri : extracted) {
-        if (isImportableProxyUri(uri)) {
-            valid.insert(uri);
-        } else {
-            local_invalid++;
-        }
-    }
+     std::set<std::string> valid;
+     int local_invalid = 0;
+     for (const auto& uri : extracted) {
+         if (network::isImportableProxyUri(uri)) {
+             valid.insert(uri);
+         } else {
+             local_invalid++;
+         }
+     }
     if (invalid_count) *invalid_count = local_invalid;
     return valid;
 }
 
 } // namespace
 
-HunterOrchestrator::HunterOrchestrator(HunterConfig& config)
-    : config_(config),
-      config_fetcher_(http_client_) {
+bool loadImportCandidates(const std::string& file_path, std::set<std::string>& valid_configs, int& invalid_count) {
+    std::ifstream input(file_path, std::ios::binary);
+    if (!input.is_open()) return false;
+
+    std::ostringstream raw_stream;
+    raw_stream << input.rdbuf();
+    const std::string raw = raw_stream.str();
+
+    std::set<std::string> extracted = utils::extractRawUrisFromText(raw);
+    const auto decoded_whole = utils::tryDecodeAndExtract(raw);
+    extracted.insert(decoded_whole.begin(), decoded_whole.end());
+
+    const auto lines = utils::readLines(file_path);
+    for (const auto& line : lines) {
+        const std::string trimmed = utils::trim(line);
+        if (trimmed.empty()) continue;
+        if (trimmed.find("://") != std::string::npos) {
+            extracted.insert(trimmed);
+        } else {
+            const auto decoded = utils::tryDecodeAndExtract(trimmed);
+            extracted.insert(decoded.begin(), decoded.end());
+        }
+    }
+
+     for (const auto& uri : extracted) {
+         if (network::isImportableProxyUri(uri)) {
+             valid_configs.insert(uri);
+         } else {
+             invalid_count++;
+         }
+     }
+    return true;
+}
+
+HunterOrchestrator::HunterOrchestrator(HunterConfig& config) :
+    config_(config),
+    config_fetcher_(http_client_) {
     // HTTP client auto-initializes CURL in its constructor
     initComponents();
     std::cout << "Hunter Orchestrator initialized successfully" << std::endl;
@@ -249,6 +245,10 @@ void HunterOrchestrator::initComponents() {
     std::string cache_dir = utils::dirName(config_.stateFile());
     if (cache_dir.empty()) cache_dir = "runtime";
     cache_ = std::make_unique<cache::SmartCache>(cache_dir);
+
+    // Subscription manager
+    sub_manager_.bind(config_db_.get(), &http_client_);
+    sub_manager_.load(cache_dir + "/subscriptions.tsv");
 
     // Found history: latest 200 discovered configs, persisted across runs.
     utils::mkdirRecursive(cache_dir);
@@ -433,6 +433,23 @@ void HunterOrchestrator::start() {
         // accumulate and consume PID table entries. This periodic reap cleans
         // them up without blocking the main loop.
         utils::reapZombies();
+
+        // Auto-update subscriptions if enabled
+        if (config_.subAutoupdate() && 
+            sub_manager_.updateDue(utils::nowTimestamp(), config_.subUpdateIntervalMin() * 60.0)) {
+            std::string proxy = "socks5h://127.0.0.1:" + std::to_string(config_.clientListenPort());
+            std::thread([this, proxy]() {
+                std::string err;
+                int imported = sub_manager_.updateAll(proxy, &err);
+                if (imported >= 0) {
+                    utils::LogRingBuffer::instance().push(
+                        "[Subscriptions] Updated " + std::to_string(imported) + " configs");
+                } else {
+                    utils::LogRingBuffer::instance().push(
+                        "[Subscriptions] Update failed: " + err);
+                }
+            }).detach();
+        }
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
@@ -651,6 +668,52 @@ std::string HunterOrchestrator::triggerRuntimeCleanup() {
     return cleanup_manager_->buildStatsJson();
 }
 
+// ─── Client Mode ───
+
+int HunterOrchestrator::activateClientConfig(const std::string& uri) {
+    int port = config_.clientListenPort();
+    int result = proxy_server_manager_.startClientProxy(uri, port);
+    if (result >= 0) {
+        // If sysproxy is enabled, set system proxy
+        if (config_.clientSysproxyEnabled()) {
+            // For mixed inbound, same port serves both HTTP and SOCKS
+            network::SysProxy::set(port, port);
+        }
+        std::lock_guard<std::mutex> lk(client_mu_);
+        active_client_uri_ = uri;
+        active_client_port_ = port;
+    }
+    return result;
+}
+
+void HunterOrchestrator::deactivateClientConfig() {
+    // Stop system proxy if we had set it
+    bool had_client;
+    {
+        std::lock_guard<std::mutex> lk(client_mu_);
+        had_client = !active_client_uri_.empty();
+    }
+    if (config_.clientSysproxyEnabled() && had_client) {
+        network::SysProxy::clear();
+    }
+    proxy_server_manager_.stopClientProxy();
+    std::lock_guard<std::mutex> lk(client_mu_);
+    active_client_uri_.clear();
+    active_client_port_ = 0;
+}
+
+HunterOrchestrator::ClientStatus HunterOrchestrator::clientStatus() {
+    ClientStatus status;
+    {
+        std::lock_guard<std::mutex> lk(client_mu_);
+        status.active = !active_client_uri_.empty();
+        status.uri = active_client_uri_;
+        status.port = active_client_port_;
+    }
+    status.sysproxy_on = config_.clientSysproxyEnabled() && network::SysProxy::isEnabled();
+    return status;
+}
+
 // ─── Real-time UI Communication ───
 
 bool HunterOrchestrator::runCycle() {
@@ -811,10 +874,10 @@ bool HunterOrchestrator::runCycle() {
             std::vector<int> proxy_ports;
             const int github_cap = std::max(200, std::min(config_.maxTotal(), 5000));
             auto fetched = config_fetcher_.fetchGithubConfigs(config_.githubUrls(), proxy_ports, github_cap, 9, 40.0f);
-            std::set<std::string> valid;
-            for (const auto& uri : fetched) {
-                if (isImportableProxyUri(uri)) valid.insert(uri);
-            }
+             std::set<std::string> valid;
+             for (const auto& uri : fetched) {
+                 if (network::isImportableProxyUri(uri)) valid.insert(uri);
+             }
             int added = 0;
             if (config_db_ && !valid.empty()) {
                 added = config_db_->addConfigs(valid, "github_refresh");

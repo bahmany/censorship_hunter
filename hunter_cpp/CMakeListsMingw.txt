@@ -214,6 +214,13 @@ set(NETWORK_SOURCES
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp
     src/network/sys_proxy.cpp
+    src/network/import_filter.cpp
+)
+
+# ─── Client (v2rayN-style) Library Sources ───
+set(CLIENT_SOURCES
+    src/client/subscription_parse.cpp
+    src/client/subscription_manager.cpp
 )
 
 # ─── Proxy Library Sources ───
@@ -254,6 +261,7 @@ add_library(hunter_core STATIC
     ${GEO_SOURCES}
     ${CORE_SOURCES}
     ${NETWORK_SOURCES}
+    ${CLIENT_SOURCES}
     ${PROXY_SOURCES}
     ${CACHE_SOURCES}
     ${ORCHESTRATOR_SOURCES}

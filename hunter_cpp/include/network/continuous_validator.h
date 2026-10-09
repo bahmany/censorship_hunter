@@ -226,6 +226,11 @@ public:
      */
     int removeUris(const std::set<std::string>& uris);
 
+    /// Rewrite the `#fragment` (display name) of a stored config URI. The endpoint key is
+    /// fragment-independent so the record key stays stable. Returns true if a record matched.
+    /// Persisted on the next scheduled saveToDisk.
+    bool updateRemarks(const std::string& uri, const std::string& remarks);
+
     /**
      * @brief Current database size
      */

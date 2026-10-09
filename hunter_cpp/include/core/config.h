@@ -87,6 +87,13 @@ public:
     std::string stateFile() const { return getString("state_file", "runtime/hunter_state.json"); }
     std::string goldFile() const { return getString("gold_file", "runtime/gold.txt"); }
     std::string silverFile() const { return getString("silver_file", "runtime/silver.txt"); }
+    
+    // Client mode configuration
+    int clientListenPort() const { return getInt("client_listen_port", 10808); }
+    bool clientSysproxyEnabled() const { return getBool("client_sysproxy_enabled", false); }
+    int subUpdateIntervalMin() const { return getInt("sub_update_interval_min", 60); }
+    bool subAutoupdate() const { return getBool("sub_autoupdate", true); }
+    
 #ifdef _WIN32
     std::string xrayPath() const { return getString("xray_path", "bin/xray.exe"); }
     std::string singBoxPath() const { return getString("singbox_path", "bin/sing-box.exe"); }

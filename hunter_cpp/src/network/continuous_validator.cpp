@@ -695,6 +695,17 @@ int ConfigDatabase::removeUris(const std::set<std::string>& uris) {
     return removed;
 }
 
+bool ConfigDatabase::updateRemarks(const std::string& uri, const std::string& remarks) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = db_.find(keyFor(uri));
+    if (it == db_.end()) return false;
+    std::string& stored = it->second.uri;
+    const auto hash = stored.find('#');
+    std::string base = (hash == std::string::npos) ? stored : stored.substr(0, hash);
+    stored = remarks.empty() ? base : base + "#" + utils::urlEncode(remarks);
+    return true;
+}
+
 std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForRevalidation(
         int revalidate_interval_s, int max_count) {
     std::lock_guard<std::mutex> lock(mutex_);

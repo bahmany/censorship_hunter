@@ -5,6 +5,45 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.7.0] - 2026-10-09
+
+### Added
+- **Client mode (v2rayN-style)**: new "Client" tab turns Hunter into a proxy
+  client — pick a server, connect on a stable local port, done.
+  - Profile list: connect/disconnect per config, inline remark editing,
+    delete selected, batch latency test, sort by latency.
+  - Subscriptions: add/update/delete subscription sources, per-source
+    enable toggle, auto-update on a configurable interval, import
+    deduplication via the config DB, persisted to
+    `runtime/subscriptions.tsv`.
+  - Import: share links from clipboard (`vmess://`, `vless://`, `ss://`,
+    `trojan://`, `hysteria2://`, `hy2://`, `tuic://`, `wireguard://`) and
+    subscription bodies as plain line lists, base64 blobs, or
+    Clash/Mihomo YAML (`proxies:` list, block and flow style).
+  - Fixed local listener: client proxy binds `client_listen_port`
+    (default `10808`) as a mixed SOCKS5+HTTP inbound — exactly-one-active
+    profile semantics; "port busy" reported instead of hijacking.
+  - System proxy: optional `client_sysproxy_enabled` — Windows registry
+    (existing), GNOME `gsettings` (Linux), `networksetup` (macOS).
+  - Latency column: TCP latency via the existing `ProxyTester` batch
+    path, off the UI thread, with sort-by-latency.
+- **WireGuard support**: `wireguard://` share links and Clash
+  `type: wireguard` entries parse into a sing-box outbound
+  (`peer_public_key`, `reserved`, `local_address` defaults).
+- **SSR parsing**: `ssr://` decodes enough for listing/display; engines
+  correctly report it as unsupported, and it is excluded from imports.
+
+### Fixed
+- Removed `ssr://` from the importable-scheme gate so dead rows stop
+  accumulating in the config DB.
+- Toast notifications and client latency results are now mutex-guarded
+  (worker threads call them).
+- Subscription fetches send a `Hunter/<ver>` User-Agent.
+
+### Changed
+- `HttpClient::get` accepts an optional per-request `user_agent`.
+- Tabs: Configs · Client · Found · Settings · About.
+
 ## [1.6.0] - 2026-10-09
 
 ### Added

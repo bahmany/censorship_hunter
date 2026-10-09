@@ -32,24 +32,32 @@ public:
      * @param url Target URL
      * @param timeout_ms Request timeout
      * @param proxy_url Optional SOCKS5 proxy (e.g. "socks5h://127.0.0.1:10808")
+     * @param user_agent Optional user agent string (empty = use random UA)
      * @return Response body, or empty on failure
      */
     std::string get(const std::string& url, int timeout_ms = 8000,
-                    const std::string& proxy_url = "");
+                    const std::string& proxy_url = "",
+                    const std::string& user_agent = "");
 
     /**
      * @brief Perform HTTP HEAD request
+     * @param url Target URL
+     * @param timeout_ms Request timeout
+     * @param proxy_url Optional SOCKS5 proxy (e.g. "socks5h://127.0.0.1:10808")
+     * @param user_agent Optional user agent string (empty = use random UA)
      * @return HTTP status code, or -1 on failure
      */
     int head(const std::string& url, int timeout_ms = 4000,
-             const std::string& proxy_url = "");
+             const std::string& proxy_url = "",
+             const std::string& user_agent = "");
 
     /**
      * @brief Perform HTTP POST request
      */
     std::string post(const std::string& url, const std::string& body,
                      const std::string& content_type = "application/json",
-                     int timeout_ms = 8000, const std::string& proxy_url = "");
+                     int timeout_ms = 8000, const std::string& proxy_url = "",
+                     const std::string& user_agent = "");
 
     /**
      * @brief Reset sessions (free stale connections)

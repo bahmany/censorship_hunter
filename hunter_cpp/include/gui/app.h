@@ -89,6 +89,7 @@ private:
     void renderFoundTab();
     void renderSettingsTab();
     void renderAboutTab();
+    void renderClientTab(); // New Client tab
     void renderStatusBar();
     void renderStatusCard(const char* label, const char* value, const ImVec4& color, float width);
     void renderUpdatePanel();
@@ -224,6 +225,7 @@ private:
 
     std::string toast_message_;
     double toast_until_ = 0.0;
+    std::mutex toast_mu_;   // worker threads call showToast()
 
     // ─── Second-launch handling ───
     std::function<bool()> show_request_poll_;
@@ -231,9 +233,30 @@ private:
     static constexpr double kShowPollIntervalSeconds = 0.25;
 
     // ─── Modern UI state ───
-    enum class Tab { Configs, Found, Settings, About };
+    enum class Tab { Configs, Client, Found, Settings, About };
     Tab active_tab_ = Tab::Configs;
     bool theme_applied_ = false;
+
+    // ─── Client tab state ───
+    std::unordered_map<std::string, int> client_latency_results_; // uri -> latency in ms
+    std::mutex client_latency_mu_;                               // guarded by this
+    std::set<std::string> client_selected_uris_; // selected rows in client tab
+    std::string client_last_clicked_uri_;
+    bool client_show_subscription_modal_ = false;
+    char client_subscription_url_input_[256] = {0};
+    char client_subscription_remark_input_[256] = {0};
+    int client_latency_test_timeout_ = 5; // seconds
+
+    // Remark editing state
+    std::string editing_remark_uri_;
+    char editing_remark_buf_[256] = {0};
+
+    // For add subscription row
+    char client_add_sub_remark_input_[256] = {0};
+
+    // Sorted snapshot for latency sort
+    std::vector<UiRow> sorted_snapshot_by_latency_;
+    bool use_sorted_snapshot_ = false;
 
     // ─── Prepared v2rayN top-20 (published by the snapshot worker) ───
     std::vector<std::string> top_v2rayn_uris_;

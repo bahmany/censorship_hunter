@@ -70,7 +70,7 @@ static std::vector<std::string> expandSourceUrlVariants(const std::string& url) 
     return deduped;
 }
 
-std::string HttpClient::get(const std::string& url, int timeout_ms, const std::string& proxy_url) {
+std::string HttpClient::get(const std::string& url, int timeout_ms, const std::string& proxy_url, const std::string& user_agent) {
     CURL* curl = curl_easy_init();
     if (!curl) return "";
 
@@ -84,7 +84,8 @@ std::string HttpClient::get(const std::string& url, int timeout_ms, const std::s
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, randomUserAgent().c_str());
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, 
+                     user_agent.empty() ? randomUserAgent().c_str() : user_agent.c_str());
 
     if (!proxy_url.empty()) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
@@ -97,7 +98,7 @@ std::string HttpClient::get(const std::string& url, int timeout_ms, const std::s
     return response;
 }
 
-int HttpClient::head(const std::string& url, int timeout_ms, const std::string& proxy_url) {
+int HttpClient::head(const std::string& url, int timeout_ms, const std::string& proxy_url, const std::string& user_agent) {
     CURL* curl = curl_easy_init();
     if (!curl) return -1;
 
@@ -107,7 +108,8 @@ int HttpClient::head(const std::string& url, int timeout_ms, const std::string& 
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)std::min(timeout_ms, 4000));
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, randomUserAgent().c_str());
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, 
+                     user_agent.empty() ? randomUserAgent().c_str() : user_agent.c_str());
 
     if (!proxy_url.empty()) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());
@@ -123,8 +125,9 @@ int HttpClient::head(const std::string& url, int timeout_ms, const std::string& 
 }
 
 std::string HttpClient::post(const std::string& url, const std::string& body,
-                              const std::string& content_type, int timeout_ms,
-                              const std::string& proxy_url) {
+                               const std::string& content_type, int timeout_ms,
+                               const std::string& proxy_url,
+                               const std::string& user_agent) {
     CURL* curl = curl_easy_init();
     if (!curl) return "";
 
@@ -140,7 +143,8 @@ std::string HttpClient::post(const std::string& url, const std::string& body,
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
     curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, randomUserAgent().c_str());
+    curl_easy_setopt(curl, CURLOPT_USERAGENT, 
+                     user_agent.empty() ? randomUserAgent().c_str() : user_agent.c_str());
 
     if (!proxy_url.empty()) {
         curl_easy_setopt(curl, CURLOPT_PROXY, proxy_url.c_str());

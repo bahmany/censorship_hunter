@@ -206,6 +206,7 @@ set(NETWORK_SOURCES
     src/network/aggressive_harvester.cpp
     src/network/flexible_fetcher.cpp
     src/network/sys_proxy.cpp
+    src/network/import_filter.cpp
 )
 
 # ─── Proxy Library Sources ───
@@ -234,6 +235,12 @@ set(ORCHESTRATOR_SOURCES
     src/orchestrator/runtime_cleanup_manager.cpp
 )
 
+# ─── Client (v2rayN-style) Library Sources ───
+set(CLIENT_SOURCES
+    src/client/subscription_parse.cpp
+    src/client/subscription_manager.cpp
+)
+
 # Create hunter core static library
 add_library(hunter_core STATIC
     ${CORE_SOURCES}
@@ -241,6 +248,7 @@ add_library(hunter_core STATIC
     ${PROXY_SOURCES}
     ${CACHE_SOURCES}
     ${ORCHESTRATOR_SOURCES}
+    ${CLIENT_SOURCES}
     ${ZSTD_SOURCES}
     ${HUNTER_EMBED_OBJECT}
     ${HUNTER_CONFIG_EMBED_OBJECT}
@@ -361,7 +369,7 @@ endforeach()
 
 # Stage 4 A2 suites (fake transports / loopback only: no public network)
 foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
-           test_uri_parser test_curl_transport test_engine_launcher)
+           test_uri_parser test_curl_transport test_engine_launcher test_subscription_parse)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
     target_link_libraries(${_t} PRIVATE hunter_core)
@@ -389,7 +397,7 @@ add_test(NAME test_health_score COMMAND test_health_score)
 add_test(NAME test_config_db_v4 COMMAND test_config_db_v4)
 add_test(NAME test_embed COMMAND test_embed)
 foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
-           test_uri_parser test_curl_transport test_engine_launcher)
+           test_uri_parser test_curl_transport test_engine_launcher test_subscription_parse)
     add_test(NAME ${_t} COMMAND ${_t})
     set_tests_properties(${_t} PROPERTIES TIMEOUT 120)
 endforeach()

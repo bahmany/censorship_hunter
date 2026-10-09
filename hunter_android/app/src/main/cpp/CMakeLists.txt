@@ -90,6 +90,11 @@ set(NETWORK_SOURCES
     ${HUNTER_SRC_DIR}/src/network/port_lease.cpp
     ${HUNTER_SRC_DIR}/src/network/traffic_probe.cpp
     ${HUNTER_SRC_DIR}/src/network/country_provider.cpp
+    ${HUNTER_SRC_DIR}/src/network/import_filter.cpp
+)
+set(CLIENT_SOURCES
+    ${HUNTER_SRC_DIR}/src/client/subscription_parse.cpp
+    ${HUNTER_SRC_DIR}/src/client/subscription_manager.cpp
 )
 set(GEO_SOURCES
     ${HUNTER_SRC_DIR}/src/geo/country_database.cpp
@@ -114,6 +119,7 @@ set(ORCHESTRATOR_SOURCES
 add_library(hunter_core STATIC
     ${CORE_SOURCES}
     ${NETWORK_SOURCES}
+    ${CLIENT_SOURCES}
     ${GEO_SOURCES}
     ${PROXY_SOURCES}
     ${CACHE_SOURCES}

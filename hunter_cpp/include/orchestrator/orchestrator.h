@@ -20,6 +20,7 @@
 #include "cache/smart_cache.h"
 #include "orchestrator/runtime_cleanup_manager.h"
 #include "proxy/proxy_server_manager.h"
+#include "client/subscription_manager.h"
 
 namespace hunter {
 
@@ -127,6 +128,7 @@ public:
     network::ConfigDatabase* configDb() { return config_db_.get(); }
     cache::SmartCache* cache() { return cache_.get(); }
     proxy::ProxyServerManager& proxyServerManager() { return proxy_server_manager_; }
+    client::SubscriptionManager& subscriptionManager() { return sub_manager_; }
     core::FoundHistory& foundHistory() { return found_history_; }
     const core::FoundHistory& foundHistory() const { return found_history_; }
 
@@ -163,6 +165,17 @@ public:
     void addManualConfigs(const std::vector<std::string>& uris);
     std::string triggerRuntimeCleanup();
 
+    // ─── Client Mode ───
+    int activateClientConfig(const std::string& uri);
+    void deactivateClientConfig();
+    struct ClientStatus {
+        bool active = false;
+        std::string uri;
+        int port = 0;
+        bool sysproxy_on = false;
+    };
+    ClientStatus clientStatus();
+
     // ─── Dashboard (terminal, optional — GUI reads configDb() directly) ───
     void printStartupBanner();
     void printDashboard();
@@ -188,6 +201,7 @@ private:
     std::unique_ptr<orchestrator::ThreadManager> thread_manager_;
     std::unique_ptr<orchestrator::RuntimeCleanupManager> cleanup_manager_;
     proxy::ProxyServerManager proxy_server_manager_;
+    client::SubscriptionManager sub_manager_;
 
     std::atomic<bool> stop_requested_{false};
     std::atomic<bool> paused_{false};
@@ -213,6 +227,11 @@ private:
     mutable std::mutex state_mutex_;
     mutable std::mutex status_mutex_;
     double start_time_ = 0.0;
+
+    // Client mode state
+    std::mutex client_mu_;
+    std::string active_client_uri_;
+    int active_client_port_ = 0;
 
     // Found history: latest 200 discovered configs (persistent, thread-safe).
     core::FoundHistory found_history_;
