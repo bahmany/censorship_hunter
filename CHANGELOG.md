@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.8.0] - 2026-10-09
+
+### Changed
+- **Single-page UI**: the five tabs (Configs/Client/Found/Settings/About)
+  are replaced by one minimal expert main view plus a slim About page.
+  Top strip: `HUNTER` wordmark + About/Back toggle — no tab bar.
+- **Main view**: status strip (colored state dot, active profile @port,
+  hunt status), one dominant sortable profile table
+  (Latency | CC | Remark | URI — click selects anywhere in the row,
+  double-click connects, latency sorts fresh test results first), compact
+  action row (Connect/Disconnect, Test, Import, Start/Stop, Copy v2rayN),
+  and collapsed-by-default Subscriptions and Found-history sections.
+- Version bump: Android `versionName` 2.3.0 (`versionCode` 5).
+
 ## [1.7.0] - 2026-10-09
 
 ### Added

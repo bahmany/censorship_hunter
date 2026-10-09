@@ -93,6 +93,8 @@ private:
     void renderStatusBar();
     void renderStatusCard(const char* label, const char* value, const ImVec4& color, float width);
     void renderUpdatePanel();
+    void renderMainView();
+    void renderAboutView();
 
     // Legacy rendering (used within tabs)
     void renderControls();
@@ -233,8 +235,8 @@ private:
     static constexpr double kShowPollIntervalSeconds = 0.25;
 
     // ─── Modern UI state ───
-    enum class Tab { Configs, Client, Found, Settings, About };
-    Tab active_tab_ = Tab::Configs;
+    enum class View { Main, About };
+    View currentView_ = View::Main;
     bool theme_applied_ = false;
 
     // ─── Client tab state ───

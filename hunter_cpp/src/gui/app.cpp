@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cctype>
+#include <climits>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <fstream>
 #include <iostream>
 #include <vector>
+#include <string>
 
 #ifndef _WIN32
 #include <unistd.h>  // readlink() for /proc/self/exe
@@ -1757,31 +1759,7 @@ void HunterGuiApp::renderStatusCard(const char* label, const char* value, const 
     ImGui::EndChild();
 }
 
-void HunterGuiApp::renderTabBar() {
-    if (ImGui::BeginTabBar("##MainTabs", ImGuiTabBarFlags_None)) {
-        if (ImGui::BeginTabItem("Configs")) {
-            active_tab_ = Tab::Configs;
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Client")) {
-            active_tab_ = Tab::Client;
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Found")) {
-            active_tab_ = Tab::Found;
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Settings")) {
-            active_tab_ = Tab::Settings;
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("About")) {
-            active_tab_ = Tab::About;
-            ImGui::EndTabItem();
-        }
-        ImGui::EndTabBar();
-    }
-}
+
 
 void HunterGuiApp::renderConfigsTab() {
     // ─── Status cards row ───
@@ -2628,23 +2606,37 @@ void HunterGuiApp::renderFrame() {
     ImGuiViewport* viewport = ImGui::GetMainViewport();
     ImGui::SetNextWindowPos(viewport->WorkPos);
     ImGui::SetNextWindowSize(viewport->WorkSize);
-    ImGui::Begin("HunterMain", nullptr,
-                  ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                  ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                  ImGuiWindowFlags_NoBringToFrontOnFocus);
+     ImGui::Begin("HunterMain", nullptr,
+                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                   ImGuiWindowFlags_NoBringToFrontOnFocus);
 
-    // ─── Tab bar ───
-    renderTabBar();
-    ImGui::Spacing();
+     // ─── Top strip ───
+     {
+         ImGui::BeginChild("##top_strip", ImVec2(0, 20), false, ImGuiWindowFlags_NoBackground);
+         ImGui::AlignTextToFramePadding();
+         ImGui::Text("HUNTER");
+         ImGui::SameLine();
+         ImGui::SetCursorPosX(ImGui::GetWindowWidth() - 50); // Adjust for button width
+         if (currentView_ == View::Main) {
+             if (ImGui::Button("About")) {
+                 currentView_ = View::About;
+             }
+         } else {
+             if (ImGui::Button("< Back")) {
+                 currentView_ = View::Main;
+             }
+         }
+         ImGui::EndChild();
+         ImGui::Spacing();
+     }
 
-    // ─── Tab content ───
-    switch (active_tab_) {
-        case Tab::Configs:   renderConfigsTab(); break;
-        case Tab::Client:    renderClientTab(); break;
-        case Tab::Found:     renderFoundTab(); break;
-        case Tab::Settings:  renderSettingsTab(); break;
-        case Tab::About:     renderAboutTab(); break;
-    }
+     // ─── View content ───
+     if (currentView_ == View::Main) {
+         renderMainView();
+     } else {
+         renderAboutView();
+     }
 
     // ─── Status bar (always visible) ───
     renderStatusBar();
@@ -2858,18 +2850,489 @@ int HunterGuiApp::run() {
         glfwSwapBuffers(window_);
     }
 
-    stopOrchestrator();
-    core::SelfUpdateManager::instance().stopAutoCheck();
+     stopOrchestrator();
+     core::SelfUpdateManager::instance().stopAutoCheck();
+ 
+     ImGui_ImplOpenGL2_Shutdown();
+     ImGui_ImplGlfw_Shutdown();
+     ImGui::DestroyContext();
+ 
+     glfwDestroyWindow(window_);
+     glfwTerminate();
+     return 0;
+ }
 
-    ImGui_ImplOpenGL2_Shutdown();
-    ImGui_ImplGlfw_Shutdown();
-    ImGui::DestroyContext();
+ void HunterGuiApp::renderAboutView() {
+     ImGui::TextColored(ImVec4(0.30f, 0.55f, 0.90f, 1.0f), "Hunter");
+     ImGui::SameLine();
+     ImGui::TextDisabled("Censorship Hunter — Autonomous Proxy Discovery Engine");
+     ImGui::Spacing();
 
-    glfwDestroyWindow(window_);
-    glfwTerminate();
-    return 0;
-}
-#endif // __ANDROID__
+     ImGui::Text("Application Version: v%s", constants::HUNTER_VERSION);
+     ImGui::SameLine();
+     ImGui::TextDisabled("GitHub: https://github.com/bahmany/censorship_hunter");
+     ImGui::Spacing();
+ }
+
+  void HunterGuiApp::renderMainView() {
+      auto client_status = orch_.clientStatus();
+      bool active = client_status.active;
+      bool hunting = orchestrator_running_.load();
+
+      // ─── STATUS STRIP ───
+      {
+          ImVec4 bullet_color;
+          if (active) {
+              bullet_color = ImVec4(0.3f, 0.8f, 0.3f, 1.0f); // green
+          } else if (hunting) {
+              bullet_color = ImVec4(0.9f, 0.8f, 0.2f, 1.0f); // yellow
+          } else {
+              bullet_color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f); // grey
+          }
+
+          std::string left_text;
+          if (active) {
+              std::string remark = "-";
+              // Look up the remark in the snapshot
+              for (const auto& row : snapshot_) {
+                  if (row.rec.uri == client_status.uri) {
+                      remark = row.ps.empty() ? "-" : row.ps;
+                      break;
+                  }
+              }
+              left_text = std::string("● ") + remark + " @ 127.0.0.1:" + std::to_string(client_status.port);
+          } else {
+              left_text = hunting ? "● Hunting..." : "● Idle";
+          }
+
+          std::string hunt_status;
+          if (hunting) {
+              hunt_status = "hunting · " + std::to_string(cached_alive_) + " alive";
+          } else {
+              hunt_status = "idle";
+          }
+
+          // Calculate positions for right-aligned text
+          float start_x = ImGui::GetCursorPosX();
+          ImGui::TextColored(bullet_color, "%s", left_text.c_str());
+          float left_width = ImGui::CalcTextSize(left_text.c_str()).x;
+          ImGui::SetCursorPosX(start_x + left_width);
+          float window_width = ImGui::GetWindowWidth();
+          float right_width = ImGui::CalcTextSize(hunt_status.c_str()).x;
+          ImGui::SetCursorPosX(window_width - right_width);
+          ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", hunt_status.c_str());
+      }
+      ImGui::Spacing();
+
+     // ─── PROFILE TABLE ───
+     static ImGuiTableFlags flags =
+         ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+         ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
+         ImGuiTableFlags_ContextMenuInBody | ImGuiTableFlags_Hideable | ImGuiTableFlags_Reorderable;
+
+     float table_height = ImGui::GetContentRegionAvail().y - 100.0f; // reserve for action row and collapsing headers
+     if (table_height < 100.0f) table_height = 100.0f;
+
+     if (!ImGui::BeginTable("main_profiles", 4, flags, ImVec2(0, table_height))) {
+         ImGui::EndTable();
+     } else {
+         ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed |
+                                            ImGuiTableColumnFlags_DefaultSort |
+                                            ImGuiTableColumnFlags_PreferSortAscending, 70.0f);
+         ImGui::TableSetupColumn("CC", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+         ImGui::TableSetupColumn("Remark", ImGuiTableColumnFlags_WidthStretch);
+         ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
+         ImGui::TableSetupScrollFreeze(0, 1);
+         ImGui::TableHeadersRow();
+
+         // Sort a pointer view over snapshot_ by the clicked column; latency uses
+         // the fresh client_latency_results_ map (untested/failed sort last).
+         std::vector<const UiRow*> rows_sorted;
+         rows_sorted.reserve(snapshot_.size());
+         for (const auto& row : snapshot_) rows_sorted.push_back(&row);
+         if (ImGuiTableSortSpecs* ss = ImGui::TableGetSortSpecs(); ss && ss->SpecsCount > 0) {
+             const auto& spec = ss->Specs[0];
+             std::unordered_map<std::string, int> lat_copy;
+             {
+                 std::lock_guard<std::mutex> lock(client_latency_mu_);
+                 lat_copy = client_latency_results_;
+             }
+             auto lat_of = [&](const UiRow* p) {
+                 auto it = lat_copy.find(p->rec.uri);
+                 return (it != lat_copy.end() && it->second >= 0) ? it->second : INT_MAX;
+             };
+             std::stable_sort(rows_sorted.begin(), rows_sorted.end(),
+                              [&](const UiRow* a, const UiRow* b) {
+                 int c = 0;
+                 switch (spec.ColumnIndex) {
+                     case 0: c = lat_of(a) - lat_of(b); break;
+                     case 1: c = countryCell(a->rec.exit_country).compare(countryCell(b->rec.exit_country)); break;
+                     case 2: c = a->ps.compare(b->ps); break;
+                     case 3: c = a->rec.uri.compare(b->rec.uri); break;
+                 }
+                 if (c == 0) return a->rec.endpoint_key < b->rec.endpoint_key;
+                 return spec.SortDirection == ImGuiSortDirection_Ascending ? c < 0 : c > 0;
+             });
+         }
+
+         ImGuiListClipper clipper;
+         clipper.Begin(static_cast<int>(rows_sorted.size()));
+         while (clipper.Step()) {
+             for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+                 const UiRow& row = *rows_sorted[i];
+                 const ConfigHealthRecord& r = row.rec;
+                 bool selected = selected_uris_.count(r.uri) != 0;
+
+                 ImGui::TableNextRow();
+                 ImGui::TableNextColumn();
+
+                 int lat_ms = -2;
+                 {
+                     std::lock_guard<std::mutex> lock(client_latency_mu_);
+                     auto it = client_latency_results_.find(r.uri);
+                     if (it != client_latency_results_.end()) lat_ms = it->second;
+                 }
+
+                 // Full-row selectable: click selects anywhere in the row,
+                 // double-click connects.
+                 ImGui::PushID(r.uri.c_str());
+                 if (ImGui::Selectable("##row", selected,
+                                     ImGuiSelectableFlags_SpanAllColumns |
+                                     ImGuiSelectableFlags_AllowOverlap)) {
+                     if (selected) selected_uris_.erase(r.uri);
+                     else          selected_uris_.insert(r.uri);
+                 }
+                 if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                     std::thread([this, uri = r.uri]() {
+                         int port = orch_.activateClientConfig(uri);
+                         if (port > 0) showToast("Connected on port " + std::to_string(port));
+                         else          showToast("Failed to connect to " + uri);
+                     }).detach();
+                 }
+                 if (active && r.uri == client_status.uri) {
+                     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                         ImGui::ColorConvertFloat4ToU32(ImVec4(0.2f, 0.3f, 0.2f, 0.5f)));
+                 }
+                 ImGui::SameLine();
+                 if (lat_ms >= 0) {
+                     ImGui::Text("%.0f ms", (float)lat_ms);
+                 } else if (lat_ms == -1) {
+                     ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f), "failed");
+                 } else {
+                     ImGui::TextDisabled("...");
+                 }
+                 ImGui::PopID();
+
+                 ImGui::TableNextColumn();
+                 // CC column (exit country)
+                 {
+                     const bool known = !r.exit_country.empty();
+                     const bool stale = known && (glfwGetTime() - r.exit_country_at) > (double)std::max(60, orch_.config().exitCountryFreshSeconds());
+                     if (!known) ImGui::TextDisabled("Unknown");
+                     else if (stale) ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.55f, 1.0f), "%s ~", countryCell(r.exit_country).c_str());
+                     else ImGui::TextUnformatted(countryCell(r.exit_country).c_str());
+                 }
+
+                 ImGui::TableNextColumn();
+                 ImGui::TextUnformatted(row.ps.empty() ? "-" : row.ps.c_str());
+
+                 ImGui::TableNextColumn();
+                 // URI column (elided/truncated)
+                 std::string uri_display = r.uri;
+                 if (uri_display.length() > 50) {
+                     uri_display = uri_display.substr(0, 47) + "...";
+                 }
+                 ImGui::TextUnformatted(uri_display.c_str());
+                 if (ImGui::IsItemHovered()) {
+                     ImGui::SetTooltip("%s", r.uri.c_str());
+                 }
+             }
+         }
+         clipper.End();
+         ImGui::EndTable();
+     }
+
+     // ─── ACTION ROW ───
+     ImGui::Spacing();
+     if (ImGui::Button(active ? "Disconnect" : "Connect")) {
+         if (active) {
+             std::thread([this]() {
+                 orch_.deactivateClientConfig();
+                 showToast("Disconnected");
+             }).detach();
+         } else {
+             // Connect selected profile or first selected?
+             // The task says: double-click connects it (in the table). For the Connect button, we should connect the selected profile or if none selected, do nothing?
+             // We'll connect the first selected profile, or if none, do nothing and show a toast.
+             if (!selected_uris_.empty()) {
+                 std::string uri = *selected_uris_.begin();
+                 std::thread([this, uri]() {
+                     int port = orch_.activateClientConfig(uri);
+                     if (port > 0) {
+                         showToast("Connected to " + uri + " on port " + std::to_string(port));
+                     } else {
+                         showToast("Failed to connect to " + uri);
+                     }
+                 }).detach();
+             } else {
+                 showToast("No profile selected");
+             }
+         }
+     }
+     ImGui::SameLine();
+     if (ImGui::Button("Test")) {
+         std::vector<std::string> uris_to_test;
+         if (selected_uris_.empty()) {
+             for (const auto& row : snapshot_) {
+                 uris_to_test.push_back(row.rec.uri);
+             }
+         } else {
+             for (const auto& uri : selected_uris_) {
+                 uris_to_test.push_back(uri);
+             }
+         }
+         if (!uris_to_test.empty()) {
+             std::thread([this, uris_to_test]() {
+                 network::ProxyTester tester;
+                 network::BatchTestOptions opts;
+                 opts.timeout_seconds = 5; // default timeout
+                 opts.bulk = false;
+                 auto results = tester.testBatch(uris_to_test, opts);
+                 {
+                     std::lock_guard<std::mutex> lock(client_latency_mu_);
+                     for (size_t i = 0; i < results.size(); ++i) {
+                         const auto& res = results[i];
+                         int latency_ms = -1;
+                         if (res.success && res.has_probe) {
+                             latency_ms = static_cast<int>(res.latency_ms);
+                         }
+                         client_latency_results_[uris_to_test[i]] = latency_ms;
+                     }
+                 }
+                 showToast("Latency test completed for " + std::to_string(uris_to_test.size()) + " configs");
+             }).detach();
+         } else {
+             showToast("No configs to test");
+         }
+     }
+     ImGui::SameLine();
+     if (ImGui::Button("Import▾")) {
+         ImGui::OpenPopup("##import_menu");
+     }
+     if (ImGui::BeginPopup("##import_menu")) {
+         if (ImGui::MenuItem("Share links (uri list)")) {
+             std::string clipboard = ImGui::GetClipboardText();
+             auto uris = utils::extractRawUrisFromText(clipboard);
+             if (!uris.empty()) {
+                 orch_.configDb()->addConfigsWithPriority(uris, "manual");
+                 showToast("Added " + std::to_string(uris.size()) + " configs from clipboard");
+             } else {
+                 showToast("No valid URIs found in clipboard");
+             }
+         }
+         ImGui::EndPopup();
+     }
+     ImGui::SameLine();
+     if (ImGui::Button(orchestrator_running_.load() ? "Stop" : "Start")) {
+         if (orchestrator_running_.load()) {
+             std::thread([this]() {
+                 stopOrchestrator();
+                 showToast("Stopped");
+             }).detach();
+         } else {
+             startOrchestrator();
+             showToast("Started");
+         }
+     }
+     ImGui::SameLine();
+     if (ImGui::Button("Copy v2rayN")) {
+         int us = 0;
+         std::string text = buildV2rayNTop20Text(us);
+         if (text.empty()) {
+             showToast("No live configs yet");
+         } else {
+             ImGui::SetClipboardText(text.c_str());
+             showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " configs for v2rayN (" + std::to_string(us) + " US)");
+         }
+     }
+
+     // ─── CollapsingHeader "Subscriptions" ───
+     ImGui::Spacing();
+     if (ImGui::CollapsingHeader("Subscriptions")) {
+         // Reuse the subscription UI block from the Client tab (lines 2280-2386 in the original file)
+         // We'll copy it here, but note that we are in the main view and the state variables are shared.
+         ImGui::Text("Subscriptions");
+         ImGui::SameLine(0, 10);
+         ImGui::TextDisabled("(managed by subscription manager)");
+         ImGui::Separator();
+
+         static ImGuiTableFlags sub_flags =
+             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
+             ImGuiTableFlags_SizingStretchProp;
+
+         if (ImGui::BeginTable("subscriptions", 7, sub_flags)) {
+             ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 50.0f);
+             ImGui::TableSetupColumn("Remarks", ImGuiTableColumnFlags_WidthStretch);
+             ImGui::TableSetupColumn("URL", ImGuiTableColumnFlags_WidthStretch);
+             ImGui::TableSetupColumn("Last update", ImGuiTableColumnFlags_WidthFixed, 100.0f);
+             ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+             ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthFixed, 200.0f);
+             ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 80.0f);
+             ImGui::TableHeadersRow();
+
+             auto subs = orch_.subscriptionManager().list();
+             for (const auto& sub : subs) {
+                 ImGui::TableNextRow();
+                 ImGui::TableNextColumn();
+                 bool enabled = sub.enabled;
+                 if (ImGui::Checkbox("##sub_enabled", &enabled)) {
+                     if (enabled != sub.enabled) {
+                         std::thread([this, id = sub.id, enabled]() {
+                             orch_.subscriptionManager().setEnabled(id, enabled);
+                             showToast(std::string("Subscription ") + (enabled ? "enabled" : "disabled"));
+                         }).detach();
+                     }
+                 }
+                 ImGui::TableNextColumn();
+                 ImGui::TextUnformatted(sub.remarks.empty() ? "-" : sub.remarks.c_str());
+                 ImGui::TableNextColumn();
+                 ImGui::TextUnformatted(sub.url.c_str());
+                 if (ImGui::IsItemHovered()) {
+                     ImGui::SetTooltip("%s", sub.url.c_str());
+                 }
+                 ImGui::TableNextColumn();
+                 if (sub.last_update > 0) {
+                     ImGui::TextUnformatted(formatAge(glfwGetTime(), sub.last_update).c_str());
+                 } else {
+                     ImGui::TextDisabled("never");
+                 }
+                 ImGui::TableNextColumn();
+                 ImGui::Text("%d", sub.last_count);
+                 ImGui::TableNextColumn();
+                 if (!sub.last_error.empty()) {
+                     ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "%s", sub.last_error.c_str());
+                 } else {
+                     ImGui::TextDisabled("-");
+                 }
+                 ImGui::TableNextColumn();
+                 if (ImGui::SmallButton("Update")) {
+                     std::thread([this, id = sub.id]() {
+                         std::string err;
+                         int count = orch_.subscriptionManager().update(id, "", &err);
+                         if (count >= 0) {
+                             showToast("Subscription updated: " + std::to_string(count) + " configs");
+                         } else {
+                             showToast("Subscription update failed: " + err);
+                         }
+                     }).detach();
+                 }
+                 ImGui::SameLine();
+                 if (ImGui::SmallButton("Delete")) {
+                     std::thread([this, id = sub.id]() {
+                         bool removed = orch_.subscriptionManager().remove(id);
+                         if (removed) {
+                             showToast("Subscription removed");
+                         } else {
+                             showToast("Failed to remove subscription");
+                         }
+                     }).detach();
+                 }
+             }
+             ImGui::EndTable();
+         }
+
+         ImGui::Spacing();
+         ImGui::Text("Add subscription:");
+         ImGui::SameLine();
+         ImGui::SetNextItemWidth(300);
+         ImGui::InputText("##new_sub_url", client_subscription_url_input_, sizeof(client_subscription_url_input_));
+         ImGui::SameLine();
+         ImGui::SetNextItemWidth(200);
+         ImGui::InputText("##new_sub_remark", client_add_sub_remark_input_, sizeof(client_add_sub_remark_input_));
+         ImGui::SameLine();
+         if (ImGui::Button("Add")) {
+             std::string url = client_subscription_url_input_;
+             std::string remark = client_add_sub_remark_input_;
+             if (!url.empty()) {
+                 std::string id = orch_.subscriptionManager().add(url, remark);
+                 if (!id.empty()) {
+                     showToast("Subscription added: " + url);
+                     // Clear inputs
+                     memset(client_subscription_url_input_, 0, sizeof(client_subscription_url_input_));
+                     memset(client_add_sub_remark_input_, 0, sizeof(client_add_sub_remark_input_));
+                 } else {
+                     showToast("Failed to add subscription (maybe duplicate)");
+                 }
+             } else {
+                 showToast("URL cannot be empty");
+             }
+         }
+     }
+
+     // ─── CollapsingHeader "Found" ───
+     ImGui::Spacing();
+     if (ImGui::CollapsingHeader("Found")) {
+         double now = glfwGetTime();
+         if (last_found_refresh_ < 0.0 || now - last_found_refresh_ >= kFoundRefreshIntervalSeconds) {
+             last_found_refresh_ = now;
+             found_cache_ = orch_.foundHistory().snapshot();
+             found_info_by_uri_.clear();
+             for (const auto& row : snapshot_) {
+                 std::string country = row.rec.exit_country.empty() ? row.rec.server_country : row.rec.exit_country;
+                 found_info_by_uri_[row.rec.uri] = {countryCell(country), row.rec.latency_ms};
+             }
+         }
+
+         if (ImGui::Button("Copy all found URIs")) {
+             std::string text = buildFoundClipboardText();
+             if (text.empty()) {
+                 showToast("No found configs yet");
+             } else {
+                 ImGui::SetClipboardText(text.c_str());
+                 showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " found configs to clipboard");
+             }
+         }
+         ImGui::SameLine();
+         if (ImGui::Button("Export")) {
+             exportFoundHistory();
+         }
+         ImGui::SameLine();
+         ImGui::TextDisabled("%d found", (int)found_cache_.size());
+
+         ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+         if (ImGui::BeginTable("found", 3, flags, ImVec2(0, 0))) {
+             ImGui::TableSetupColumn("When", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+             ImGui::TableSetupColumn("Country", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+             ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
+             ImGui::TableSetupScrollFreeze(0, 1);
+             ImGui::TableHeadersRow();
+             for (const auto& e : found_cache_) {
+                 ImGui::TableNextRow();
+                 ImGui::TableNextColumn();
+                 ImGui::TextUnformatted(formatAge(now, e.seen_at).c_str());
+                 ImGui::TableNextColumn();
+                 auto it = found_info_by_uri_.find(e.uri);
+                 if (it != found_info_by_uri_.end()) {
+                     ImGui::TextUnformatted(it->second.first.c_str());
+                     if (ImGui::IsItemHovered() && it->second.second > 0) {
+                         ImGui::SetTooltip("Latency: %.0f ms", it->second.second);
+                     }
+                 } else {
+                     ImGui::TextDisabled("(removed)");
+                 }
+                 ImGui::TableNextColumn();
+                 ImGui::TextUnformatted(e.uri.c_str());
+                 if (ImGui::IsItemHovered()) {
+                     ImGui::SetTooltip("%s", e.uri.c_str());
+                 }
+             }
+             ImGui::EndTable();
+         }
+     }
+ }
+
+ #endif // __ANDROID__
 
 } // namespace gui
 } // namespace hunter
