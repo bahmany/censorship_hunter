@@ -6,6 +6,7 @@
 #include <map>
 #include <mutex>
 #include <atomic>
+#include <functional>
 
 #include "core/models.h"
 #include "core/health_score.h"
@@ -35,6 +36,14 @@ public:
     int addConfigs(const std::set<std::string>& uris, const std::string& tag = "");
     int addConfigsWithPriority(const std::set<std::string>& uris, const std::string& tag = "",
                                int* promoted_existing = nullptr);
+
+    /**
+     * @brief Hook fired (outside the DB lock) for each genuinely-new record added by
+     *        addConfigsWithPriority(). Used by the orchestrator to feed FoundHistory.
+     *        Must be cheap and thread-safe; validator threads call it concurrently.
+     */
+    using NewRecordHook = std::function<void(const std::string& uri, double now)>;
+    void setNewRecordHook(NewRecordHook hook);
 
     /**
      * @brief Apply one typed probe round (D1/D2). Thread-safe. Duplicate run IDs, stale
@@ -290,6 +299,7 @@ private:
     mutable std::mutex mutex_;
     ClockFn clock_;
     BatchPrioritizer batch_prioritizer_;   // guarded by mutex_ (C2)
+    NewRecordHook new_record_hook_;        // guarded by mutex_; invoked without the lock held
     HealthThresholds th_;
     LoadReport load_report_;
     std::string save_error_;

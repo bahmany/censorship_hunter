@@ -188,6 +188,7 @@ set(CORE_SOURCES
     src/core/engine_embed.cpp
     src/core/config_embed.cpp
     src/core/updater.cpp
+    src/core/found_history.cpp
 )
 
 # ─── Network Library Sources ───

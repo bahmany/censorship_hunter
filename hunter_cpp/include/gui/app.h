@@ -15,6 +15,7 @@
 #include "core/health_score.h"
 #include "core/models.h"
 #include "core/updater.h"
+#include "core/found_history.h"
 #include "geo/country_query.h"
 #include "core/utils.h"  // for utils::LogRingBuffer
 
@@ -84,8 +85,8 @@ private:
     // ─── Modern UI rendering ───
     void applyModernTheme();
     void renderTabBar();
-    void renderDashboardTab();
     void renderConfigsTab();
+    void renderFoundTab();
     void renderSettingsTab();
     void renderAboutTab();
     void renderStatusBar();
@@ -93,7 +94,6 @@ private:
     void renderUpdatePanel();
 
     // Legacy rendering (used within tabs)
-    void renderHeader();
     void renderControls();
     void renderFilterBar();
     void renderTable();
@@ -105,6 +105,11 @@ private:
     std::string buildClipboardText(bool selected_only) const;
     std::string buildGeminiOkClipboardText() const;
     std::string buildExportText() const;
+    std::string buildV2rayNTop20Text(int& us_count) const;
+    std::string buildFoundClipboardText() const;
+    void copyTop20ForV2rayN();
+    void writeTop20Files(const std::string& text);
+    void exportFoundHistory();
     void exportToFile(const std::string& content, const char* default_name);
     void showToast(const std::string& msg);
 
@@ -143,6 +148,8 @@ private:
     };
     struct UiSnapshot {
         std::vector<UiRow> rows;             // already filtered by the view spec, ranked, capped
+        std::vector<std::string> top20_uris; // prepared v2rayN top-20 (ranked, US-first, filtered)
+        int top20_us = 0;                    // how many of top20_uris are US-exit
         int total = 0;
         int alive_count = 0;
         int tested = 0;
@@ -224,9 +231,19 @@ private:
     static constexpr double kShowPollIntervalSeconds = 0.25;
 
     // ─── Modern UI state ───
-    enum class Tab { Dashboard, Configs, Settings, About };
-    Tab active_tab_ = Tab::Dashboard;
+    enum class Tab { Configs, Found, Settings, About };
+    Tab active_tab_ = Tab::Configs;
     bool theme_applied_ = false;
+
+    // ─── Prepared v2rayN top-20 (published by the snapshot worker) ───
+    std::vector<std::string> top_v2rayn_uris_;
+    int top_v2rayn_us_count_ = 0;
+
+    // ─── Found-history tab cache ───
+    std::vector<core::FoundHistory::Entry> found_cache_;
+    std::unordered_map<std::string, std::pair<std::string, float>> found_info_by_uri_;
+    double last_found_refresh_ = -1.0;
+    static constexpr double kFoundRefreshIntervalSeconds = 1.0;
 
     // ─── Country service (C2) ───
     std::shared_ptr<geo::CountryService> country_service_;

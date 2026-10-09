@@ -5,6 +5,33 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.0] - 2026-10-09
+
+### Added
+- **Copy Top 20 for v2rayN**: one action copies the best 20 live configs (top 5
+  always United States, rest ranked by health) in v2rayN-importable share-link
+  format — unsupported schemes (`ssr://`, etc.) are dropped, `hy2://` is
+  normalized to `hysteria2://`, and missing remarks get a `#Hunter` fragment.
+  Also writes `runtime/v2rayn_top20.txt` and a base64 subscription body
+  (`runtime/v2rayn_top20_b64.txt`) for serving to v2rayN.
+- **Found history**: the latest 200 discovered configs are kept in a persistent,
+  deduplicated history (`runtime/found_history.tsv`) with a dedicated "Found"
+  tab (when/country/URI, copy-all, export).
+- **Android clipboard**: copy buttons now write to the real system clipboard
+  via a JNI bridge (previously a silent no-op).
+
+### Fixed
+- Copying hundreds of configs no longer fails in v2rayN (small canonical
+  top-20 payload instead of the whole live set).
+- `test_proxy_tester_batch` no longer assumes nothing listens on `127.0.0.1:443`
+  (uses a runtime-detected closed port).
+
+### Changed
+- Simplified UI: Dashboard and Configs tabs merged into a single "Configs" tab;
+  copy/export actions consolidated into `Copy ▾` / `Export ▾` menus; duplicate
+  Start/Stop/Copy/Export buttons removed from Settings; single Start/Stop
+  toggle; toast shown once.
+
 ## [1.3.0] - 2026-03-21
 
 ### Added

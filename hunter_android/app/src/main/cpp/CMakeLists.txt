@@ -47,6 +47,7 @@ set(CORE_SOURCES
     ${HUNTER_SRC_DIR}/src/core/db_format.cpp
     ${HUNTER_SRC_DIR}/src/core/endpoint_key.cpp
     ${HUNTER_SRC_DIR}/src/core/health_score.cpp
+    ${HUNTER_SRC_DIR}/src/core/found_history.cpp
 )
 
 # Vendored zstd decoder (for embedded engine decompression).

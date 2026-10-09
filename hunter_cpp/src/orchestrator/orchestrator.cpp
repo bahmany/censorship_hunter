@@ -250,8 +250,25 @@ void HunterOrchestrator::initComponents() {
     if (cache_dir.empty()) cache_dir = "runtime";
     cache_ = std::make_unique<cache::SmartCache>(cache_dir);
 
+    // Found history: latest 200 discovered configs, persisted across runs.
+    utils::mkdirRecursive(cache_dir);
+    found_history_path_ = cache_dir + "/found_history.tsv";
+    found_history_.load(found_history_path_);
+    config_db_->setNewRecordHook(
+        [this](const std::string& uri, double now) { onConfigFound(uri, now); });
+
     // Runtime cleanup manager
     cleanup_manager_ = std::make_unique<orchestrator::RuntimeCleanupManager>(cache_dir);
+}
+
+void HunterOrchestrator::onConfigFound(const std::string& uri, double now) {
+    found_history_.add(uri, now);
+    // The file is tiny (<=200 lines); persist it, throttled so bulk imports
+    // don't rewrite it once per record.
+    double last = found_history_saved_at_.load();
+    if (!found_history_path_.empty() && now - last >= 10.0) {
+        if (found_history_.save(found_history_path_)) found_history_saved_at_.store(now);
+    }
 }
 
 void HunterOrchestrator::start() {
@@ -443,6 +460,11 @@ void HunterOrchestrator::stop() {
             int live_saved = config_db_->saveLiveToDisk("runtime/HUNTER_live_cache.tsv");
             std::cout << "[Shutdown] Saved " << saved << " configs to disk ("
                       << live_saved << " live)" << std::endl;
+        } catch (...) {}
+    }
+    if (!found_history_path_.empty()) {
+        try {
+            found_history_.save(found_history_path_);
         } catch (...) {}
     }
 

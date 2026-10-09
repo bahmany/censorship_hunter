@@ -97,9 +97,12 @@ int ConfigDatabase::addConfigs(const std::set<std::string>& uris, const std::str
 
 int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, const std::string& tag,
                                           int* promoted_existing) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<std::pair<std::string, double>> fresh;
+    NewRecordHook hook;
     int added = 0;
     int promoted = 0;
+    {
+    std::lock_guard<std::mutex> lock(mutex_);
     double now = clock_();
     const bool high_priority = (tag == "manual" || tag == "import" || tag == "user_import");
     const double boost_until = high_priority ? (now + 1800.0) : 0.0;
@@ -129,6 +132,7 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
         rec.needs_retest = true;
         db_[hash] = rec;
         added++;
+        fresh.emplace_back(uri, now);
     }
     // Enforce newest-first ordering: move newest to end of map iteration
     if (added > 0) {
@@ -146,7 +150,17 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
     if (promoted_existing) {
         *promoted_existing = promoted;
     }
+    hook = new_record_hook_;
+    }  // release the DB lock before invoking the hook
+    if (hook) {
+        for (const auto& [uri, t] : fresh) hook(uri, t);
+    }
     return added;
+}
+
+void ConfigDatabase::setNewRecordHook(NewRecordHook hook) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    new_record_hook_ = std::move(hook);
 }
 
 namespace {

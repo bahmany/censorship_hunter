@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -226,6 +227,88 @@ std::string formatAge(double now, double ts) {
     if (d < 3600) return std::to_string(static_cast<int>(d / 60)) + "m ago";
     if (d < 86400) return std::to_string(static_cast<int>(d / 3600)) + "h ago";
     return std::to_string(static_cast<int>(d / 86400)) + "d ago";
+}
+
+// v2rayN (2dust/v2rayN v7+) clipboard import accepts only these schemes;
+// anything else is skipped silently.
+bool isV2rayNScheme(const std::string& scheme) {
+    return scheme == "vmess" || scheme == "ss" || scheme == "socks" || scheme == "socks5" ||
+           scheme == "socks4" || scheme == "trojan" || scheme == "vless" ||
+           scheme == "hysteria2" || scheme == "hy2" || scheme == "hysteria2+realm" ||
+           scheme == "hysteria2+realm+http" || scheme == "tuic" || scheme == "wireguard" ||
+           scheme == "anytls" || scheme == "naive+https" || scheme == "naive+quic";
+}
+
+std::string uriScheme(const std::string& uri) {
+    auto pos = uri.find("://");
+    if (pos == std::string::npos) return "";
+    std::string s = uri.substr(0, pos);
+    for (auto& c : s) c = (char)std::tolower((unsigned char)c);
+    return s;
+}
+
+// Normalize one URI for v2rayN import; returns "" when it must be dropped.
+std::string normalizeForV2rayN(const std::string& uri) {
+    std::string scheme = uriScheme(uri);
+    if (!isV2rayNScheme(scheme)) return "";
+    std::string out = uri;
+    if (scheme == "hy2") out = "hysteria2://" + uri.substr(6);
+    // Non-vmess links need a '#remark' fragment or v2rayN shows a blank row.
+    // vmess bodies are base64 payloads — leave them untouched.
+    if (scheme != "vmess" && out.find('#') == std::string::npos) out += "#Hunter";
+    return out;
+}
+
+struct Top20Candidate {
+    std::string uri, exit_country, server_country;
+    RankKey rank;
+};
+
+Top20Candidate top20CandidateFor(const ConfigHealthRecord& r, const HealthThresholds& th, double now) {
+    Top20Candidate c;
+    c.uri = r.uri;
+    c.exit_country = r.exit_country;
+    c.server_country = r.server_country;
+    HealthEvaluation hev = evaluateHealth(r.ev, now, th);
+    c.rank.tier = hev.tier;
+    c.rank.score = hev.score;
+    c.rank.last_full_success = r.ev.last_full_success;
+    c.rank.key = r.endpoint_key;
+    return c;
+}
+
+// Ranked order, US-exit (server-country fallback) first: up to 5 US, then the
+// best remaining regardless of country, up to 20 total. Dedups by URI.
+void selectTop20ForV2rayN(std::vector<Top20Candidate> cands,
+                          std::vector<std::string>& out_uris, int& out_us) {
+    out_uris.clear();
+    out_us = 0;
+    std::sort(cands.begin(), cands.end(), [](const Top20Candidate& a, const Top20Candidate& b) {
+        return rankedBefore(a.rank, b.rank);
+    });
+    std::set<std::string> seen;
+    auto isUS = [](const Top20Candidate& c) {
+        if (c.exit_country == "US") return true;
+        if (c.exit_country.empty() || c.exit_country == "Mixed" || c.exit_country == "?")
+            return c.server_country == "US";
+        return false;
+    };
+    for (const auto& c : cands) {
+        if (out_us >= 5 || out_uris.size() >= 20) break;
+        if (!isUS(c)) continue;
+        if (!seen.insert(c.uri).second) continue;
+        std::string n = normalizeForV2rayN(c.uri);
+        if (n.empty()) continue;
+        out_uris.push_back(n);
+        out_us++;
+    }
+    for (const auto& c : cands) {
+        if (out_uris.size() >= 20) break;
+        if (!seen.insert(c.uri).second) continue;
+        std::string n = normalizeForV2rayN(c.uri);
+        if (n.empty()) continue;
+        out_uris.push_back(n);
+    }
 }
 
 } // namespace
@@ -454,6 +537,7 @@ void HunterGuiApp::snapshotWorker() {
                 // Phase 1 (DB lock held, cheap per-record work only): count + select + cheap rank key.
                 struct Item { int cls; double lfs; float lat; std::string key; };
                 std::vector<Item> items;
+                std::vector<Top20Candidate> top_cands;   // every alive record, for the v2rayN top-20
                 std::vector<std::pair<std::string, std::string>> need_meta;   // key, uri
                 double lat_sum = 0.0; int lat_n = 0;
                 db->forEachRecord([&](const ConfigHealthRecord& r) {
@@ -469,6 +553,7 @@ void HunterGuiApp::snapshotWorker() {
                     }
                     if (!r.exit_country.empty()) snap->exit_counts[r.exit_country]++;
                     if (!r.server_country.empty()) snap->server_counts[r.server_country]++;
+                    if (r.alive) top_cands.push_back(top20CandidateFor(r, th, now));
 
                     if (!spec.all_view && !r.alive) return;
                     if (!geo::passesCountryFilter(spec.mode, spec.choice, r.exit_country, r.server_country)) return;
@@ -552,6 +637,7 @@ void HunterGuiApp::snapshotWorker() {
                     kb.tier = b.ev.tier; kb.score = b.ev.score; kb.last_full_success = b.rec.ev.last_full_success; kb.key = b.rec.endpoint_key;
                     return rankedBefore(ka, kb);
                 });
+                selectTop20ForV2rayN(std::move(top_cands), snap->top20_uris, snap->top20_us);
                 for (const auto& r : snap->rows) if (r.ev.stable) snap->stable++;
                 snap->scan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
                 // Adaptive cadence: a slow scan (huge DB) backs off instead of contending with validators.
@@ -582,6 +668,8 @@ void HunterGuiApp::refreshSnapshotIfDue() {
     if (latest && latest != applied_snapshot_) {
         applied_snapshot_ = latest;
         snapshot_ = latest->rows;
+        top_v2rayn_uris_ = latest->top20_uris;
+        top_v2rayn_us_count_ = latest->top20_us;
         cached_total_ = latest->total;
         cached_alive_ = latest->alive_count;
         cached_tested_ = latest->tested;
@@ -700,6 +788,94 @@ std::string HunterGuiApp::buildExportText() const {
     return out;
 }
 
+std::string HunterGuiApp::buildV2rayNTop20Text(int& us_count) const {
+    if (!top_v2rayn_uris_.empty()) {
+        us_count = top_v2rayn_us_count_;
+        std::string out;
+        for (const auto& u : top_v2rayn_uris_) {
+            out += u;
+            out += '\n';
+        }
+        return out;
+    }
+    // Fallback: the worker hasn't published yet — walk the DB directly.
+    us_count = 0;
+    auto* db = orch_.configDb();
+    if (!db) return "";
+    std::vector<Top20Candidate> cands;
+    const HealthThresholds th = db->thresholds();
+    const double now = systemClock()();
+    db->forEachRecord([&](const ConfigHealthRecord& r) {
+        if (!r.alive) return;
+        cands.push_back(top20CandidateFor(r, th, now));
+    });
+    std::vector<std::string> uris;
+    selectTop20ForV2rayN(std::move(cands), uris, us_count);
+    std::string out;
+    for (const auto& u : uris) {
+        out += u;
+        out += '\n';
+    }
+    return out;
+}
+
+std::string HunterGuiApp::buildFoundClipboardText() const {
+    std::string out;
+    for (const auto& e : orch_.foundHistory().snapshot()) {
+        out += e.uri;
+        out += '\n';
+    }
+    return out;
+}
+
+void HunterGuiApp::writeTop20Files(const std::string& text) {
+    std::error_code ec;
+    std::filesystem::create_directories("runtime", ec);
+    {
+        std::ofstream f("runtime/v2rayn_top20.txt", std::ios::trunc);
+        if (f) f << text;
+    }
+    {
+        std::ofstream f("runtime/v2rayn_top20_b64.txt", std::ios::trunc);
+        if (f) f << utils::base64Encode(text);
+    }
+}
+
+void HunterGuiApp::copyTop20ForV2rayN() {
+    int us = 0;
+    std::string text = buildV2rayNTop20Text(us);
+    if (text.empty()) {
+        showToast("No live configs yet");
+        return;
+    }
+    int n = std::count(text.begin(), text.end(), '\n');
+    ImGui::SetClipboardText(text.c_str());
+    writeTop20Files(text);
+    showToast("Copied " + std::to_string(n) + " configs for v2rayN (" + std::to_string(us) + " US)");
+}
+
+void HunterGuiApp::exportFoundHistory() {
+    auto entries = orch_.foundHistory().snapshot();
+    if (entries.empty()) {
+        showToast("No found configs yet");
+        return;
+    }
+    std::string text;
+    for (const auto& e : entries) {
+        text += e.uri;
+        text += '\n';
+    }
+    std::error_code ec;
+    std::filesystem::create_directories("runtime", ec);
+    std::ofstream f("runtime/found_history.txt", std::ios::trunc);
+    if (!f) {
+        showToast("Export failed: cannot write runtime/found_history.txt");
+        return;
+    }
+    f << text;
+    showToast("Exported " + std::to_string(entries.size()) + " found configs to runtime/found_history.txt");
+}
+
 void HunterGuiApp::showToast(const std::string& msg) {
     toast_message_ = msg;
     toast_until_ = glfwGetTime() + 3.0;
@@ -727,60 +903,16 @@ void HunterGuiApp::exportToFile(const std::string& content, const char* default_
     showToast("Exported to " + filename);
 }
 
-void HunterGuiApp::renderHeader() {
-    ImGui::Text("Hunter");
-    ImGui::SameLine();
-    ImGui::TextDisabled("- live v2ray configs");
-    ImGui::Separator();
-
-    // Uses cached stats from refreshSnapshotIfDue() — NOT a live getStats() call, which is O(N)
-    // over the full DB under the mutex and would stall the UI if invoked every frame.
-    ImGui::Text("Total: %d", cached_total_);
-    ImGui::SameLine(0, 24);
-    ImGui::TextColored(healthColor(HealthState::Healthy), "Alive: %d", cached_alive_);
-    ImGui::SameLine(0, 24);
-    ImGui::TextColored(stabilityColor("Stable"), "Stable: %d", cached_stable_);
-    ImGui::SameLine(0, 24);
-    ImGui::TextColored(healthColor(HealthState::Dead), "Dead: %d", cached_dead_);
-    ImGui::SameLine(0, 24);
-    ImGui::Text("Tested: %d / %d", cached_tested_, cached_total_);
-    ImGui::SameLine(0, 24);
-    ImGui::Text("Avg latency: %.0f ms", cached_avg_latency_ms_);
-    ImGui::SameLine(0, 24);
-    ImGui::Text("Cycle: %d", orch_.cycleCount());
-
-    if (!orchestrator_running_.load()) {
-        ImGui::SameLine(0, 24);
-        ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.35f, 1.0f), "STOPPED");
-    }
-
-    // Local connectivity overlay: does NOT change any server's stored health (D1); it only explains
-    // why probes are being excluded / not penalized right now.
-    ImGui::SameLine(0, 24);
-    switch (baseline_state_.load()) {
-        case 1: ImGui::TextColored(ImVec4(0.30f, 0.80f, 0.40f, 1.0f), "Local network: online"); break;
-        case 2: ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.35f, 1.0f), "Local network: OFFLINE (penalties suspended)"); break;
-        case 3: ImGui::TextColored(ImVec4(0.90f, 0.78f, 0.25f, 1.0f), "Local connectivity unconfirmed"); break;
-        case 4: ImGui::TextDisabled("Direct baseline off"); break;
-        default: ImGui::TextDisabled("Local network: idle"); break;
-    }
-    if (ImGui::IsItemHovered()) {
-        ImGui::SetTooltip("Direct (non-proxied) baseline. Offline/unconfirmed rounds never mark servers dead.\n"
-                          "Disable under Configs > 'Direct baseline probes' for privacy.");
-    }
-}
-
 void HunterGuiApp::renderControls() {
     bool busy = transitioning_.load();
 
-    ImGui::BeginDisabled(busy || orchestrator_running_.load());
-    if (ImGui::Button("Start")) startOrchestrator();
-    ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(busy || !orchestrator_running_.load());
-    if (ImGui::Button("Stop")) {
-        std::thread([this]() { stopOrchestrator(); }).detach();
+    ImGui::BeginDisabled(busy);
+    if (orchestrator_running_.load()) {
+        if (ImGui::Button("Stop")) {
+            std::thread([this]() { stopOrchestrator(); }).detach();
+        }
+    } else {
+        if (ImGui::Button("Start")) startOrchestrator();
     }
     ImGui::EndDisabled();
 
@@ -794,24 +926,73 @@ void HunterGuiApp::renderControls() {
     ImGui::SameLine(0, 24);
     ImGui::TextDisabled("%d shown / %d match", (int)snapshot_.size(), cached_matched_);
 
-    // ─── Copy / Export ───
+    // ─── Copy popup ───
     ImGui::SameLine(0, 16);
-    if (ImGui::Button("Copy Live")) {
-        std::string text = buildClipboardText(false);
-        ImGui::SetClipboardText(text.c_str());
-        showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " live configs to clipboard");
+    if (ImGui::Button("Copy v")) ImGui::OpenPopup("##copy_menu");
+    if (ImGui::BeginPopup("##copy_menu")) {
+        if (ImGui::MenuItem("Copy Top 20 for v2rayN -- 5x US + best")) copyTop20ForV2rayN();
+        int sel = (int)selected_uris_.size();
+        std::string sel_label = "Selected (" + std::to_string(sel) + ")";
+        if (ImGui::MenuItem(sel_label.c_str(), nullptr, false, sel > 0)) {
+            std::string text = buildClipboardText(true);
+            ImGui::SetClipboardText(text.c_str());
+            showToast("Copied " + std::to_string(sel) + " selected configs to clipboard");
+        }
+        if (ImGui::MenuItem("Gemini-OK only")) {
+            std::string text = buildGeminiOkClipboardText();
+            ImGui::SetClipboardText(text.c_str());
+            int count = text.empty() ? 0 : std::count(text.begin(), text.end(), '\n');
+            showToast("Copied " + std::to_string(count) + " Gemini OK configs to clipboard");
+        }
+        if (ImGui::MenuItem("All live")) {
+            std::string text = buildClipboardText(false);
+            ImGui::SetClipboardText(text.c_str());
+            showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " live configs to clipboard");
+        }
+        if (ImGui::MenuItem("Latest 200 found")) {
+            std::string text = buildFoundClipboardText();
+            if (text.empty()) {
+                showToast("No found configs yet");
+            } else {
+                ImGui::SetClipboardText(text.c_str());
+                showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " found configs to clipboard");
+            }
+        }
+        ImGui::EndPopup();
     }
+
+    // ─── Export popup ───
     ImGui::SameLine();
-    if (ImGui::Button("Copy Gemini OK")) {
-        std::string text = buildGeminiOkClipboardText();
-        ImGui::SetClipboardText(text.c_str());
-        int count = text.empty() ? 0 : std::count(text.begin(), text.end(), '\n');
-        showToast("Copied " + std::to_string(count) + " Gemini OK configs to clipboard");
+    if (ImGui::Button("Export v")) ImGui::OpenPopup("##export_menu");
+    if (ImGui::BeginPopup("##export_menu")) {
+        if (ImGui::MenuItem("Top-20 v2rayN files (runtime/)")) {
+            int us = 0;
+            std::string text = buildV2rayNTop20Text(us);
+            if (text.empty()) {
+                showToast("No live configs yet");
+            } else {
+                writeTop20Files(text);
+                showToast("Wrote runtime/v2rayn_top20.txt + _b64.txt");
+            }
+        }
+        if (ImGui::MenuItem("All live -> file")) {
+            exportToFile(buildExportText(), "hunter_live_configs");
+        }
+        if (ImGui::MenuItem("Found history -> file")) {
+            exportFoundHistory();
+        }
+        ImGui::EndPopup();
     }
+
+    // ─── QR code for selected ───
     ImGui::SameLine();
-    if (ImGui::Button("Export Live")) {
-        exportToFile(buildExportText(), "hunter_live_configs");
+    ImGui::BeginDisabled(selected_uris_.empty() || selected_uris_.size() > 1);
+    if (ImGui::Button("QR Code")) {
+        qr_text_ = *selected_uris_.begin();
+        show_qr_popup_ = true;
     }
+    ImGui::EndDisabled();
+
     ImGui::SameLine();
     ImGui::BeginDisabled(cached_alive_ == 0);
     ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.20f, 0.20f, 1.0f));
@@ -824,28 +1005,6 @@ void HunterGuiApp::renderControls() {
     ImGui::EndDisabled();
     if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
         ImGui::SetTooltip("Drop every live config from the database and the live cache.");
-    }
-    ImGui::SameLine();
-    ImGui::BeginDisabled(selected_uris_.empty());
-    if (ImGui::Button("Copy Selected")) {
-        std::string text = buildClipboardText(true);
-        ImGui::SetClipboardText(text.c_str());
-        showToast("Copied " + std::to_string(selected_uris_.size()) + " selected configs to clipboard");
-    }
-    ImGui::EndDisabled();
-
-    // ─── QR code for selected ───
-    ImGui::SameLine();
-    ImGui::BeginDisabled(selected_uris_.empty() || selected_uris_.size() > 1);
-    if (ImGui::Button("QR Code")) {
-        qr_text_ = *selected_uris_.begin();
-        show_qr_popup_ = true;
-    }
-    ImGui::EndDisabled();
-
-    if (!toast_message_.empty() && glfwGetTime() < toast_until_) {
-        ImGui::SameLine(0, 16);
-        ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "%s", toast_message_.c_str());
     }
 
     renderFilterBar();
@@ -1597,12 +1756,12 @@ void HunterGuiApp::renderStatusCard(const char* label, const char* value, const 
 
 void HunterGuiApp::renderTabBar() {
     if (ImGui::BeginTabBar("##MainTabs", ImGuiTabBarFlags_None)) {
-        if (ImGui::BeginTabItem("Dashboard")) {
-            active_tab_ = Tab::Dashboard;
-            ImGui::EndTabItem();
-        }
         if (ImGui::BeginTabItem("Configs")) {
             active_tab_ = Tab::Configs;
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Found")) {
+            active_tab_ = Tab::Found;
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Settings")) {
@@ -1617,7 +1776,7 @@ void HunterGuiApp::renderTabBar() {
     }
 }
 
-void HunterGuiApp::renderDashboardTab() {
+void HunterGuiApp::renderConfigsTab() {
     // ─── Status cards row ───
     float card_width = 160.0f;
     float spacing = 12.0f;
@@ -1659,56 +1818,68 @@ void HunterGuiApp::renderDashboardTab() {
     renderLogPanel();
 }
 
-void HunterGuiApp::renderConfigsTab() {
-    renderHeader();
-    ImGui::Spacing();
-    renderControls();
-    ImGui::Spacing();
-    renderTable();
-    renderLogPanel();
+void HunterGuiApp::renderFoundTab() {
+    double now = glfwGetTime();
+    if (last_found_refresh_ < 0.0 || now - last_found_refresh_ >= kFoundRefreshIntervalSeconds) {
+        last_found_refresh_ = now;
+        found_cache_ = orch_.foundHistory().snapshot();
+        found_info_by_uri_.clear();
+        for (const auto& row : snapshot_) {
+            std::string country = row.rec.exit_country.empty() ? row.rec.server_country : row.rec.exit_country;
+            found_info_by_uri_[row.rec.uri] = {countryCell(country), row.rec.latency_ms};
+        }
+    }
+
+    if (ImGui::Button("Copy all found URIs")) {
+        std::string text = buildFoundClipboardText();
+        if (text.empty()) {
+            showToast("No found configs yet");
+        } else {
+            ImGui::SetClipboardText(text.c_str());
+            showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " found configs to clipboard");
+        }
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Export")) {
+        exportFoundHistory();
+    }
+    ImGui::SameLine();
+    ImGui::TextDisabled("%d found", (int)found_cache_.size());
+
+    ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                            ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
+    if (ImGui::BeginTable("found", 3, flags, ImVec2(0, 0))) {
+        ImGui::TableSetupColumn("When", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+        ImGui::TableSetupColumn("Country", ImGuiTableColumnFlags_WidthFixed, 130.0f);
+        ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableHeadersRow();
+        for (const auto& e : found_cache_) {
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(formatAge(now, e.seen_at).c_str());
+            ImGui::TableNextColumn();
+            auto it = found_info_by_uri_.find(e.uri);
+            if (it != found_info_by_uri_.end()) {
+                ImGui::TextUnformatted(it->second.first.c_str());
+                if (ImGui::IsItemHovered() && it->second.second > 0) {
+                    ImGui::SetTooltip("Latency: %.0f ms", it->second.second);
+                }
+            } else {
+                ImGui::TextDisabled("(removed)");
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(e.uri.c_str());
+            if (ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("%s", e.uri.c_str());
+            }
+        }
+        ImGui::EndTable();
+    }
 }
 
 void HunterGuiApp::renderSettingsTab() {
     ImGui::TextColored(ImVec4(0.30f, 0.55f, 0.90f, 1.0f), "Settings");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Orchestrator controls
-    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Orchestrator");
-    ImGui::Spacing();
-
-    bool busy = transitioning_.load();
-    ImGui::BeginDisabled(busy || orchestrator_running_.load());
-    if (ImGui::Button("Start Orchestrator", ImVec2(180, 0))) startOrchestrator();
-    ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(busy || !orchestrator_running_.load());
-    if (ImGui::Button("Stop Orchestrator", ImVec2(180, 0))) {
-        std::thread([this]() { stopOrchestrator(); }).detach();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(rescan_in_progress_.load());
-    if (ImGui::Button(rescan_in_progress_.load() ? "Rescanning..." : "Rescan Now", ImVec2(180, 0))) {
-        triggerRescan();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Status
-    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Status");
-    ImGui::Spacing();
-
-    ImGui::Text("Orchestrator: %s", orchestrator_running_.load() ? "Running" : "Stopped");
-    ImGui::Text("Cycle count: %d", orch_.cycleCount());
-    ImGui::Text("Version: v%s", constants::HUNTER_VERSION);
-
-    ImGui::Spacing();
     ImGui::Separator();
     ImGui::Spacing();
 
@@ -1730,56 +1901,6 @@ void HunterGuiApp::renderSettingsTab() {
                         country_filled_.load(),
                         orch_.config().exitCountryTarget().empty() ? "none" : orch_.config().exitCountryTarget().c_str(),
                         target_strict_ui_ ? " (strict)" : "");
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Export options
-    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Export");
-    ImGui::Spacing();
-
-    if (ImGui::Button("Export All Live Configs", ImVec2(220, 0))) {
-        exportToFile(buildExportText(), "hunter_live_configs");
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Copy All Live to Clipboard", ImVec2(220, 0))) {
-        std::string text = buildClipboardText(false);
-        ImGui::SetClipboardText(text.c_str());
-        showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " configs");
-    }
-
-    ImGui::Spacing();
-    ImGui::SameLine();
-    if (ImGui::Button("Copy Gemini-OK Configs", ImVec2(220, 0))) {
-        std::string text = buildGeminiOkClipboardText();
-        ImGui::SetClipboardText(text.c_str());
-        int count = text.empty() ? 0 : std::count(text.begin(), text.end(), '\n');
-        showToast("Copied " + std::to_string(count) + " Gemini-OK configs");
-    }
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Dangerous actions
-    ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.35f, 1.0f), "Danger Zone");
-    ImGui::Spacing();
-
-    ImGui::BeginDisabled(cached_alive_ == 0);
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.20f, 0.20f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.25f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.45f, 0.15f, 0.15f, 1.0f));
-    if (ImGui::Button("Clear All Live Configs", ImVec2(220, 0))) {
-        show_clear_live_popup_ = true;
-    }
-    ImGui::PopStyleColor(3);
-    ImGui::EndDisabled();
-
-    if (!toast_message_.empty() && glfwGetTime() < toast_until_) {
-        ImGui::Spacing();
-        ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "%s", toast_message_.c_str());
-    }
 }
 
 void HunterGuiApp::renderAboutTab() {
@@ -2039,8 +2160,8 @@ void HunterGuiApp::renderFrame() {
 
     // ─── Tab content ───
     switch (active_tab_) {
-        case Tab::Dashboard: renderDashboardTab(); break;
         case Tab::Configs:   renderConfigsTab(); break;
+        case Tab::Found:     renderFoundTab(); break;
         case Tab::Settings:  renderSettingsTab(); break;
         case Tab::About:     renderAboutTab(); break;
     }

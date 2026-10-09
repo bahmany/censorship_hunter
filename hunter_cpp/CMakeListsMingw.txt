@@ -196,6 +196,7 @@ set(CORE_SOURCES
     src/core/config_embed.cpp
     src/core/gl_fallback_embed_win.cpp
     src/core/updater.cpp
+    src/core/found_history.cpp
 )
 
 # ─── Network Library Sources ───

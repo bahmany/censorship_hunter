@@ -23,10 +23,24 @@ public class MainActivity extends Activity {
 
     private HunterView view;
     private Button vpnButton;
+    private static MainActivity instance;
+
+    /** Called from native code (ImGui copy buttons) via the system clipboard. */
+    public static void copyToClipboard(String text) {
+        final MainActivity a = instance;
+        final String t = text;
+        if (a == null || t == null) return;
+        a.runOnUiThread(() -> {
+            android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                    a.getSystemService(android.content.Context.CLIPBOARD_SERVICE);
+            if (cm != null) cm.setPrimaryClip(android.content.ClipData.newPlainText("hunter", t));
+        });
+    }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        instance = this;
         setContentView(R.layout.activity_main);
         LinearLayout layout = findViewById(R.id.main_layout);
 
@@ -98,6 +112,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        if (instance == this) instance = null;
         nativeShutdown();                       // UI (ImGui) teardown only
         // The service owns the engines while the VPN is up; otherwise stop the core with the UI.
         if (!HunterVpnService.isRunning() && isFinishing()) {

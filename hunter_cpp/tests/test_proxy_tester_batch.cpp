@@ -72,7 +72,26 @@ struct Rig {
         t.setLauncher(ml); t.setTrafficProbe(std::make_shared<TrafficProbe>(tr)); t.setBaseline(bl); t.setLeaseRegistry(reg);
     }
 };
-static std::string trojan(const std::string& host) { return "trojan://pw@" + host + ":443?sni=" + host; }
+static std::string trojan(const std::string& host, int port = 443) {
+    return "trojan://pw@" + host + ":" + std::to_string(port) + "?sni=" + host;
+}
+// A loopback port that is guaranteed closed right now: bind :0, read the assigned
+// port, close. (Hardcoding 443 breaks on machines running a local web server.)
+static int closedLoopbackPort() {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return 0;
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    int port = 0;
+    if (bind(s, reinterpret_cast<sockaddr*>(&a), sizeof(a)) == 0) {
+        socklen_t n = sizeof(a);
+        if (getsockname(s, reinterpret_cast<sockaddr*>(&a), &n) == 0) port = ntohs(a.sin_port);
+    }
+    close(s);
+    return port;
+}
 static std::string hy2(const std::string& host) { return "hysteria2://pw@" + host + ":443?sni=" + host; }
 static std::string tuic(const std::string& host) { return "tuic://11111111-2222-3333-4444-555555555555:pw@" + host + ":443?sni=" + host; }
 
@@ -107,7 +126,8 @@ int main() {
       CHECK(res[1].success && res[2].success, "quic pass"); CHECK(res[1].download_speed_kbps > 100.0f, "real bulk KiB/s"); } T_END();
 
     T_CASE("QUIC skips TCP prescreen; TCP prescreen fail is a classified raw failure");
-    { Rig r; auto res = r.t.testBatch({hy2("127.0.0.1"), trojan("127.0.0.1")});
+    { Rig r; int dead_port = closedLoopbackPort(); CHECK(dead_port > 0, "found a closed loopback port");
+      auto res = r.t.testBatch({hy2("127.0.0.1"), trojan("127.0.0.1", dead_port)});
       CHECK(res[0].success, "hy2 to closed TCP port is still probed"); CHECK(!res[1].success && res[1].has_probe, "trojan prescreen fails");
       CHECK(r.ml->count("xray") == 0, "prescreen-failed config never launched");
       CHECK(res[1].probe.outcome == ProbeOutcome::RemoteFailure, "classified by baseline"); } T_END();

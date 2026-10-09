@@ -8,7 +8,7 @@ namespace hunter {
 namespace constants {
 
 // ─── Version ───
-constexpr const char* HUNTER_VERSION = "1.5.0";
+constexpr const char* HUNTER_VERSION = "1.6.0";
 constexpr const char* HUNTER_NAME = "Hunter C++";
 
 // ─── Network Defaults ───

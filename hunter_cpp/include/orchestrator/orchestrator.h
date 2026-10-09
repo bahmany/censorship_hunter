@@ -11,6 +11,7 @@
 
 #include "core/config.h"
 #include "core/models.h"
+#include "core/found_history.h"
 #include "network/http_client.h"
 #include "network/uri_parser.h"
 #include "network/continuous_validator.h"
@@ -126,6 +127,8 @@ public:
     network::ConfigDatabase* configDb() { return config_db_.get(); }
     cache::SmartCache* cache() { return cache_.get(); }
     proxy::ProxyServerManager& proxyServerManager() { return proxy_server_manager_; }
+    core::FoundHistory& foundHistory() { return found_history_; }
+    const core::FoundHistory& foundHistory() const { return found_history_; }
 
     // ─── State ───
 
@@ -211,8 +214,14 @@ private:
     mutable std::mutex status_mutex_;
     double start_time_ = 0.0;
 
+    // Found history: latest 200 discovered configs (persistent, thread-safe).
+    core::FoundHistory found_history_;
+    std::string found_history_path_;
+    std::atomic<double> found_history_saved_at_{0.0};
+
     // Private methods
     void initComponents();
+    void onConfigFound(const std::string& uri, double now);
     void saveToFiles(const std::vector<BenchResult>& gold,
                      const std::vector<BenchResult>& silver);
     int appendUniqueLines(const std::string& filepath,

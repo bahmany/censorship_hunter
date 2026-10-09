@@ -31,6 +31,39 @@ extern "C" void androidRenderFrame();
 
 static bool g_gl_inited = false;
 
+// ─── System clipboard bridge ───
+// Desktop BD: ImGui's GLFW backend installs io.SetClipboardTextFn; the custom
+// Android backend never does, so every copy button was a silent no-op.
+// We cache the JavaVM here and route clipboard text into
+// MainActivity.copyToClipboard(String) (ClipboardManager).
+static JavaVM* g_vm = nullptr;
+
+jint JNI_OnLoad(JavaVM* vm, void*) {
+    g_vm = vm;
+    return JNI_VERSION_1_6;
+}
+
+static void HunterCopyToClipboard(const std::string& text) {
+    if (!g_vm) return;
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (g_vm->GetEnv((void**)&env, JNI_VERSION_1_6) != JNI_OK) {
+        if (g_vm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+    }
+    jclass cls = env->FindClass("com/hunter/app/MainActivity");
+    if (cls) {
+        jmethodID m = env->GetStaticMethodID(cls, "copyToClipboard", "(Ljava/lang/String;)V");
+        if (m) {
+            jstring jtext = env->NewStringUTF(text.c_str());
+            env->CallStaticVoidMethod(cls, m, jtext);
+            if (jtext) env->DeleteLocalRef(jtext);
+        }
+        env->DeleteLocalRef(cls);
+    }
+    if (attached) g_vm->DetachCurrentThread();
+}
+
 extern "C" {
 
 // ─── MainActivity native methods ───
@@ -95,6 +128,9 @@ Java_com_hunter_app_HunterView_00024Renderer_nativeOnSurfaceCreated(JNIEnv* env,
         ImGui::CreateContext();
         ImGuiIO& io = ImGui::GetIO();
         io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+        io.SetClipboardTextFn = [](void*, const char* s) {
+            HunterCopyToClipboard(s ? s : "");
+        };
         ImGui::StyleColorsDark();
 
         // Larger font for mobile
