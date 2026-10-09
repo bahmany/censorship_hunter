@@ -2657,211 +2657,6 @@ void HunterGuiApp::renderFrame() {
     ImGui::End();
 }
 
-#ifndef __ANDROID__
-namespace {
-
-// GLFW reports the real OS-level reason for a failure (e.g. "WGL: The driver
-// does not appear to support OpenGL") only through this callback — glfwInit()
-// and glfwCreateWindow() just return a bare bool/nullptr with no detail. On a
-// WIN32-subsystem build there is no console for fprintf(stderr, ...) to reach
-// either, so without this a startup failure here is completely invisible:
-// the process exits in the same instant it started, leaving no trace.
-std::string g_lastGlfwError;
-
-void glfwErrorCallback(int code, const char* description) {
-    g_lastGlfwError = "GLFW error " + std::to_string(code) + ": " +
-                       (description ? description : "(no description)");
-}
-
-// Writes to the same hunter_startup.log main.cpp already opens (this class
-// lives in a different translation unit, so it reopens in append mode rather
-// than sharing the FILE*).
-std::string startupLogPath() {
-    std::string path = "runtime/hunter_startup.log";
-#ifdef _WIN32
-    char exePath[MAX_PATH];
-    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
-        path = (std::filesystem::path(exePath).parent_path() / "hunter_startup.log").string();
-    }
-#endif
-    return path;
-}
-
-void appendToStartupLog(const std::string& line) {
-    if (FILE* f = std::fopen(startupLogPath().c_str(), "a")) {
-        std::time_t now = std::time(nullptr);
-        std::fprintf(f, "[%s] %s\n", std::ctime(&now), line.c_str());
-        std::fflush(f);
-        std::fclose(f);
-    }
-}
-
-// Shows a MessageBoxA — the only way a WIN32-subsystem app with no console
-// can surface a startup failure to the user.
-void reportGuiStartupFailure(const std::string& what) {
-    appendToStartupLog("GUI STARTUP FAILURE: " + what);
-#ifdef _WIN32
-    MessageBoxA(nullptr, what.c_str(), "Hunter failed to start", MB_OK | MB_ICONERROR);
-#else
-    std::fprintf(stderr, "[gui] %s\n", what.c_str());
-#endif
-}
-
-#ifdef _WIN32
-// Some real Windows machines have no working hardware OpenGL driver at all
-// (VMs with a 2D-only display adapter, some RDP sessions, old GPUs) — GLFW
-// fails outright with a WGL error and the window can never open. If a
-// software-GL fallback is embedded in this binary (see gl_fallback_embed.h),
-// extract it next to the exe and relaunch once with the non-JIT `softpipe`
-// Gallium driver forced. (Mesa's default llvmpipe driver JIT-compiles shaders
-// via LLVM, which needs RWX memory — hardened endpoint security on some
-// machines kills that outright as a shellcode-injection heuristic; softpipe
-// is a pure interpreter and doesn't trip that.) Returns true if a relaunch
-// was started (caller should exit immediately without further UI); false if
-// there's nothing to try (no embedded fallback, or already tried once).
-bool attemptGlFallbackRelaunch() {
-    if (hunter::embed::glFallbackAlreadyPresent()) {
-        appendToStartupLog("GL fallback already present next to the exe and hardware OpenGL still "
-                            "failed — not relaunching again, reporting failure.");
-        return false;
-    }
-    if (!hunter::embed::hasEmbeddedGlFallback()) {
-        return false;
-    }
-    appendToStartupLog("Hardware OpenGL unavailable; extracting embedded software-GL fallback "
-                        "(Mesa opengl32.dll + libgallium_wgl.dll) and relaunching...");
-    if (!hunter::embed::ensureGlFallbackExtracted()) {
-        appendToStartupLog("GL fallback extraction failed.");
-        return false;
-    }
-    SetEnvironmentVariableA("GALLIUM_DRIVER", "softpipe");
-    SetEnvironmentVariableA("LIBGL_ALWAYS_SOFTWARE", "1");
-
-    char exePath[MAX_PATH];
-    if (!GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
-        appendToStartupLog("GetModuleFileNameA failed; cannot relaunch.");
-        return false;
-    }
-    STARTUPINFOA si{};
-    si.cb = sizeof(si);
-    PROCESS_INFORMATION pi{};
-    // exePath is passed as both the module and the (quoted) command line —
-    // CreateProcessA needs a mutable command-line buffer, hence the copy.
-    std::string cmdLine = "\"" + std::string(exePath) + "\"";
-    std::vector<char> cmdLineBuf(cmdLine.begin(), cmdLine.end());
-    cmdLineBuf.push_back('\0');
-    BOOL ok = CreateProcessA(exePath, cmdLineBuf.data(), nullptr, nullptr, FALSE,
-                              0, nullptr, nullptr, &si, &pi);
-    if (!ok) {
-        appendToStartupLog("CreateProcessA relaunch failed, GetLastError=" + std::to_string(GetLastError()));
-        return false;
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    appendToStartupLog("Relaunched with GL fallback (PID " + std::to_string(pi.dwProcessId) + ").");
-    return true;
-}
-#endif
-
-} // namespace
-
-int HunterGuiApp::run() {
-    glfwSetErrorCallback(glfwErrorCallback);
-    if (!glfwInit()) {
-#ifdef _WIN32
-        if (attemptGlFallbackRelaunch()) return 0;
-#endif
-        reportGuiStartupFailure("glfwInit() failed: " + g_lastGlfwError);
-        return 1;
-    }
-    glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
-    window_ = glfwCreateWindow(1280, 800, "Hunter", nullptr, nullptr);
-    if (!window_) {
-        glfwTerminate();
-#ifdef _WIN32
-        if (attemptGlFallbackRelaunch()) return 0;
-#endif
-        reportGuiStartupFailure("glfwCreateWindow() failed: " + g_lastGlfwError);
-        return 1;
-    }
-
-    // Set the window icon (Linux/macOS — on Windows it comes from resources.rc).
-#ifndef _WIN32
-    setWindowIcon(window_);
-#endif
-
-    glfwMakeContextCurrent(window_);
-    glfwSwapInterval(1);
-
-    IMGUI_CHECKVERSION();
-    ImGui::CreateContext();
-    ImGuiIO& io = ImGui::GetIO();
-    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
-
-    // Apply modern dark theme (will also be called in renderFrame, but
-    // applying here ensures the first frame looks right)
-    applyModernTheme();
-
-    ImGui_ImplGlfw_InitForOpenGL(window_, true);
-    ImGui_ImplOpenGL2_Init();
-
-    // Start the orchestrator on a background thread. Log messages are
-    // pushed to utils::LogRingBuffer by the orchestrator workers — the
-    // GUI reads from that buffer directly (no std::cout capture needed).
-    startOrchestrator();
-
-    // Start the auto-update checker (background thread, fully automatic).
-    // Checks GitHub releases 10s after startup, then every 6 hours.
-    core::SelfUpdateManager::instance().startAutoCheck(21600, 10);
-
-    while (!glfwWindowShouldClose(window_)) {
-        glfwPollEvents();
-
-        // A second launch of Hunter exits immediately after leaving a request
-        // here; surface this window instead of letting the user think nothing
-        // happened. Throttled — this touches the filesystem.
-        if (show_request_poll_) {
-            double now = glfwGetTime();
-            if (last_show_poll_ < 0.0 || now - last_show_poll_ >= kShowPollIntervalSeconds) {
-                last_show_poll_ = now;
-                if (show_request_poll_()) {
-                    glfwShowWindow(window_);
-                    glfwRestoreWindow(window_);   // un-minimize
-                    glfwFocusWindow(window_);
-                    glfwRequestWindowAttention(window_);
-                }
-            }
-        }
-
-        ImGui_ImplOpenGL2_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-
-        renderFrame();
-
-        ImGui::Render();
-        int display_w, display_h;
-        glfwGetFramebufferSize(window_, &display_w, &display_h);
-        glViewport(0, 0, display_w, display_h);
-        glClearColor(0.06f, 0.07f, 0.09f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
-
-        glfwSwapBuffers(window_);
-    }
-
-     stopOrchestrator();
-     core::SelfUpdateManager::instance().stopAutoCheck();
- 
-     ImGui_ImplOpenGL2_Shutdown();
-     ImGui_ImplGlfw_Shutdown();
-     ImGui::DestroyContext();
- 
-     glfwDestroyWindow(window_);
-     glfwTerminate();
-     return 0;
- }
-
  void HunterGuiApp::renderAboutView() {
      ImGui::TextColored(ImVec4(0.30f, 0.55f, 0.90f, 1.0f), "Hunter");
      ImGui::SameLine();
@@ -3330,6 +3125,211 @@ int HunterGuiApp::run() {
              ImGui::EndTable();
          }
      }
+ }
+
+#ifndef __ANDROID__
+namespace {
+
+// GLFW reports the real OS-level reason for a failure (e.g. "WGL: The driver
+// does not appear to support OpenGL") only through this callback — glfwInit()
+// and glfwCreateWindow() just return a bare bool/nullptr with no detail. On a
+// WIN32-subsystem build there is no console for fprintf(stderr, ...) to reach
+// either, so without this a startup failure here is completely invisible:
+// the process exits in the same instant it started, leaving no trace.
+std::string g_lastGlfwError;
+
+void glfwErrorCallback(int code, const char* description) {
+    g_lastGlfwError = "GLFW error " + std::to_string(code) + ": " +
+                       (description ? description : "(no description)");
+}
+
+// Writes to the same hunter_startup.log main.cpp already opens (this class
+// lives in a different translation unit, so it reopens in append mode rather
+// than sharing the FILE*).
+std::string startupLogPath() {
+    std::string path = "runtime/hunter_startup.log";
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
+        path = (std::filesystem::path(exePath).parent_path() / "hunter_startup.log").string();
+    }
+#endif
+    return path;
+}
+
+void appendToStartupLog(const std::string& line) {
+    if (FILE* f = std::fopen(startupLogPath().c_str(), "a")) {
+        std::time_t now = std::time(nullptr);
+        std::fprintf(f, "[%s] %s\n", std::ctime(&now), line.c_str());
+        std::fflush(f);
+        std::fclose(f);
+    }
+}
+
+// Shows a MessageBoxA — the only way a WIN32-subsystem app with no console
+// can surface a startup failure to the user.
+void reportGuiStartupFailure(const std::string& what) {
+    appendToStartupLog("GUI STARTUP FAILURE: " + what);
+#ifdef _WIN32
+    MessageBoxA(nullptr, what.c_str(), "Hunter failed to start", MB_OK | MB_ICONERROR);
+#else
+    std::fprintf(stderr, "[gui] %s\n", what.c_str());
+#endif
+}
+
+#ifdef _WIN32
+// Some real Windows machines have no working hardware OpenGL driver at all
+// (VMs with a 2D-only display adapter, some RDP sessions, old GPUs) — GLFW
+// fails outright with a WGL error and the window can never open. If a
+// software-GL fallback is embedded in this binary (see gl_fallback_embed.h),
+// extract it next to the exe and relaunch once with the non-JIT `softpipe`
+// Gallium driver forced. (Mesa's default llvmpipe driver JIT-compiles shaders
+// via LLVM, which needs RWX memory — hardened endpoint security on some
+// machines kills that outright as a shellcode-injection heuristic; softpipe
+// is a pure interpreter and doesn't trip that.) Returns true if a relaunch
+// was started (caller should exit immediately without further UI); false if
+// there's nothing to try (no embedded fallback, or already tried once).
+bool attemptGlFallbackRelaunch() {
+    if (hunter::embed::glFallbackAlreadyPresent()) {
+        appendToStartupLog("GL fallback already present next to the exe and hardware OpenGL still "
+                            "failed — not relaunching again, reporting failure.");
+        return false;
+    }
+    if (!hunter::embed::hasEmbeddedGlFallback()) {
+        return false;
+    }
+    appendToStartupLog("Hardware OpenGL unavailable; extracting embedded software-GL fallback "
+                        "(Mesa opengl32.dll + libgallium_wgl.dll) and relaunching...");
+    if (!hunter::embed::ensureGlFallbackExtracted()) {
+        appendToStartupLog("GL fallback extraction failed.");
+        return false;
+    }
+    SetEnvironmentVariableA("GALLIUM_DRIVER", "softpipe");
+    SetEnvironmentVariableA("LIBGL_ALWAYS_SOFTWARE", "1");
+
+    char exePath[MAX_PATH];
+    if (!GetModuleFileNameA(nullptr, exePath, MAX_PATH)) {
+        appendToStartupLog("GetModuleFileNameA failed; cannot relaunch.");
+        return false;
+    }
+    STARTUPINFOA si{};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi{};
+    // exePath is passed as both the module and the (quoted) command line —
+    // CreateProcessA needs a mutable command-line buffer, hence the copy.
+    std::string cmdLine = "\"" + std::string(exePath) + "\"";
+    std::vector<char> cmdLineBuf(cmdLine.begin(), cmdLine.end());
+    cmdLineBuf.push_back('\0');
+    BOOL ok = CreateProcessA(exePath, cmdLineBuf.data(), nullptr, nullptr, FALSE,
+                              0, nullptr, nullptr, &si, &pi);
+    if (!ok) {
+        appendToStartupLog("CreateProcessA relaunch failed, GetLastError=" + std::to_string(GetLastError()));
+        return false;
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    appendToStartupLog("Relaunched with GL fallback (PID " + std::to_string(pi.dwProcessId) + ").");
+    return true;
+}
+#endif
+
+} // namespace
+
+int HunterGuiApp::run() {
+    glfwSetErrorCallback(glfwErrorCallback);
+    if (!glfwInit()) {
+#ifdef _WIN32
+        if (attemptGlFallbackRelaunch()) return 0;
+#endif
+        reportGuiStartupFailure("glfwInit() failed: " + g_lastGlfwError);
+        return 1;
+    }
+    glfwWindowHint(GLFW_VISIBLE, GLFW_TRUE);
+    window_ = glfwCreateWindow(1280, 800, "Hunter", nullptr, nullptr);
+    if (!window_) {
+        glfwTerminate();
+#ifdef _WIN32
+        if (attemptGlFallbackRelaunch()) return 0;
+#endif
+        reportGuiStartupFailure("glfwCreateWindow() failed: " + g_lastGlfwError);
+        return 1;
+    }
+
+    // Set the window icon (Linux/macOS — on Windows it comes from resources.rc).
+#ifndef _WIN32
+    setWindowIcon(window_);
+#endif
+
+    glfwMakeContextCurrent(window_);
+    glfwSwapInterval(1);
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+
+    // Apply modern dark theme (will also be called in renderFrame, but
+    // applying here ensures the first frame looks right)
+    applyModernTheme();
+
+    ImGui_ImplGlfw_InitForOpenGL(window_, true);
+    ImGui_ImplOpenGL2_Init();
+
+    // Start the orchestrator on a background thread. Log messages are
+    // pushed to utils::LogRingBuffer by the orchestrator workers — the
+    // GUI reads from that buffer directly (no std::cout capture needed).
+    startOrchestrator();
+
+    // Start the auto-update checker (background thread, fully automatic).
+    // Checks GitHub releases 10s after startup, then every 6 hours.
+    core::SelfUpdateManager::instance().startAutoCheck(21600, 10);
+
+    while (!glfwWindowShouldClose(window_)) {
+        glfwPollEvents();
+
+        // A second launch of Hunter exits immediately after leaving a request
+        // here; surface this window instead of letting the user think nothing
+        // happened. Throttled — this touches the filesystem.
+        if (show_request_poll_) {
+            double now = glfwGetTime();
+            if (last_show_poll_ < 0.0 || now - last_show_poll_ >= kShowPollIntervalSeconds) {
+                last_show_poll_ = now;
+                if (show_request_poll_()) {
+                    glfwShowWindow(window_);
+                    glfwRestoreWindow(window_);   // un-minimize
+                    glfwFocusWindow(window_);
+                    glfwRequestWindowAttention(window_);
+                }
+            }
+        }
+
+        ImGui_ImplOpenGL2_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+
+        renderFrame();
+
+        ImGui::Render();
+        int display_w, display_h;
+        glfwGetFramebufferSize(window_, &display_w, &display_h);
+        glViewport(0, 0, display_w, display_h);
+        glClearColor(0.06f, 0.07f, 0.09f, 1.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+
+        glfwSwapBuffers(window_);
+    }
+
+     stopOrchestrator();
+     core::SelfUpdateManager::instance().stopAutoCheck();
+ 
+     ImGui_ImplOpenGL2_Shutdown();
+     ImGui_ImplGlfw_Shutdown();
+     ImGui::DestroyContext();
+ 
+     glfwDestroyWindow(window_);
+     glfwTerminate();
+     return 0;
  }
 
  #endif // __ANDROID__
