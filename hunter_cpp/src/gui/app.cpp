@@ -30,6 +30,7 @@
 #endif
 
 #include "imgui.h"
+#include "gui/update_panel.h"
 
 #include "core/constants.h"
 #include "core/utils.h"
@@ -56,10 +57,37 @@
 #include "stb_image.h"
 #endif
 
+// ─── Design System – centralised via UI::Theme ───
+#include "ui/theme.hpp"
+
 namespace hunter {
 namespace gui {
 
-namespace {
+using Spacing = UI::Theme::Spacing;
+using Colors   = UI::Theme::Colors;
+constexpr float kNarrowThreshold = UI::Theme::NarrowThreshold;
+
+// Aliases for readability (optional – can be removed later)
+constexpr float kSpaceS = Spacing::Small;
+constexpr float kSpaceM = Spacing::Medium;
+constexpr float kSpaceL = Spacing::Large;
+constexpr float kRadius = UI::Theme::CornerRadius;
+
+// Colour aliases – keep old names for minimal code changes
+const ImVec4 kAccentBlue    = Colors::AccentBlue;
+const ImVec4 kSuccessGreen  = Colors::SuccessGreen;
+const ImVec4 kWarnAmber     = Colors::WarnAmber;
+const ImVec4 kDangerRed     = Colors::DangerRed;
+const ImVec4 kTextPrimary   = Colors::TextPrimary;
+const ImVec4 kTextSecondary = Colors::TextSecondary;
+const ImVec4 kTextDisabled  = Colors::TextDisabled;
+const ImVec4 kBgPrimary     = Colors::BgPrimary;
+const ImVec4 kBgSecondary   = Colors::BgSecondary;
+const ImVec4 kBgTertiary    = Colors::BgTertiary;
+const ImVec4 kBorderLight   = Colors::BorderLight;
+const ImVec4 kBorderStrong  = Colors::BorderStrong;
+
+
 
 // Load the application icon from hunter_icon.png and set it as the GLFW
 // window icon. On Linux this makes the icon appear in the taskbar, window
@@ -152,15 +180,15 @@ const char* healthLabel(HealthState st) {
 }
 
 ImVec4 healthColor(HealthState st) {
-    switch (st) {
-        case HealthState::Healthy: return ImVec4(0.30f, 0.80f, 0.40f, 1.0f);
-        case HealthState::Degraded: return ImVec4(0.90f, 0.78f, 0.25f, 1.0f);
-        case HealthState::Unstable: return ImVec4(0.95f, 0.55f, 0.20f, 1.0f);
-        case HealthState::Dead: return ImVec4(0.85f, 0.35f, 0.35f, 1.0f);
-        case HealthState::Testing: return ImVec4(0.45f, 0.65f, 0.95f, 1.0f);
-        default: return ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
-    }
-}
+     switch (st) {
+         case HealthState::Healthy: return kSuccessGreen;
+         case HealthState::Degraded: return kWarnAmber;
+         case HealthState::Unstable: return ImVec4(0.95f, 0.55f, 0.20f, 1.0f); // Keep original for now
+         case HealthState::Dead: return kDangerRed;
+         case HealthState::Testing: return ImVec4(0.45f, 0.65f, 0.95f, 1.0f); // Keep original for now
+         default: return kTextDisabled;
+     }
+ }
 
 // Stable / Provisional (healthy but not yet certified) / Unstable / Dead / Unrated.
 const char* stabilityLabel(const ConfigHealthRecord& r, const HealthEvaluation& ev) {
@@ -175,12 +203,12 @@ const char* stabilityLabel(const ConfigHealthRecord& r, const HealthEvaluation& 
 }
 
 ImVec4 stabilityColor(const char* label) {
-    if (std::strcmp(label, "Stable") == 0) return ImVec4(0.30f, 0.85f, 0.45f, 1.0f);
-    if (std::strcmp(label, "Provisional") == 0) return ImVec4(0.55f, 0.80f, 0.90f, 1.0f);
-    if (std::strcmp(label, "Unstable") == 0) return ImVec4(0.95f, 0.55f, 0.20f, 1.0f);
-    if (std::strcmp(label, "Dead") == 0) return ImVec4(0.85f, 0.35f, 0.35f, 1.0f);
-    return ImVec4(0.55f, 0.55f, 0.55f, 1.0f);
-}
+     if (std::strcmp(label, "Stable") == 0) return kSuccessGreen;
+     if (std::strcmp(label, "Provisional") == 0) return ImVec4(0.55f, 0.80f, 0.90f, 1.0f); // Keep original for now
+     if (std::strcmp(label, "Unstable") == 0) return ImVec4(0.95f, 0.55f, 0.20f, 1.0f); // Keep original for now
+     if (std::strcmp(label, "Dead") == 0) return kDangerRed;
+     return kTextDisabled;
+ }
 
 int healthSortOrder(HealthState st) {
     switch (st) {
@@ -315,8 +343,6 @@ void selectTop20ForV2rayN(std::vector<Top20Candidate> cands,
     }
 }
 
-} // namespace
-
 HunterGuiApp::HunterGuiApp(HunterOrchestrator& orchestrator) : orch_(orchestrator) {
     // Country service: offline DB-IP provider (registered explicitly, no work done at creation).
     network::registerBuiltinCountryProviders();
@@ -370,7 +396,7 @@ HunterGuiApp::HunterGuiApp(HunterOrchestrator& orchestrator) : orch_(orchestrato
 HunterGuiApp::~HunterGuiApp() {
     stopSnapshotWorker();   // also stops the country + baseline workers
     if (auto* db = orch_.configDb()) db->setBatchPrioritizer(nullptr);
-    stopOrchestrator();
+    stopOrchestratorBlocking();
 }
 
 void HunterGuiApp::markViewDirty() {
@@ -416,20 +442,42 @@ void HunterGuiApp::startOrchestrator() {
 }
 
 void HunterGuiApp::stopOrchestrator() {
+    // UI paths: return immediately and start shutdown in a detached thread
+    requestShutdown();
+}
+
+void HunterGuiApp::requestShutdown() {
+    if (shutdown_in_progress_.exchange(true)) return; // idempotent
+    std::thread([this]() {
+        stopOrchestratorBlocking();
+        shutdown_in_progress_.store(false);
+    }).detach();
+}
+
+void HunterGuiApp::stopOrchestratorBlocking() {
     if (!orchestrator_running_.load()) {
         if (orchestrator_thread_.joinable()) orchestrator_thread_.join();
         return;
     }
     transitioning_ = true;
     orch_.stop();
-    if (orchestrator_thread_.joinable()) orchestrator_thread_.join();
+    // Bounded join for orchestrator_thread_: if it doesn't exit within ~4s after orch_.stop() returns, detach it.
+    auto start = std::chrono::steady_clock::now();
+    while (orchestrator_thread_.joinable() && 
+           std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() < 4) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (orchestrator_thread_.joinable()) {
+        orchestrator_thread_.detach();
+    }
     transitioning_ = false;
 }
 
 void HunterGuiApp::requestClose() {
-#ifndef __ANDROID__
-    if (window_) glfwSetWindowShouldClose(window_, GLFW_TRUE);
-#endif
+    requestShutdown();
+    #ifndef __ANDROID__
+        if (window_) glfwSetWindowShouldClose(window_, GLFW_TRUE);
+    #endif
 }
 
 void HunterGuiApp::setShowRequestPoll(std::function<bool()> poll) {
@@ -908,598 +956,6 @@ void HunterGuiApp::exportToFile(const std::string& content, const char* default_
     showToast("Exported to " + filename);
 }
 
-void HunterGuiApp::renderControls() {
-    bool busy = transitioning_.load();
-
-    ImGui::BeginDisabled(busy);
-    if (orchestrator_running_.load()) {
-        if (ImGui::Button("Stop")) {
-            std::thread([this]() { stopOrchestrator(); }).detach();
-        }
-    } else {
-        if (ImGui::Button("Start")) startOrchestrator();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(rescan_in_progress_.load());
-    if (ImGui::Button(rescan_in_progress_.load() ? "Rescanning..." : "Rescan now")) {
-        triggerRescan();
-    }
-    ImGui::EndDisabled();
-
-    ImGui::SameLine(0, 24);
-    ImGui::TextDisabled("%d shown / %d match", (int)snapshot_.size(), cached_matched_);
-
-    // ─── Copy popup ───
-    ImGui::SameLine(0, 16);
-    if (ImGui::Button("Copy v")) ImGui::OpenPopup("##copy_menu");
-    if (ImGui::BeginPopup("##copy_menu")) {
-        if (ImGui::MenuItem("Copy Top 20 for v2rayN -- 5x US + best")) copyTop20ForV2rayN();
-        int sel = (int)selected_uris_.size();
-        std::string sel_label = "Selected (" + std::to_string(sel) + ")";
-        if (ImGui::MenuItem(sel_label.c_str(), nullptr, false, sel > 0)) {
-            std::string text = buildClipboardText(true);
-            ImGui::SetClipboardText(text.c_str());
-            showToast("Copied " + std::to_string(sel) + " selected configs to clipboard");
-        }
-        if (ImGui::MenuItem("Gemini-OK only")) {
-            std::string text = buildGeminiOkClipboardText();
-            ImGui::SetClipboardText(text.c_str());
-            int count = text.empty() ? 0 : std::count(text.begin(), text.end(), '\n');
-            showToast("Copied " + std::to_string(count) + " Gemini OK configs to clipboard");
-        }
-        if (ImGui::MenuItem("All live")) {
-            std::string text = buildClipboardText(false);
-            ImGui::SetClipboardText(text.c_str());
-            showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " live configs to clipboard");
-        }
-        if (ImGui::MenuItem("Latest 200 found")) {
-            std::string text = buildFoundClipboardText();
-            if (text.empty()) {
-                showToast("No found configs yet");
-            } else {
-                ImGui::SetClipboardText(text.c_str());
-                showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " found configs to clipboard");
-            }
-        }
-        ImGui::EndPopup();
-    }
-
-    // ─── Export popup ───
-    ImGui::SameLine();
-    if (ImGui::Button("Export v")) ImGui::OpenPopup("##export_menu");
-    if (ImGui::BeginPopup("##export_menu")) {
-        if (ImGui::MenuItem("Top-20 v2rayN files (runtime/)")) {
-            int us = 0;
-            std::string text = buildV2rayNTop20Text(us);
-            if (text.empty()) {
-                showToast("No live configs yet");
-            } else {
-                writeTop20Files(text);
-                showToast("Wrote runtime/v2rayn_top20.txt + _b64.txt");
-            }
-        }
-        if (ImGui::MenuItem("All live -> file")) {
-            exportToFile(buildExportText(), "hunter_live_configs");
-        }
-        if (ImGui::MenuItem("Found history -> file")) {
-            exportFoundHistory();
-        }
-        ImGui::EndPopup();
-    }
-
-    // ─── QR code for selected ───
-    ImGui::SameLine();
-    ImGui::BeginDisabled(selected_uris_.empty() || selected_uris_.size() > 1);
-    if (ImGui::Button("QR Code")) {
-        qr_text_ = *selected_uris_.begin();
-        show_qr_popup_ = true;
-    }
-    ImGui::EndDisabled();
-
-    ImGui::SameLine();
-    ImGui::BeginDisabled(cached_alive_ == 0);
-    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.55f, 0.20f, 0.20f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.70f, 0.25f, 0.25f, 1.0f));
-    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.45f, 0.15f, 0.15f, 1.0f));
-    if (ImGui::Button("Clear All Live")) {
-        show_clear_live_popup_ = true;
-    }
-    ImGui::PopStyleColor(3);
-    ImGui::EndDisabled();
-    if (ImGui::IsItemHovered(ImGuiHoveredFlags_AllowWhenDisabled)) {
-        ImGui::SetTooltip("Drop every live config from the database and the live cache.");
-    }
-
-    renderFilterBar();
-}
-
-void HunterGuiApp::renderFilterBar() {
-    // View: live only vs every record (Unknown/Unrated/Dead included).
-    bool changed = false;
-    ImGui::SetNextItemWidth(130);
-    const char* views[] = {"Live configs", "All configs"};
-    if (ImGui::Combo("##view", &view_all_ui_, views, 2)) changed = true;
-    if (ImGui::IsItemHovered()) ImGui::SetTooltip("All configs includes Unknown, Unrated and Dead records");
-
-    // Country mode: which column the country filter and bare country searches apply to.
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(120);
-    const char* modes[] = {"Any country", "Exit", "Server"};
-    if (ImGui::Combo("##cmode", &country_mode_ui_, modes, 3)) changed = true;
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Exit = measured through the tunnel. Server = offline IP-database hint (not an exit guarantee).");
-
-    // Country choice: Any / Unknown / Mixed / each country present in the database.
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(190);
-    std::string preview = country_choice_ui_.empty() ? "All countries"
-                          : country_choice_ui_ == "?" ? "Unknown"
-                          : country_choice_ui_ == "~" ? "Mixed" : countryCell(country_choice_ui_);
-    if (ImGui::BeginCombo("##ccountry", preview.c_str())) {
-        if (ImGui::Selectable("All countries", country_choice_ui_.empty())) { country_choice_ui_.clear(); changed = true; }
-        if (ImGui::Selectable("Unknown", country_choice_ui_ == "?")) { country_choice_ui_ = "?"; changed = true; }
-        if (country_mode_ui_ != 1 && ImGui::Selectable("Mixed (server hints disagree)", country_choice_ui_ == "~")) {
-            country_choice_ui_ = "~"; changed = true;
-        }
-        std::map<std::string, int> merged;
-        if (country_mode_ui_ != 2) for (auto& kv : cached_exit_counts_) merged[kv.first] += kv.second;
-        if (country_mode_ui_ != 1) for (auto& kv : cached_server_counts_) if (kv.first != geo::kMixed) merged[kv.first] += kv.second;
-        for (auto& kv : merged) {
-            std::string label = countryCell(kv.first) + "  (" + std::to_string(kv.second) + ")";
-            if (ImGui::Selectable(label.c_str(), country_choice_ui_ == kv.first)) { country_choice_ui_ = kv.first; changed = true; }
-        }
-        ImGui::EndCombo();
-    }
-
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(260);
-    if (ImGui::InputTextWithHint("##filter", "search: text, DE, germany, exit:DE, server:US", filter_text_, sizeof(filter_text_)))
-        changed = true;
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Terms are AND-combined. exit:DE / server:US restrict one column;\n"
-                          "values may be an ISO code, a country name, 'unknown' or (server only) 'mixed'.");
-
-    if (changed) {
-        {
-            std::lock_guard<std::mutex> lk(view_mutex_);
-            view_spec_.all_view = view_all_ui_ == 1;
-            view_spec_.mode = (geo::CountryMode)country_mode_ui_;
-            view_spec_.choice = geo::CountryChoice();
-            if (country_choice_ui_ == "?") view_spec_.choice.kind = geo::CountryChoice::Unknown;
-            else if (country_choice_ui_ == "~") view_spec_.choice.kind = geo::CountryChoice::Mixed;
-            else if (!country_choice_ui_.empty()) { view_spec_.choice.kind = geo::CountryChoice::Specific; view_spec_.choice.iso = country_choice_ui_; }
-            view_spec_.query = filter_text_;
-        }
-        markViewDirty();
-    }
-
-    // Country-targeted discovery + strict exit target (persisted; consumed by failover).
-    ImGui::SameLine(0, 20);
-    ImGui::TextDisabled("Exit target:");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(40);
-    bool tgt_changed = ImGui::InputText("##target", target_input_, sizeof(target_input_),
-                                        ImGuiInputTextFlags_CharsUppercase | ImGuiInputTextFlags_CharsNoBlank |
-                                        ImGuiInputTextFlags_EnterReturnsTrue);
-    if (ImGui::IsItemDeactivatedAfterEdit()) tgt_changed = true;
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Two-letter country (e.g. DE). Discovery tests fresh matching exits first, then server hints,\n"
-                          "then Unknown (at least 20%% exploration). Empty = no target.");
-    ImGui::SameLine();
-    if (ImGui::Checkbox("Strict", &target_strict_ui_)) tgt_changed = true;
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Strict: recommendations and failover may only use a FRESH MEASURED exit in the target.\n"
-                          "If none exists: 'No verified exit in target'. Never silently switches outside it.");
-    if (tgt_changed) {
-        std::string iso = target_input_;
-        if (!iso.empty() && !geo::isValidIso(iso)) {
-            showToast("Unknown country code: " + iso);
-            std::string cur = orch_.config().exitCountryTarget();
-            std::snprintf(target_input_, sizeof(target_input_), "%s", cur.c_str());
-        } else {
-            applyExitTarget(iso, target_strict_ui_);
-            saveConfigNow();
-            showToast(iso.empty() ? "Exit target cleared" : "Exit target: " + countryCell(iso));
-        }
-    }
-    if (!orch_.config().exitCountryTarget().empty() && target_strict_ui_) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.90f, 0.78f, 0.25f, 1.0f), "strict %s", orch_.config().exitCountryTarget().c_str());
-    }
-
-    // M5 direct-baseline toggle (privacy): when off, attribution uses control tunnels only.
-    ImGui::SameLine(0, 20);
-    if (ImGui::Checkbox("Direct baseline probes", &baseline_enabled_ui_)) {
-        network::ConnectivityBaseline::shared()->setEnabled(baseline_enabled_ui_);
-        orch_.config().set("direct_baseline_enabled", baseline_enabled_ui_);
-        saveConfigNow();
-        if (!baseline_enabled_ui_) baseline_state_ = 4;
-    }
-    if (ImGui::IsItemHovered())
-        ImGui::SetTooltip("Direct (non-proxied) connectivity checks to tell local outages from dead servers.\n"
-                          "Off: only already-confirmed control tunnels attribute failures, otherwise rounds are 'Indeterminate'.");
-}
-
-void HunterGuiApp::renderTable() {
-    static ImGuiTableFlags flags =
-        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
-        ImGuiTableFlags_ScrollY | ImGuiTableFlags_ScrollX | ImGuiTableFlags_Sortable |
-        ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ContextMenuInBody |
-        ImGuiTableFlags_Hideable | ImGuiTableFlags_Reorderable;
-
-    // Leave space at the bottom for the log panel + status bar.
-    // Tab bar (~35px) + status bar (~40px) + log panel (~180px) + spacing
-    float table_height = ImGui::GetContentRegionAvail().y - 260.0f;
-    if (table_height < 100.0f) table_height = 100.0f;
-
-    if (!ImGui::BeginTable("configs", 14, flags, ImVec2(0, table_height))) return;
-
-    ImGui::TableSetupColumn("Health", ImGuiTableColumnFlags_WidthFixed, 72.0f);
-    ImGui::TableSetupColumn("Stability", ImGuiTableColumnFlags_WidthFixed, 84.0f);
-    ImGui::TableSetupColumn("Score", ImGuiTableColumnFlags_WidthFixed |
-                                     ImGuiTableColumnFlags_PreferSortDescending, 52.0f);
-    ImGui::TableSetupColumn("p90", ImGuiTableColumnFlags_WidthFixed, 66.0f);
-    ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-    ImGui::TableSetupColumn("Exit country", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-    ImGui::TableSetupColumn("Server country", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-    ImGui::TableSetupColumn("Protocol", ImGuiTableColumnFlags_WidthFixed, 72.0f);
-    ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthFixed, 280.0f);
-    ImGui::TableSetupColumn("Engine", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-    ImGui::TableSetupColumn("Last tested", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-    ImGui::TableSetupColumn("Source", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-    ImGui::TableSetupColumn("Gemini", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-    ImGui::TableSetupColumn("Proxy", ImGuiTableColumnFlags_WidthFixed, 140.0f);
-    ImGui::TableSetupScrollFreeze(0, 1);
-    ImGui::TableHeadersRow();
-
-    int sort_col = -1;
-    bool sort_asc = true;
-    if (ImGuiTableSortSpecs* sort_specs = ImGui::TableGetSortSpecs()) {
-        if (sort_specs->SpecsCount > 0) {
-            sort_col = sort_specs->Specs[0].ColumnIndex;
-            sort_asc = sort_specs->Specs[0].SortDirection == ImGuiSortDirection_Ascending;
-        }
-    }
-    rebuildVisibleRowsIfDirty(sort_col, sort_asc);
-    const auto& rows = visible_rows_;
-
-    const double now = utils::nowTimestamp();
-    const double exit_fresh_s = (double)std::max(60, orch_.config().exitCountryFreshSeconds());
-    ImGuiListClipper clipper;
-    clipper.Begin(static_cast<int>(rows.size()));
-    while (clipper.Step()) {
-        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-            const UiRow& row = *rows[i];
-            const ConfigHealthRecord& r = row.rec;
-            const HealthEvaluation& ev = row.ev;
-            bool selected = selected_uris_.count(r.uri) != 0;
-
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::PushID(r.uri.c_str());
-            ImGuiSelectableFlags sel_flags = ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap;
-            if (ImGui::Selectable("##row", selected, sel_flags)) {
-                ImGuiIO& io = ImGui::GetIO();
-                if (io.KeyCtrl) {
-                    if (selected) selected_uris_.erase(r.uri); else selected_uris_.insert(r.uri);
-                } else if (io.KeyShift && !last_clicked_uri_.empty()) {
-                    auto it_a = std::find_if(rows.begin(), rows.end(), [&](auto* p) { return p->rec.uri == last_clicked_uri_; });
-                    auto it_b = rows.begin() + i;
-                    if (it_a != rows.end()) {
-                        auto [lo, hi] = std::minmax(it_a, it_b);
-                        for (auto it = lo; it <= hi; ++it) selected_uris_.insert((*it)->rec.uri);
-                    }
-                } else {
-                    selected_uris_.clear();
-                    selected_uris_.insert(r.uri);
-                }
-                last_clicked_uri_ = r.uri;
-            }
-            ImGui::SameLine();
-            ImGui::TextColored(healthColor(r.ev.state), "%s", healthLabel(r.ev.state));
-            if (ImGui::IsItemHovered()) {
-                ImGui::BeginTooltip();
-                ImGui::Text("State: %s   Last outcome: %s", healthLabel(r.ev.state),
-                            r.ev.last_outcome.empty() ? "-" : r.ev.last_outcome.c_str());
-                ImGui::Text("Failure streak: %u   Success streak: %u   Eligible rounds: %u",
-                            r.ev.failure_streak, r.ev.success_streak, r.ev.eligible_count);
-                ImGui::Text("EWMA success: %.2f   Freshness: %.2f   Protocol factor: %.1f",
-                            ev.ewma, ev.freshness, ev.protocol_factor);
-                if (!r.ev.session_confirmed) ImGui::TextDisabled("Not yet re-confirmed in this session");
-                ImGui::EndTooltip();
-            }
-            ImGui::PopID();
-
-            // ─── Right-click context menu per row ───
-            if (ImGui::BeginPopupContextItem(("ctx_" + r.uri).c_str())) {
-                if (ImGui::MenuItem("Copy URI")) {
-                    ImGui::SetClipboardText(r.uri.c_str());
-                    showToast("Copied URI to clipboard");
-                }
-                if (ImGui::MenuItem("Show QR Code")) {
-                    qr_text_ = r.uri;
-                    show_qr_popup_ = true;
-                }
-                ImGui::EndPopup();
-            }
-
-            ImGui::TableNextColumn();
-            const char* stab = stabilityLabel(r, ev);
-            ImGui::TextColored(stabilityColor(stab), "%s", stab);
-
-            ImGui::TableNextColumn();
-            if (r.ev.eligible_count > 0) ImGui::Text("%.0f", ev.score); else ImGui::TextDisabled("-");
-
-            ImGui::TableNextColumn();
-            if (ev.has_p90) ImGui::Text("%.0f ms", ev.p90_ms); else ImGui::TextDisabled("-");
-
-            ImGui::TableNextColumn();
-            if (r.alive && r.latency_ms > 0) ImGui::Text("%.0f ms", r.latency_ms);
-            else ImGui::TextUnformatted("-");
-
-            // ─── Exit country (measured through the tunnel) ───
-            ImGui::TableNextColumn();
-            {
-                const bool known = !r.exit_country.empty();
-                const bool stale = known && (now - r.exit_country_at) > exit_fresh_s;
-                if (!known) ImGui::TextDisabled("Unknown");
-                else if (stale) ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.55f, 1.0f), "%s ~", countryCell(r.exit_country).c_str());
-                else ImGui::TextUnformatted(countryCell(r.exit_country).c_str());
-                if (ImGui::IsItemHovered()) {
-                    ImGui::BeginTooltip();
-                    ImGui::Text("Exit country: %s", countryCell(r.exit_country).c_str());
-                    ImGui::Text("Source: %s", sourceDescription(r.exit_country_source));
-                    if (!r.exit_ip.empty()) ImGui::Text("Exit IP: %s", r.exit_ip.c_str());
-                    ImGui::Text("Measured: %s%s", formatAge(now, r.exit_country_at).c_str(),
-                                stale ? "  (STALE - unconfirmed for strict targets)" : "");
-                    ImGui::EndTooltip();
-                }
-            }
-
-            // ─── Server country (offline DB hint; not an exit guarantee) ───
-            ImGui::TableNextColumn();
-            {
-                const bool known = !r.server_country.empty();
-                if (!known) ImGui::TextDisabled("Unknown");
-                else if (r.server_country == geo::kMixed) ImGui::TextColored(ImVec4(0.90f, 0.78f, 0.25f, 1.0f), "Mixed");
-                else ImGui::TextUnformatted(countryCell(r.server_country).c_str());
-                if (ImGui::IsItemHovered()) {
-                    ImGui::BeginTooltip();
-                    ImGui::Text("Server country (hint): %s", countryCell(r.server_country).c_str());
-                    ImGui::Text("Source: %s", sourceDescription(r.server_country_source));
-                    if (!r.server_ips.empty()) {
-                        std::string ips;
-                        for (size_t k = 0; k < r.server_ips.size() && k < 6; k++) ips += (k ? ", " : "") + r.server_ips[k];
-                        ImGui::Text("IPs: %s", ips.c_str());
-                    }
-                    ImGui::Text("Determined: %s   DB: %s", formatAge(now, r.server_country_at).c_str(),
-                                r.geo_db_version.empty() ? "-" : r.geo_db_version.c_str());
-                    ImGui::TextDisabled("Server location is only a hint; the exit may differ.");
-                    ImGui::EndTooltip();
-                }
-            }
-
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(row.protocol.empty() ? "-" : row.protocol.c_str());
-
-            ImGui::TableNextColumn();
-            std::string addr = row.address.empty() ? r.uri : (row.address + ":" + std::to_string(row.port));
-            if (!row.ps.empty()) addr += "  (" + row.ps + ")";
-            ImGui::TextUnformatted(addr.c_str());
-
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(r.engine_used.empty() ? "-" : r.engine_used.c_str());
-
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(formatAge(now, r.last_tested).c_str());
-
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(r.tag.empty() ? "-" : r.tag.c_str());
-
-            ImGui::TableNextColumn();
-            // Gemini status: -1=unknown, 0=blocked, 1=accessible
-            if (r.gemini_status == 1) {
-                ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f), "OK");
-            } else if (r.gemini_status == 0) {
-                ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "Blocked");
-            } else {
-                ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "?");
-            }
-
-            ImGui::TableNextColumn();
-            // Proxy server control: Start/Stop button + port/status/traffic display
-            {
-                auto& psm = orch_.proxyServerManager();
-                auto status = psm.getStatus(r.uri);
-                int proxy_port = psm.getPort(r.uri);
-
-                // Helper to format bytes human-readable
-                auto fmtBytes = [](unsigned long long b) -> std::string {
-                    if (b < 1024) return std::to_string(b) + "B";
-                    if (b < 1024 * 1024) return std::to_string(b / 1024) + "KB";
-                    if (b < 1024ULL * 1024 * 1024) return std::to_string(b / (1024 * 1024)) + "MB";
-                    return std::to_string(b / (1024ULL * 1024 * 1024)) + "GB";
-                };
-
-                ImGui::PushID(("proxy_" + r.uri).c_str());
-                if (status == proxy::ProxyStatus::Running) {
-                    // Line 1: port + Stop button
-                    ImGui::TextColored(ImVec4(0.2f, 0.9f, 0.3f, 1.0f), ":%d", proxy_port);
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Stop")) {
-                        psm.stopProxy(r.uri);
-                        showToast("Stopped proxy on port " + std::to_string(proxy_port));
-                    }
-                    // Line 2: traffic stats (down/up)
-                    auto [bin, bout] = psm.getTraffic(r.uri);
-                    ImGui::TextColored(ImVec4(0.5f, 0.7f, 1.0f, 1.0f), "v %s  ^ %s",
-                                       fmtBytes(bin).c_str(), fmtBytes(bout).c_str());
-                } else if (status == proxy::ProxyStatus::Starting) {
-                    ImGui::TextColored(ImVec4(0.9f, 0.8f, 0.2f, 1.0f), "Starting...");
-                } else if (status == proxy::ProxyStatus::Error) {
-                    ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "Error");
-                    ImGui::SameLine();
-                    if (ImGui::SmallButton("Retry")) {
-                        int port = psm.startProxy(r.uri);
-                        if (port > 0) {
-                            showToast("Started proxy on port " + std::to_string(port));
-                        } else {
-                            std::string err = psm.getError(r.uri);
-                            showToast(err.empty() ? "Failed to start proxy" : err);
-                        }
-                    }
-                } else {
-                    // Stopped — show Start button
-                    if (ImGui::SmallButton("Start Proxy")) {
-                        int port = psm.startProxy(r.uri);
-                        if (port > 0) {
-                            showToast("Started proxy on port " + std::to_string(port));
-                        } else {
-                            std::string err = psm.getError(r.uri);
-                            showToast(err.empty() ? "Failed to start proxy" : err);
-                        }
-                    }
-                }
-                // Tooltip with details
-                if (ImGui::IsItemHovered()) {
-                    ImGui::BeginTooltip();
-                    if (status == proxy::ProxyStatus::Running) {
-                        auto [bin, bout] = psm.getTraffic(r.uri);
-                        ImGui::Text("SOCKS5 proxy on localhost:%d", proxy_port);
-                        ImGui::Text("Download: %s  Upload: %s",
-                                    fmtBytes(bin).c_str(), fmtBytes(bout).c_str());
-                        ImGui::Separator();
-                        ImGui::Text("Connect external apps to localhost:%d", proxy_port);
-                    } else if (status == proxy::ProxyStatus::Error) {
-                        std::string err = psm.getError(r.uri);
-                        ImGui::TextUnformatted(err.empty() ? "Unknown error" : err.c_str());
-                    } else {
-                        ImGui::Text("Start a local SOCKS5 proxy (port 3110-3120)");
-                        ImGui::Text("routing traffic through this config.");
-                    }
-                    ImGui::EndTooltip();
-                }
-                ImGui::PopID();
-            }
-        }
-    }
-
-    ImGui::EndTable();
-}
-
-void HunterGuiApp::renderLogPanel() {
-    // ─── Read logs from utils::LogRingBuffer ───
-    // This is the orchestrator's own clean, timestamped log buffer. It
-    // contains only messages explicitly pushed via push() — no ANSI codes,
-    // no terminal dashboard frames, no clear-screen sequences. Each entry
-    // is already timestamped with [HH:MM:SS] prefix.
-    auto& orch_log = utils::LogRingBuffer::instance();
-
-    // Check for new log entries using the generation counter (efficient —
-    // avoids copying the buffer every frame when nothing changed).
-    double now = glfwGetTime();
-    size_t current_gen = orch_log.generation();
-    if (last_log_refresh_ < 0.0 || now - last_log_refresh_ >= kLogRefreshIntervalSeconds ||
-        current_gen != log_generation_) {
-        last_log_refresh_ = now;
-        log_generation_ = current_gen;
-        // Fetch recent lines (capped to keep total under ~10KB).
-        // 200 lines × ~50 bytes/line ≈ 10KB max.
-        cached_log_lines_ = orch_log.recent(200);
-    }
-
-    ImGui::Separator();
-    ImGui::Text("Live Logs");
-    ImGui::SameLine(0, 16);
-    ImGui::TextDisabled("(%zu lines)", cached_log_lines_.size());
-
-    // Log action buttons
-    ImGui::SameLine(0, 24);
-    if (ImGui::SmallButton("Copy Logs")) {
-        if (!cached_log_lines_.empty()) {
-            std::string text;
-            for (const auto& line : cached_log_lines_) {
-                text += line;
-                text += '\n';
-            }
-            ImGui::SetClipboardText(text.c_str());
-            showToast("Logs copied to clipboard");
-        } else {
-            showToast("No logs to copy");
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Export Logs")) {
-        if (!cached_log_lines_.empty()) {
-            std::string text;
-            for (const auto& line : cached_log_lines_) {
-                text += line;
-                text += '\n';
-            }
-            exportToFile(text, "hunter_logs");
-        } else {
-            showToast("No logs to export");
-        }
-    }
-    ImGui::SameLine(0, 24);
-    ImGui::Checkbox("Auto-scroll", &log_auto_scroll_);
-
-    // ─── Log list view ───
-    // Each log line is rendered as a separate row using TextUnformatted.
-    // This gives a clean list view — one line per row, never concatenated.
-    // Auto-scroll keeps the latest line visible at the bottom.
-    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.03f, 0.03f, 0.03f, 1.0f));
-    ImGui::BeginChild("log_area", ImVec2(0, 180.0f), true,
-                      ImGuiWindowFlags_HorizontalScrollbar);
-
-    const auto& lines = cached_log_lines_;
-
-    // Track whether we're at the bottom before rendering new content.
-    bool at_bottom = ImGui::GetScrollY() >= ImGui::GetScrollMaxY();
-
-    // Use ImGuiListClipper for efficient rendering of large log lists.
-    ImGuiListClipper clipper;
-    clipper.Begin(static_cast<int>(lines.size()));
-    while (clipper.Step()) {
-        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-            const std::string& line = lines[i];
-
-            // Color-code lines based on content for quick scanning.
-            ImVec4 color(0.75f, 0.75f, 0.75f, 1.0f); // default light gray
-            if (line.find("] OK ") != std::string::npos || line.find("TG-OK") != std::string::npos ||
-                line.find("PASSED") != std::string::npos || line.find("SUCCESS") != std::string::npos) {
-                color = ImVec4(0.4f, 0.85f, 0.4f, 1.0f); // green
-            } else if (line.find("FAIL") != std::string::npos || line.find("DEAD") != std::string::npos ||
-                       line.find("ERROR") != std::string::npos || line.find("EXCEPTION") != std::string::npos) {
-                color = ImVec4(0.85f, 0.35f, 0.35f, 1.0f); // red
-            } else if (line.find("WARNING") != std::string::npos || line.find("SKIP") != std::string::npos ||
-                       line.find("WARNING") != std::string::npos) {
-                color = ImVec4(0.85f, 0.75f, 0.35f, 1.0f); // yellow
-            } else if (line.find("[Validator]") != std::string::npos ||
-                       line.find("[Download]") != std::string::npos ||
-                       line.find("[Scanner]") != std::string::npos) {
-                color = ImVec4(0.55f, 0.75f, 0.95f, 1.0f); // blue for worker tags
-            }
-
-            ImGui::PushStyleColor(ImGuiCol_Text, color);
-            ImGui::TextUnformatted(line.c_str());
-            ImGui::PopStyleColor();
-        }
-    }
-    clipper.End();
-
-    // Auto-scroll to bottom: if auto-scroll is on and we were at the bottom
-    // (or this is the first render), scroll to the latest line.
-    if (log_auto_scroll_ && (at_bottom || lines.size() <= 1) && !lines.empty()) {
-        ImGui::SetScrollHereY(1.0f);
-    }
-
-    ImGui::EndChild();
-    ImGui::PopStyleColor();
-}
-
 void HunterGuiApp::renderQrPopup() {
     // OpenPopup only needs to fire on the frame the button was pressed, but
     // BeginPopupModal must be reached on EVERY frame the popup is open —
@@ -1511,7 +967,7 @@ void HunterGuiApp::renderQrPopup() {
         show_qr_popup_ = false; // consume the flag
     }
 
-    ImGui::SetNextWindowSize(ImVec2(380, 420), ImGuiCond_Appearing);
+    ImGui::SetNextWindowSize(scaledSize(380, 420), ImGuiCond_Appearing);
     if (ImGui::BeginPopupModal("QR Code", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         if (qr_text_.empty()) {
             ImGui::TextDisabled("No config selected.");
@@ -1531,10 +987,9 @@ void HunterGuiApp::renderQrPopup() {
             if (renderQrCode(qr_text_, origin, qr_size, &drawn)) {
                 // Reserve the size actually drawn, not the requested one.
                 ImGui::Dummy(ImVec2(popup_width, drawn + 4));
-            } else {
-                ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.4f, 1.0f),
-                                   "URI too long to encode as a QR code.");
-            }
+             } else {
+                 ImGui::TextColored(kDangerRed, "URI too long to encode as a QR code.");
+             }
 
             ImGui::Spacing();
             ImGui::TextWrapped("URI: %s", qr_text_.substr(0, 200).c_str());
@@ -1617,918 +1072,125 @@ void HunterGuiApp::renderClearLivePopup() {
 }
 
 void HunterGuiApp::applyModernTheme() {
-    if (theme_applied_) return;
-
-    ImGuiStyle& style = ImGui::GetStyle();
-
-    // Modern rounded corners
-    style.WindowRounding = 8.0f;
-    style.FrameRounding = 6.0f;
-    style.GrabRounding = 6.0f;
-    style.TabRounding = 6.0f;
-    style.ScrollbarRounding = 8.0f;
-    style.PopupRounding = 6.0f;
-    style.ChildRounding = 6.0f;
-
-    // Spacing
-    style.WindowPadding = ImVec2(16, 16);
-    style.FramePadding = ImVec2(10, 6);
-    style.ItemSpacing = ImVec2(10, 8);
-    style.ItemInnerSpacing = ImVec2(8, 6);
-    style.IndentSpacing = 20.0f;
-    style.ScrollbarSize = 14.0f;
-
-    // Sizing
-    style.WindowBorderSize = 0.0f;
-    style.ChildBorderSize = 1.0f;
-    style.PopupBorderSize = 1.0f;
-    style.FrameBorderSize = 0.0f;
-    style.TabBorderSize = 0.0f;
-
-    // Modern dark color palette
-    ImVec4* colors = style.Colors;
-
-    // Background tones (deep dark blue-gray)
-    colors[ImGuiCol_WindowBg]        = ImVec4(0.06f, 0.07f, 0.09f, 1.0f);
-    colors[ImGuiCol_ChildBg]         = ImVec4(0.08f, 0.09f, 0.11f, 1.0f);
-    colors[ImGuiCol_PopupBg]         = ImVec4(0.10f, 0.11f, 0.13f, 0.98f);
-    colors[ImGuiCol_Border]          = ImVec4(0.18f, 0.20f, 0.24f, 0.50f);
-    colors[ImGuiCol_BorderShadow]    = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-
-    // Text
-    colors[ImGuiCol_Text]            = ImVec4(0.90f, 0.92f, 0.95f, 1.0f);
-    colors[ImGuiCol_TextDisabled]    = ImVec4(0.50f, 0.54f, 0.58f, 1.0f);
-
-    // Frames / inputs
-    colors[ImGuiCol_FrameBg]         = ImVec4(0.12f, 0.14f, 0.17f, 1.0f);
-    colors[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.20f, 0.24f, 1.0f);
-    colors[ImGuiCol_FrameBgActive]   = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
-
-    // Buttons — accent blue
-    colors[ImGuiCol_Button]          = ImVec4(0.20f, 0.36f, 0.60f, 1.0f);
-    colors[ImGuiCol_ButtonHovered]   = ImVec4(0.26f, 0.45f, 0.75f, 1.0f);
-    colors[ImGuiCol_ButtonActive]    = ImVec4(0.16f, 0.30f, 0.52f, 1.0f);
-
-    // Headers / collapsibles
-    colors[ImGuiCol_Header]          = ImVec4(0.20f, 0.36f, 0.60f, 1.0f);
-    colors[ImGuiCol_HeaderHovered]   = ImVec4(0.26f, 0.45f, 0.75f, 1.0f);
-    colors[ImGuiCol_HeaderActive]    = ImVec4(0.16f, 0.30f, 0.52f, 1.0f);
-
-    // Tabs
-    colors[ImGuiCol_Tab]             = ImVec4(0.10f, 0.12f, 0.15f, 1.0f);
-    colors[ImGuiCol_TabHovered]      = ImVec4(0.20f, 0.36f, 0.60f, 1.0f);
-    colors[ImGuiCol_TabActive]       = ImVec4(0.16f, 0.28f, 0.48f, 1.0f);
-    colors[ImGuiCol_TabUnfocused]    = ImVec4(0.08f, 0.09f, 0.11f, 1.0f);
-    colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.14f, 0.16f, 0.20f, 1.0f);
-
-    // Title bar
-    colors[ImGuiCol_TitleBg]         = ImVec4(0.08f, 0.09f, 0.11f, 1.0f);
-    colors[ImGuiCol_TitleBgActive]   = ImVec4(0.10f, 0.12f, 0.15f, 1.0f);
-    colors[ImGuiCol_TitleBgCollapsed]= ImVec4(0.06f, 0.07f, 0.09f, 1.0f);
-
-    // Scrollbar
-    colors[ImGuiCol_ScrollbarBg]     = ImVec4(0.04f, 0.05f, 0.06f, 1.0f);
-    colors[ImGuiCol_ScrollbarGrab]   = ImVec4(0.20f, 0.22f, 0.26f, 1.0f);
-    colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.28f, 0.30f, 0.36f, 1.0f);
-    colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.35f, 0.38f, 0.44f, 1.0f);
-
-    // Checkmark / slider / separator
-    colors[ImGuiCol_CheckMark]       = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-    colors[ImGuiCol_SliderGrab]      = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-    colors[ImGuiCol_SliderGrabActive]= ImVec4(0.40f, 0.65f, 1.0f, 1.0f);
-    colors[ImGuiCol_Separator]       = ImVec4(0.18f, 0.20f, 0.24f, 0.50f);
-    colors[ImGuiCol_SeparatorHovered]= ImVec4(0.30f, 0.55f, 0.90f, 0.60f);
-    colors[ImGuiCol_SeparatorActive] = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-
-    // Resize grip
-    colors[ImGuiCol_ResizeGrip]      = ImVec4(0.20f, 0.22f, 0.26f, 0.50f);
-    colors[ImGuiCol_ResizeGripHovered] = ImVec4(0.30f, 0.55f, 0.90f, 0.70f);
-    colors[ImGuiCol_ResizeGripActive]  = ImVec4(0.40f, 0.65f, 1.0f, 0.95f);
-
-    // Plot
-    colors[ImGuiCol_PlotLines]       = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-    colors[ImGuiCol_PlotLinesHovered]= ImVec4(0.40f, 0.65f, 1.0f, 1.0f);
-    colors[ImGuiCol_PlotHistogram]   = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-    colors[ImGuiCol_PlotHistogramHovered] = ImVec4(0.40f, 0.65f, 1.0f, 1.0f);
-
-    // Table
-    colors[ImGuiCol_TableHeaderBg]   = ImVec4(0.10f, 0.12f, 0.15f, 1.0f);
-    colors[ImGuiCol_TableBorderStrong] = ImVec4(0.18f, 0.20f, 0.24f, 1.0f);
-    colors[ImGuiCol_TableBorderLight]  = ImVec4(0.14f, 0.16f, 0.19f, 1.0f);
-    colors[ImGuiCol_TableRowBg]      = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
-    colors[ImGuiCol_TableRowBgAlt]   = ImVec4(0.06f, 0.07f, 0.09f, 0.40f);
-
-    // Selectable (uses Header colors in ImGui)
-    // ImGuiCol_Header already set above handles selectable styling
-
-    // Nav
-    colors[ImGuiCol_NavHighlight]    = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-    colors[ImGuiCol_NavWindowingHighlight] = ImVec4(0.30f, 0.55f, 0.90f, 0.70f);
-    colors[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.06f, 0.07f, 0.09f, 0.50f);
-
-    // Drag-drop target
-    colors[ImGuiCol_DragDropTarget]  = ImVec4(0.30f, 0.55f, 0.90f, 0.90f);
-
-    theme_applied_ = true;
-}
-
-void HunterGuiApp::renderStatusCard(const char* label, const char* value, const ImVec4& color, float width) {
-    ImGui::BeginChild(label, ImVec2(width, 70), true, ImGuiWindowFlags_NoScrollbar);
-    {
-        // Colored top accent bar
-        ImVec2 pos = ImGui::GetCursorScreenPos();
-        ImDrawList* dl = ImGui::GetWindowDrawList();
-        dl->AddRectFilled(pos, ImVec2(pos.x + ImGui::GetContentRegionAvail().x, pos.y + 3), ImGui::ColorConvertFloat4ToU32(color));
-
-        ImGui::Dummy(ImVec2(0, 5));  // space after accent bar
-
-        // Label (small, muted)
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.50f, 0.54f, 0.58f, 1.0f));
-        ImGui::TextUnformatted(label);
-        ImGui::PopStyleColor();
-
-        // Value (large, colored)
-        ImGui::PushFont(nullptr);  // Use default large text
-        ImGui::PushStyleColor(ImGuiCol_Text, color);
-        ImGui::SetWindowFontScale(1.4f);
-        ImGui::TextUnformatted(value);
-        ImGui::SetWindowFontScale(1.0f);
-        ImGui::PopStyleColor();
-        ImGui::PopFont();
-    }
-    ImGui::EndChild();
-}
-
-
-
-void HunterGuiApp::renderConfigsTab() {
-    // ─── Status cards row ───
-    float card_width = 160.0f;
-    float spacing = 12.0f;
-    float total_width = card_width * 4 + spacing * 3;
-    float start_x = ImGui::GetCursorPosX() + (ImGui::GetContentRegionAvail().x - total_width) / 2.0f;
-    if (start_x < 0) start_x = 0;
-
-    ImGui::SetCursorPosX(start_x);
-
-    // Total configs card
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%d", cached_total_);
-    renderStatusCard("Total Configs", buf, ImVec4(0.30f, 0.55f, 0.90f, 1.0f), card_width);
-
-    ImGui::SameLine(0, spacing);
-    snprintf(buf, sizeof(buf), "%d", cached_alive_);
-    renderStatusCard("Alive", buf, ImVec4(0.30f, 0.80f, 0.40f, 1.0f), card_width);
-
-    ImGui::SameLine(0, spacing);
-    snprintf(buf, sizeof(buf), "%d / %d", cached_tested_, cached_total_);
-    renderStatusCard("Tested", buf, ImVec4(0.85f, 0.65f, 0.20f, 1.0f), card_width);
-
-    ImGui::SameLine(0, spacing);
-    snprintf(buf, sizeof(buf), "%.0f ms", cached_avg_latency_ms_);
-    renderStatusCard("Avg Latency", buf, ImVec4(0.65f, 0.50f, 0.85f, 1.0f), card_width);
-
-    ImGui::Spacing();
-    ImGui::Spacing();
-
-    // ─── Controls ───
-    renderControls();
-
-    ImGui::Spacing();
-
-    // ─── Configs table ───
-    renderTable();
-
-    // ─── Log panel ───
-    renderLogPanel();
-}
-
-void HunterGuiApp::renderFoundTab() {
-    double now = glfwGetTime();
-    if (last_found_refresh_ < 0.0 || now - last_found_refresh_ >= kFoundRefreshIntervalSeconds) {
-        last_found_refresh_ = now;
-        found_cache_ = orch_.foundHistory().snapshot();
-        found_info_by_uri_.clear();
-        for (const auto& row : snapshot_) {
-            std::string country = row.rec.exit_country.empty() ? row.rec.server_country : row.rec.exit_country;
-            found_info_by_uri_[row.rec.uri] = {countryCell(country), row.rec.latency_ms};
-        }
-    }
-
-    if (ImGui::Button("Copy all found URIs")) {
-        std::string text = buildFoundClipboardText();
-        if (text.empty()) {
-            showToast("No found configs yet");
-        } else {
-            ImGui::SetClipboardText(text.c_str());
-            showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " found configs to clipboard");
-        }
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Export")) {
-        exportFoundHistory();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("%d found", (int)found_cache_.size());
-
-    ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
-                            ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
-    if (ImGui::BeginTable("found", 3, flags, ImVec2(0, 0))) {
-        ImGui::TableSetupColumn("When", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-        ImGui::TableSetupColumn("Country", ImGuiTableColumnFlags_WidthFixed, 130.0f);
-        ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableHeadersRow();
-        for (const auto& e : found_cache_) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(formatAge(now, e.seen_at).c_str());
-            ImGui::TableNextColumn();
-            auto it = found_info_by_uri_.find(e.uri);
-            if (it != found_info_by_uri_.end()) {
-                ImGui::TextUnformatted(it->second.first.c_str());
-                if (ImGui::IsItemHovered() && it->second.second > 0) {
-                    ImGui::SetTooltip("Latency: %.0f ms", it->second.second);
-                }
-            } else {
-                ImGui::TextDisabled("(removed)");
-            }
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(e.uri.c_str());
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", e.uri.c_str());
-            }
-        }
-        ImGui::EndTable();
-    }
-}
-
-void HunterGuiApp::renderSettingsTab() {
-    ImGui::TextColored(ImVec4(0.30f, 0.55f, 0.90f, 1.0f), "Settings");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Country detection
-    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Country detection");
-    ImGui::Spacing();
-    if (ImGui::Checkbox("Resolve domain endpoints with verified DoH (server-country hints)", &doh_enabled_ui_)) {
-        orch_.config().set("country_doh_enabled", doh_enabled_ui_);
-        if (country_service_) country_service_->setDohEnabled(doh_enabled_ui_);
-        saveConfigNow();
-    }
-    ImGui::TextDisabled("Off by default: sends endpoint hostnames to the DoH provider (1.1.1.1, TLS-verified). Local DNS is never used.");
-    if (ImGui::Checkbox("Direct baseline probes (local connectivity checks)", &baseline_enabled_ui_)) {
-        network::ConnectivityBaseline::shared()->setEnabled(baseline_enabled_ui_);
-        orch_.config().set("direct_baseline_enabled", baseline_enabled_ui_);
-        saveConfigNow();
-    }
-    ImGui::TextDisabled("Server countries filled so far: %d   Exit target: %s%s",
-                        country_filled_.load(),
-                        orch_.config().exitCountryTarget().empty() ? "none" : orch_.config().exitCountryTarget().c_str(),
-                        target_strict_ui_ ? " (strict)" : "");
-}
-
-void HunterGuiApp::renderAboutTab() {
-    ImGui::TextColored(ImVec4(0.30f, 0.55f, 0.90f, 1.0f), "Hunter");
-    ImGui::SameLine();
-    ImGui::TextDisabled("Censorship Hunter — Autonomous Proxy Discovery Engine");
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // Version info
-    ImGui::Text("Application Version: v%s", constants::HUNTER_VERSION);
-    ImGui::Text("GitHub: https://github.com/bahmany/censorship_hunter");
-    ImGui::Spacing();
-
-    renderUpdatePanel();
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // About text
-    ImGui::TextWrapped(
-        "Hunter is an autonomous anti-censorship proxy configuration discovery, "
-        "validation, and load-balancing system. It scrapes proxy configs from "
-        "Telegram channels and GitHub repos, tests them for liveness, and exposes "
-        "working proxies through SOCKS5 balancers."
-    );
-    ImGui::Spacing();
-    ImGui::TextDisabled("License: MIT");
-
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
-    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Attribution");
-    ImGui::Spacing();
-    ImGui::TextUnformatted("IP Geolocation by DB-IP");
-    ImGui::TextDisabled("https://db-ip.com  -  IP to Country Lite, licensed CC BY 4.0");
-    ImGui::TextDisabled("https://creativecommons.org/licenses/by/4.0/");
-    {
-        auto& gdb = geo::CountryDatabase::instance();
-        if (gdb.isLoaded()) {
-            ImGui::TextDisabled("Database: %s  (%zu IPv4 + %zu IPv6 ranges, %zu countries)", gdb.dbVersion().c_str(),
-                                gdb.ipv4Count(), gdb.ipv6Count(), gdb.countryCount());
-        } else {
-            ImGui::TextDisabled("Offline country database not embedded in this build (server countries stay Unknown).");
-        }
-    }
-    ImGui::TextWrapped(
-        "The database was converted from the vendor CSV into a compact binary range table (HCGEO1) and "
-        "compressed; no ranges were otherwise modified. Country values are approximate hints: a server's "
-        "location does not determine where its traffic exits. Exit countries are measured through the tunnel. "
-        "See THIRD_PARTY_NOTICES.md.");
-}
-
-void HunterGuiApp::renderClientTab() {
-    // ─── Status bar ───
-    auto client_status = orch_.clientStatus();
-    bool active = client_status.active;
-    if (active) {
-        ImGui::TextColored(ImVec4(0.3f, 0.8f, 0.3f, 1.0f), "● Connected — 127.0.0.1:%d", client_status.port);
-        ImGui::SameLine();
-        ImGui::TextDisabled(" (%s)", client_status.uri.empty() ? "-" : client_status.uri.c_str());
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Disconnect")) {
-            std::thread([this]() {
-                orch_.deactivateClientConfig();
-                showToast("Disconnected");
-            }).detach();
-        }
-    } else {
-        ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "○ Not connected");
-        ImGui::SameLine();
-        ImGui::TextDisabled(" (click a profile to connect)");
-    }
-    // System proxy state
-    ImGui::SameLine(0, 20);
-    ImGui::Text("System proxy: %s", orch_.config().clientSysproxyEnabled() ? "on" : "off");
-    ImGui::SameLine(0, 10);
-    if (ImGui::SmallButton("Test System Proxy")) {
-        showToast("System proxy state: " + std::string(orch_.config().clientSysproxyEnabled() ? "on" : "off"));
-    }
-
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ─── Profiles table ───
-    static ImGuiTableFlags flags =
-        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
-        ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
-        ImGuiTableFlags_ContextMenuInBody | ImGuiTableFlags_Hideable | ImGuiTableFlags_Reorderable;
-
-    float table_height = ImGui::GetContentRegionAvail().y - 180.0f; // reserve for log panel
-    if (table_height < 100.0f) table_height = 100.0f;
-
-    if (!ImGui::BeginTable("client_profiles", 7, flags, ImVec2(0, table_height))) {
-        ImGui::EndTable();
-    } else {
-        ImGui::TableSetupColumn("##Select", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 24.0f);
-        ImGui::TableSetupColumn("Remark", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Protocol", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Address:Port", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Country", ImGuiTableColumnFlags_WidthFixed, 80.0f);
-        ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed, 70.0f);
-        ImGui::TableSetupColumn("Act", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 50.0f);
-        ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableHeadersRow();
-
-        // Determine which rows to display: if we have a sorted snapshot for latency, use it; otherwise use snapshot_
-        const std::vector<UiRow>& rows_to_display = use_sorted_snapshot_ ? sorted_snapshot_by_latency_ : snapshot_;
-        ImGuiListClipper clipper;
-        clipper.Begin(static_cast<int>(rows_to_display.size()));
-        while (clipper.Step()) {
-            for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
-                const UiRow& row = rows_to_display[i];
-                const ConfigHealthRecord& r = row.rec;
-                bool selected = client_selected_uris_.count(r.uri) != 0;
-
-                ImGui::TableNextRow();
-                ImGui::TableNextColumn();
-
-                // Checkbox for selection
-                ImGui::PushID((r.uri + "_select").c_str());
-                if (ImGui::Checkbox("##cb", &selected)) {
-                    if (selected) {
-                        client_selected_uris_.insert(r.uri);
-                    } else {
-                        client_selected_uris_.erase(r.uri);
-                    }
-                }
-                ImGui::PopID();
-
-                ImGui::TableNextColumn();
-                // Remark column with double-click to edit
-                ImGui::PushID((r.uri + "_remark").c_str());
-                bool hovered = ImGui::IsItemHovered();
-                bool double_clicked = hovered && ImGui::IsMouseDoubleClicked(0);
-                if (double_clicked) {
-                    editing_remark_uri_ = r.uri;
-                    strncpy(editing_remark_buf_, row.ps.c_str(), sizeof(editing_remark_buf_));
-                    editing_remark_buf_[sizeof(editing_remark_buf_) - 1] = '\0';
-                    ImGui::OpenPopup("##edit_remark");
-                }
-                if (editing_remark_uri_ == r.uri) {
-                    // Show input box for editing
-                    ImGui::PushItemWidth(-1);
-                    if (ImGui::InputText("##input", editing_remark_buf_, sizeof(editing_remark_buf_), ImGuiInputTextFlags_EnterReturnsTrue)) {
-                        // Apply the change
-                        orch_.configDb()->updateRemarks(r.uri, editing_remark_buf_);
-                        showToast("Remark updated");
-                        editing_remark_uri_.clear();
-                    }
-                    ImGui::PopItemWidth();
-                } else {
-                    ImGui::TextUnformatted(row.ps.empty() ? "-" : row.ps.c_str());
-                }
-                if (ImGui::BeginPopup("##edit_remark")) {
-                    ImGui::InputText("##input", editing_remark_buf_, sizeof(editing_remark_buf_), ImGuiInputTextFlags_EnterReturnsTrue);
-                    if (ImGui::IsItemDeactivatedAfterEdit()) {
-                        orch_.configDb()->updateRemarks(r.uri, editing_remark_buf_);
-                        showToast("Remark updated");
-                        editing_remark_uri_.clear();
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::SameLine();
-                    if (ImGui::Button("Cancel")) {
-                        editing_remark_uri_.clear();
-                        ImGui::CloseCurrentPopup();
-                    }
-                    ImGui::EndPopup();
-                }
-                ImGui::PopID();
-
-                ImGui::TableNextColumn();
-                // Protocol
-                ImGui::TextUnformatted(row.protocol.empty() ? "-" : row.protocol.c_str());
-
-                ImGui::TableNextColumn();
-                // Address:Port
-                std::string addr = row.address.empty() ? r.uri : (row.address + ":" + std::to_string(row.port));
-                if (!row.ps.empty()) addr += "  (" + row.ps + ")";
-                ImGui::TextUnformatted(addr.c_str());
-
-                ImGui::TableNextColumn();
-                // Country (exit country)
-                {
-                    const bool known = !r.exit_country.empty();
-                    const bool stale = known && (glfwGetTime() - r.exit_country_at) > (double)std::max(60, orch_.config().exitCountryFreshSeconds());
-                    if (!known) ImGui::TextDisabled("Unknown");
-                    else if (stale) ImGui::TextColored(ImVec4(0.65f, 0.65f, 0.55f, 1.0f), "%s ~", countryCell(r.exit_country).c_str());
-                    else ImGui::TextUnformatted(countryCell(r.exit_country).c_str());
-                }
-
-                ImGui::TableNextColumn();
-                // Latency
-                int lat_ms = -2;
-                {
-                    std::lock_guard<std::mutex> lock(client_latency_mu_);
-                    auto it = client_latency_results_.find(r.uri);
-                    if (it != client_latency_results_.end()) lat_ms = it->second;
-                }
-                if (lat_ms != -2) {
-                    if (lat_ms >= 0) {
-                        ImGui::Text("%.0f ms", (float)lat_ms);
-                    } else {
-                        ImGui::TextDisabled("failed");
-                    }
-                } else {
-                    ImGui::TextDisabled("...");
-                }
-
-                ImGui::TableNextColumn();
-                // Act button
-                if (active && r.uri == client_status.uri) {
-                    ImGui::Button("Active ✓");
-                } else {
-                    if (ImGui::Button("Connect")) {
-                        std::thread([this, uri = r.uri]() {
-                            int port = orch_.activateClientConfig(uri);
-                            if (port > 0) {
-                                showToast("Connected to " + uri + " on port " + std::to_string(port));
-                            } else {
-                                showToast("Failed to connect to " + uri);
-                            }
-                        }).detach();
-                    }
-                }
-            }
-        }
-        clipper.End();
-        ImGui::EndTable();
-    }
-
-    // ─── Toolbar row ───
-    ImGui::Spacing();
-    if (ImGui::Button("Import from clipboard▾")) {
-        ImGui::OpenPopup("##import_menu");
-    }
-    if (ImGui::BeginPopup("##import_menu")) {
-        if (ImGui::MenuItem("Share links (uri list)")) {
-            std::string clipboard = ImGui::GetClipboardText();
-            auto uris = utils::extractRawUrisFromText(clipboard);
-            if (!uris.empty()) {
-                orch_.configDb()->addConfigsWithPriority(uris, "manual");
-                showToast("Added " + std::to_string(uris.size()) + " configs from clipboard");
-            } else {
-                showToast("No valid URIs found in clipboard");
-            }
-        }
-        if (ImGui::MenuItem("Subscription URL…")) {
-            client_show_subscription_modal_ = true;
-            ImGui::SetNextItemWidth(0);
-            ImGui::OpenPopup("##subscription_modal");
-        }
-        ImGui::EndPopup();
-    }
-    ImGui::SameLine();
-    if (ImGui::Button("Update all subs")) {
-        std::thread([this]() {
-            std::string err;
-            int count = orch_.subscriptionManager().updateAll("", &err);
-            if (count >= 0) {
-                showToast("Updated subscriptions: " + std::to_string(count) + " configs");
-            } else {
-                showToast("Subscription update failed: " + err);
-            }
-        }).detach();
-    }
-
-    // Subscription URL modal
-    if (client_show_subscription_modal_) {
-        ImGui::OpenPopup("##subscription_modal");
-        client_show_subscription_modal_ = false;
-    }
-    if (ImGui::BeginPopupModal("##subscription_modal", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("Subscription URL");
-        ImGui::InputText("##url", client_subscription_url_input_, sizeof(client_subscription_url_input_));
-        ImGui::SameLine();
-        ImGui::Text("Remark (optional)");
-        ImGui::InputText("##remark", client_subscription_remark_input_, sizeof(client_subscription_remark_input_));
-        if (ImGui::Button("Add", ImVec2(120, 0))) {
-            std::string url = client_subscription_url_input_;
-            std::string remark = client_subscription_remark_input_;
-            if (!url.empty()) {
-                std::string id = orch_.subscriptionManager().add(url, remark);
-                if (!id.empty()) {
-                    std::thread([this, id]() {
-                        std::string err;
-                        int count = orch_.subscriptionManager().update(id, "", &err);
-                        if (count >= 0) {
-                            showToast("Subscription added and updated: " + std::to_string(count) + " configs");
-                        } else {
-                            showToast("Subscription added but update failed: " + err);
-                        }
-                    }).detach();
-                } else {
-                    showToast("Failed to add subscription (maybe duplicate)");
-                }
-            } else {
-                showToast("URL cannot be empty");
-            }
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::SetItemDefaultFocus();
-        ImGui::SameLine();
-        if (ImGui::Button("Cancel", ImVec2(120, 0)) || ImGui::IsKeyPressed(ImGuiKey_Escape)) {
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-
-    ImGui::SameLine(0, 20);
-    // Latency test selected button
-    if (ImGui::Button("Latency test selected")) {
-        std::vector<std::string> uris_to_test;
-        if (client_selected_uris_.empty()) {
-            for (const auto& row : snapshot_) {
-                uris_to_test.push_back(row.rec.uri);
-            }
-        } else {
-            for (const auto& uri : client_selected_uris_) {
-                uris_to_test.push_back(uri);
-            }
-        }
-        if (!uris_to_test.empty()) {
-            std::thread([this, uris_to_test]() {
-                network::ProxyTester tester;
-                network::BatchTestOptions opts;
-                opts.timeout_seconds = client_latency_test_timeout_;
-                opts.bulk = false;
-                auto results = tester.testBatch(uris_to_test, opts);
-                {
-                    std::lock_guard<std::mutex> lock(client_latency_mu_);
-                    for (size_t i = 0; i < results.size(); ++i) {
-                        const auto& res = results[i];
-                        int latency_ms = -1;
-                        if (res.success && res.has_probe) {
-                            latency_ms = static_cast<int>(res.latency_ms);
-                        }
-                        client_latency_results_[uris_to_test[i]] = latency_ms;
-                    }
-                }
-                showToast("Latency test completed for " + std::to_string(uris_to_test.size()) + " configs");
-            }).detach();
-        } else {
-            showToast("No configs to test");
-        }
-    }
-    ImGui::SameLine();
-    // Sort by latency button
-    if (ImGui::Button("Sort by latency")) {
-        // Sort snapshot_ by latency (using client_latency_results_, treating missing as high latency)
-        sorted_snapshot_by_latency_ = snapshot_;
-        std::lock_guard<std::mutex> lock(client_latency_mu_);
-        std::stable_sort(sorted_snapshot_by_latency_.begin(), sorted_snapshot_by_latency_.end(),
-            [this](const UiRow& a, const UiRow& b) {
-                auto it_a = client_latency_results_.find(a.rec.uri);
-                auto it_b = client_latency_results_.find(b.rec.uri);
-                int lat_a = (it_a != client_latency_results_.end()) ? it_a->second : INT_MAX;
-                int lat_b = (it_b != client_latency_results_.end()) ? it_b->second : INT_MAX;
-                return lat_a < lat_b;
-            });
-        use_sorted_snapshot_ = true;
-        showToast("Sorted by latency");
-    }
-
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ─── Subscriptions table ───
-    ImGui::Text("Subscriptions");
-    ImGui::SameLine(0, 10);
-    ImGui::TextDisabled("(managed by subscription manager)");
-    ImGui::Separator();
-
-    static ImGuiTableFlags sub_flags =
-        ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
-        ImGuiTableFlags_SizingStretchProp;
-
-    if (ImGui::BeginTable("subscriptions", 7, sub_flags)) {
-        ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 50.0f);
-        ImGui::TableSetupColumn("Remarks", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("URL", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Last update", ImGuiTableColumnFlags_WidthFixed, 100.0f);
-        ImGui::TableSetupColumn("Count", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-        ImGui::TableSetupColumn("Error", ImGuiTableColumnFlags_WidthFixed, 200.0f);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 80.0f);
-        ImGui::TableHeadersRow();
-
-        auto subs = orch_.subscriptionManager().list();
-        for (const auto& sub : subs) {
-            ImGui::TableNextRow();
-            ImGui::TableNextColumn();
-            bool enabled = sub.enabled;
-            if (ImGui::Checkbox("##sub_enabled", &enabled)) {
-                if (enabled != sub.enabled) {
-                    std::thread([this, id = sub.id, enabled]() {
-                        orch_.subscriptionManager().setEnabled(id, enabled);
-                        showToast(std::string("Subscription ") + (enabled ? "enabled" : "disabled"));
-                    }).detach();
-                }
-            }
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(sub.remarks.empty() ? "-" : sub.remarks.c_str());
-            ImGui::TableNextColumn();
-            ImGui::TextUnformatted(sub.url.c_str());
-            if (ImGui::IsItemHovered()) {
-                ImGui::SetTooltip("%s", sub.url.c_str());
-            }
-            ImGui::TableNextColumn();
-            if (sub.last_update > 0) {
-                ImGui::TextUnformatted(formatAge(glfwGetTime(), sub.last_update).c_str());
-            } else {
-                ImGui::TextDisabled("never");
-            }
-            ImGui::TableNextColumn();
-            ImGui::Text("%d", sub.last_count);
-            ImGui::TableNextColumn();
-            if (!sub.last_error.empty()) {
-                ImGui::TextColored(ImVec4(0.9f, 0.3f, 0.3f, 1.0f), "%s", sub.last_error.c_str());
-            } else {
-                ImGui::TextDisabled("-");
-            }
-            ImGui::TableNextColumn();
-            if (ImGui::SmallButton("Update")) {
-                std::thread([this, id = sub.id]() {
-                    std::string err;
-                    int count = orch_.subscriptionManager().update(id, "", &err);
-                    if (count >= 0) {
-                        showToast("Subscription updated: " + std::to_string(count) + " configs");
-                    } else {
-                        showToast("Subscription update failed: " + err);
-                    }
-                }).detach();
-            }
-            ImGui::SameLine();
-            if (ImGui::SmallButton("Delete")) {
-                std::thread([this, id = sub.id]() {
-                    bool removed = orch_.subscriptionManager().remove(id);
-                    if (removed) {
-                        showToast("Subscription removed");
-                    } else {
-                        showToast("Failed to remove subscription");
-                    }
-                }).detach();
-            }
-        }
-        ImGui::EndTable();
-    }
-
-    // ─── Add subscription row ───
-    ImGui::Spacing();
-    ImGui::Text("Add subscription:");
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(300);
-    ImGui::InputText("##new_sub_url", client_subscription_url_input_, sizeof(client_subscription_url_input_));
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(200);
-    ImGui::InputText("##new_sub_remark", client_add_sub_remark_input_, sizeof(client_add_sub_remark_input_));
-    ImGui::SameLine();
-    if (ImGui::Button("Add")) {
-        std::string url = client_subscription_url_input_;
-        std::string remark = client_add_sub_remark_input_;
-        if (!url.empty()) {
-            std::string id = orch_.subscriptionManager().add(url, remark);
-            if (!id.empty()) {
-                showToast("Subscription added: " + url);
-                // Clear inputs
-                memset(client_subscription_url_input_, 0, sizeof(client_subscription_url_input_));
-                memset(client_add_sub_remark_input_, 0, sizeof(client_add_sub_remark_input_));
-            } else {
-                showToast("Failed to add subscription (maybe duplicate)");
-            }
-        } else {
-            showToast("URL cannot be empty");
-        }
-    }
-
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ─── Client settings row ───
-    ImGui::Text("Client settings");
-    ImGui::Separator();
-
-    // SOCKS/HTTP port (same field)
-    int port = orch_.config().clientListenPort();
-    if (ImGui::InputInt("SOCKS/HTTP port", &port)) {
-        if (port < 1) port = 1;
-        if (port > 65535) port = 65535;
-        orch_.config().set("client_listen_port", std::to_string(port));
-        saveConfigNow();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("Default: 10808");
-
-    // Set system proxy when connected
-    bool sysproxy = orch_.config().clientSysproxyEnabled();
-    if (ImGui::Checkbox("Set system proxy when connected", &sysproxy)) {
-        orch_.config().set("client_sysproxy_enabled", sysproxy ? "true" : "false");
-        saveConfigNow();
-    }
-
-    // Auto-update subscriptions
-    bool autoupdate = orch_.config().subAutoupdate();
-    if (ImGui::Checkbox("Auto-update subscriptions", &autoupdate)) {
-        orch_.config().set("sub_autoupdate", autoupdate ? "true" : "false");
-        saveConfigNow();
-    }
-
-    // Update interval min
-    int interval = orch_.config().subUpdateIntervalMin();
-    if (ImGui::InputInt("Update interval (min)", &interval)) {
-        if (interval < 1) interval = 1;
-        orch_.config().set("sub_update_interval_min", std::to_string(interval));
-        saveConfigNow();
-    }
-    ImGui::SameLine();
-    ImGui::TextDisabled("Default: 60");
-
-    ImGui::Separator();
-    ImGui::Spacing();
-
-    // ─── Log line (lower priority) ───
-    ImGui::Text("Client log: (not implemented)");
-}
-
-void HunterGuiApp::renderUpdatePanel() {
-    ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Auto-Update");
-    ImGui::Spacing();
-
-    auto& updater = core::SelfUpdateManager::instance();
-    auto state = updater.state();
-    float progress = updater.downloadProgress();
-    std::string status_msg = updater.statusMessage();
-
-    // State indicator
-    ImVec4 state_color;
-    const char* state_label;
-    switch (state) {
-        case core::SelfUpdateManager::UpdateState::Idle:
-            state_color = ImVec4(0.50f, 0.54f, 0.58f, 1.0f);
-            state_label = "Idle";
-            break;
-        case core::SelfUpdateManager::UpdateState::Checking:
-            state_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
-            state_label = "Checking...";
-            break;
-        case core::SelfUpdateManager::UpdateState::UpToDate:
-            state_color = ImVec4(0.30f, 0.80f, 0.40f, 1.0f);
-            state_label = "Up to Date";
-            break;
-        case core::SelfUpdateManager::UpdateState::UpdateAvailable:
-            state_color = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-            state_label = "Update Available";
-            break;
-        case core::SelfUpdateManager::UpdateState::Downloading:
-            state_color = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-            state_label = "Downloading...";
-            break;
-        case core::SelfUpdateManager::UpdateState::DownloadComplete:
-            state_color = ImVec4(0.30f, 0.80f, 0.40f, 1.0f);
-            state_label = "Download Complete";
-            break;
-        case core::SelfUpdateManager::UpdateState::Applying:
-            state_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
-            state_label = "Applying...";
-            break;
-        case core::SelfUpdateManager::UpdateState::UpdateComplete:
-            state_color = ImVec4(0.30f, 0.80f, 0.40f, 1.0f);
-            state_label = "Update Complete — Relaunching";
-            break;
-        case core::SelfUpdateManager::UpdateState::Failed:
-            state_color = ImVec4(0.85f, 0.35f, 0.35f, 1.0f);
-            state_label = "Failed";
-            break;
-        default:
-            state_color = ImVec4(0.50f, 0.54f, 0.58f, 1.0f);
-            state_label = "Unknown";
-            break;
-    }
-
-    // Status badge
-    ImGui::PushStyleColor(ImGuiCol_Text, state_color);
-    ImGui::Text("[ %s ]", state_label);
-    ImGui::PopStyleColor();
-
-    if (!status_msg.empty()) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("(%s)", status_msg.c_str());
-    }
-
-    // Download progress bar
-    if (state == core::SelfUpdateManager::UpdateState::Downloading ||
-        state == core::SelfUpdateManager::UpdateState::DownloadComplete) {
-        ImGui::Spacing();
-        char progress_label[32];
-        snprintf(progress_label, sizeof(progress_label), "%.0f%%", progress * 100.0f);
-        ImGui::ProgressBar(progress, ImVec2(-1, 0), progress_label);
-    }
-
-    ImGui::Spacing();
-
-    // Manual check button
-    if (state == core::SelfUpdateManager::UpdateState::Idle ||
-        state == core::SelfUpdateManager::UpdateState::UpToDate ||
-        state == core::SelfUpdateManager::UpdateState::Failed) {
-        if (ImGui::Button("Check for Updates", ImVec2(180, 0))) {
-            std::thread([]() {
-                core::SelfUpdateManager::instance().checkForUpdate();
-            }).detach();
-        }
-    }
-
-    // Manual apply button (if update is available)
-    if (state == core::SelfUpdateManager::UpdateState::UpdateAvailable) {
-        ImGui::SameLine();
-        if (ImGui::Button("Download & Install Now", ImVec2(200, 0))) {
-            std::thread([]() {
-                core::SelfUpdateManager::instance().downloadAndApply();
-            }).detach();
-        }
-    }
-
-    // Show release info if available
-    auto release = updater.latestRelease();
-    if (!release.tag_name.empty()) {
-        ImGui::Spacing();
-        ImGui::TextDisabled("Latest release: v%s", release.tag_name.c_str());
-        if (!release.release_name.empty()) {
-            ImGui::TextDisabled("Release name: %s", release.release_name.c_str());
-        }
-        if (!release.body.empty()) {
-            ImGui::Spacing();
-            ImGui::TextColored(ImVec4(0.70f, 0.72f, 0.76f, 1.0f), "Release Notes:");
-            ImGui::Indent();
-            // Truncate very long release notes for display
-            std::string notes = release.body;
-            if (notes.size() > 1000) notes = notes.substr(0, 1000) + "...";
-            ImGui::TextWrapped("%s", notes.c_str());
-            ImGui::Unindent();
-        }
-    }
-}
+     if (theme_applied_) return;
+
+     ImGuiStyle& style = ImGui::GetStyle();
+
+     // Modern rounded corners
+     style.WindowRounding = 8.0f;
+     style.FrameRounding = 6.0f;
+     style.GrabRounding = 6.0f;
+     style.TabRounding = 6.0f;
+     style.ScrollbarRounding = 8.0f;
+     style.PopupRounding = 6.0f;
+     style.ChildRounding = 6.0f;
+
+     // Spacing
+     style.WindowPadding = ImVec2(16, 16);
+     // Android: increase FramePadding.y for better touch targets (~40px minimum)
+#ifdef __ANDROID__
+     style.FramePadding = ImVec2(10, 12);  // Increased Y padding for touch
+#else
+     style.FramePadding = ImVec2(10, 6);
+#endif
+     style.ItemSpacing = ImVec2(10, 8);
+     style.ItemInnerSpacing = ImVec2(8, 6);
+     style.IndentSpacing = 20.0f;
+     style.ScrollbarSize = 14.0f;
+
+     // Sizing
+     style.WindowBorderSize = 0.0f;
+     style.ChildBorderSize = 1.0f;
+     style.PopupBorderSize = 1.0f;
+     style.FrameBorderSize = 0.0f;
+     style.TabBorderSize = 0.0f;
+
+     // Modern dark color palette
+     ImVec4* colors = style.Colors;
+
+     // Background tones (deep dark blue-gray)
+     colors[ImGuiCol_WindowBg]        = kBgPrimary;
+     colors[ImGuiCol_ChildBg]         = kBgSecondary;
+     colors[ImGuiCol_PopupBg]         = ImVec4(0.10f, 0.11f, 0.13f, 0.98f);
+     colors[ImGuiCol_Border]          = kBorderLight;
+     colors[ImGuiCol_BorderShadow]    = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+
+     // Text
+     colors[ImGuiCol_Text]            = kTextPrimary;
+     colors[ImGuiCol_TextDisabled]    = kTextDisabled;
+
+     // Frames / inputs
+     colors[ImGuiCol_FrameBg]         = ImVec4(0.12f, 0.14f, 0.17f, 1.0f);
+     colors[ImGuiCol_FrameBgHovered]  = ImVec4(0.18f, 0.20f, 0.24f, 1.0f);
+     colors[ImGuiCol_FrameBgActive]   = ImVec4(0.22f, 0.25f, 0.30f, 1.0f);
+
+     // Buttons — accent blue
+     colors[ImGuiCol_Button]          = kAccentBlue;
+     colors[ImGuiCol_ButtonHovered]   = ImVec4(0.26f, 0.45f, 0.75f, 1.0f);
+     colors[ImGuiCol_ButtonActive]    = ImVec4(0.16f, 0.30f, 0.52f, 1.0f);
+
+     // Headers / collapsibles
+     colors[ImGuiCol_Header]          = kAccentBlue;
+     colors[ImGuiCol_HeaderHovered]   = ImVec4(0.26f, 0.45f, 0.75f, 1.0f);
+     colors[ImGuiCol_HeaderActive]    = ImVec4(0.16f, 0.30f, 0.52f, 1.0f);
+
+     // Tabs
+     colors[ImGuiCol_Tab]             = ImVec4(0.10f, 0.12f, 0.15f, 1.0f);
+     colors[ImGuiCol_TabHovered]      = ImVec4(0.20f, 0.36f, 0.60f, 1.0f);
+     colors[ImGuiCol_TabActive]       = ImVec4(0.16f, 0.28f, 0.48f, 1.0f);
+     colors[ImGuiCol_TabUnfocused]    = ImVec4(0.08f, 0.09f, 0.11f, 1.0f);
+     colors[ImGuiCol_TabUnfocusedActive] = ImVec4(0.14f, 0.16f, 0.20f, 1.0f);
+
+     // Title bar
+     colors[ImGuiCol_TitleBg]         = ImVec4(0.08f, 0.09f, 0.11f, 1.0f);
+     colors[ImGuiCol_TitleBgActive]   = ImVec4(0.10f, 0.12f, 0.15f, 1.0f);
+     colors[ImGuiCol_TitleBgCollapsed]= ImVec4(0.06f, 0.07f, 0.09f, 1.0f);
+
+     // Scrollbar
+     colors[ImGuiCol_ScrollbarBg]     = ImVec4(0.04f, 0.05f, 0.06f, 1.0f);
+     colors[ImGuiCol_ScrollbarGrab]   = kAccentBlue;
+     colors[ImGuiCol_ScrollbarGrabHovered] = ImVec4(0.28f, 0.30f, 0.36f, 1.0f);
+     colors[ImGuiCol_ScrollbarGrabActive]  = ImVec4(0.35f, 0.38f, 0.44f, 1.0f);
+
+     // Checkmark / slider / separator
+     colors[ImGuiCol_CheckMark]       = kSuccessGreen;
+     colors[ImGuiCol_SliderGrab]      = kSuccessGreen;
+     colors[ImGuiCol_SliderGrabActive]= ImVec4(0.40f, 0.65f, 1.0f, 1.0f);
+     colors[ImGuiCol_Separator]       = kBorderLight;
+      colors[ImGuiCol_SeparatorHovered]= ImVec4(kAccentBlue.x, kAccentBlue.y, kAccentBlue.z, 0.60f);
+      colors[ImGuiCol_SeparatorActive] = ImVec4(kAccentBlue.x, kAccentBlue.y, kAccentBlue.z, 1.0f);
+
+      // Resize grip
+      colors[ImGuiCol_ResizeGrip]      = ImVec4(0.20f, 0.22f, 0.26f, 0.50f);
+      colors[ImGuiCol_ResizeGripHovered] = ImVec4(kAccentBlue.x, kAccentBlue.y, kAccentBlue.z, 0.70f);
+      colors[ImGuiCol_ResizeGripActive]  = ImVec4(0.40f, 0.65f, 1.0f, 0.95f);
+
+     // Plot
+     colors[ImGuiCol_PlotLines]       = kSuccessGreen;
+     colors[ImGuiCol_PlotLinesHovered]= ImVec4(0.40f, 0.65f, 1.0f, 1.0f);
+     colors[ImGuiCol_PlotHistogram]   = kSuccessGreen;
+     colors[ImGuiCol_PlotHistogramHovered] = ImVec4(0.40f, 0.65f, 1.0f, 1.0f);
+
+     // Table
+     colors[ImGuiCol_TableHeaderBg]   = kBgTertiary;
+     colors[ImGuiCol_TableBorderStrong] = kBorderStrong;
+     colors[ImGuiCol_TableBorderLight]  = ImVec4(0.14f, 0.16f, 0.19f, 1.0f);
+     colors[ImGuiCol_TableRowBg]      = ImVec4(0.00f, 0.00f, 0.00f, 0.00f);
+     colors[ImGuiCol_TableRowBgAlt]   = ImVec4(0.06f, 0.07f, 0.09f, 0.40f);
+
+     // Selectable (uses Header colors in ImGui)
+     // ImGuiCol_Header already set above handles selectable styling
+
+     // Nav
+     colors[ImGuiCol_NavHighlight]    = kSuccessGreen;
+      colors[ImGuiCol_NavWindowingHighlight] = ImVec4(kAccentBlue.x, kAccentBlue.y, kAccentBlue.z, 0.70f);
+      colors[ImGuiCol_NavWindowingDimBg]     = ImVec4(0.06f, 0.07f, 0.09f, 0.50f);
+
+      // Drag-drop target
+      colors[ImGuiCol_DragDropTarget]  = ImVec4(kAccentBlue.x, kAccentBlue.y, kAccentBlue.z, 0.90f);
+
+     theme_applied_ = true;
+ }
 
 void HunterGuiApp::renderStatusBar() {
     // Bottom status bar with quick stats
@@ -2540,48 +1202,48 @@ void HunterGuiApp::renderStatusBar() {
 
     // Left: orchestrator status
     if (orchestrator_running_.load()) {
-        ImGui::TextColored(ImVec4(0.30f, 0.80f, 0.40f, 1.0f), "[Running]");
+         ImGui::TextColored(kSuccessGreen, "[Running]");
     } else {
-        ImGui::TextColored(ImVec4(0.85f, 0.35f, 0.35f, 1.0f), "[Stopped]");
+         ImGui::TextColored(kDangerRed, "[Stopped]");
     }
 
     // Center: cycle count
     ImGui::SameLine(0, 24);
     ImGui::TextDisabled("Cycle: %d", orch_.cycleCount());
 
-    // Right: update status
-    auto& updater = core::SelfUpdateManager::instance();
-    auto update_state = updater.state();
-    if (update_state != core::SelfUpdateManager::UpdateState::Idle &&
-        update_state != core::SelfUpdateManager::UpdateState::UpToDate) {
-        ImGui::SameLine(0, 24);
-        const char* update_label = "";
-        ImVec4 update_color = ImVec4(0.50f, 0.54f, 0.58f, 1.0f);
-        switch (update_state) {
-            case core::SelfUpdateManager::UpdateState::Checking:
-                update_label = "Checking for updates...";
-                update_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
-                break;
-            case core::SelfUpdateManager::UpdateState::UpdateAvailable:
-                update_label = "Update available";
-                update_color = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-                break;
-            case core::SelfUpdateManager::UpdateState::Downloading:
-                update_label = "Downloading update...";
-                update_color = ImVec4(0.30f, 0.55f, 0.90f, 1.0f);
-                break;
-            case core::SelfUpdateManager::UpdateState::Applying:
-                update_label = "Applying update...";
-                update_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
-                break;
-            case core::SelfUpdateManager::UpdateState::UpdateComplete:
-                update_label = "Update complete — relaunching";
-                update_color = ImVec4(0.30f, 0.80f, 0.40f, 1.0f);
-                break;
-            case core::SelfUpdateManager::UpdateState::Failed:
+         // Right: update status
+         auto& updater = core::SelfUpdateManager::instance();
+         auto update_state = updater.state();
+         if (update_state != core::SelfUpdateManager::UpdateState::Idle &&
+             update_state != core::SelfUpdateManager::UpdateState::UpToDate) {
+             ImGui::SameLine(0, 24);
+             const char* update_label = "";
+             ImVec4 update_color = ImVec4(0.50f, 0.54f, 0.58f, 1.0f);
+             switch (update_state) {
+                 case core::SelfUpdateManager::UpdateState::Checking:
+                     update_label = "Checking for updates...";
+                     update_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
+                     break;
+                 case core::SelfUpdateManager::UpdateState::UpdateAvailable:
+                     update_label = "Update available";
+                     update_color = kAccentBlue;
+                     break;
+                 case core::SelfUpdateManager::UpdateState::Downloading:
+                     update_label = "Downloading update...";
+                     update_color = kAccentBlue;
+                     break;
+                 case core::SelfUpdateManager::UpdateState::Applying:
+                     update_label = "Applying update...";
+                     update_color = ImVec4(0.85f, 0.65f, 0.20f, 1.0f);
+                     break;
+                 case core::SelfUpdateManager::UpdateState::UpdateComplete:
+                 update_label = "Update complete — relaunching";
+                 update_color = kSuccessGreen;
+                 break;
+                 case core::SelfUpdateManager::UpdateState::Failed:
                 update_label = "Update failed";
-                update_color = ImVec4(0.85f, 0.35f, 0.35f, 1.0f);
-                break;
+                 update_color = kDangerRed;
+                 break;
             default: break;
         }
         if (*update_label) {
@@ -2599,21 +1261,24 @@ void HunterGuiApp::renderStatusBar() {
 }
 
 void HunterGuiApp::renderFrame() {
-    refreshSnapshotIfDue();
+     refreshSnapshotIfDue();
 
-    if (!theme_applied_) applyModernTheme();
+     if (!theme_applied_) applyModernTheme();
 
-    ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(viewport->WorkSize);
-     ImGui::Begin("HunterMain", nullptr,
-                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
-                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                   ImGuiWindowFlags_NoBringToFrontOnFocus);
+     // Calculate viewport width once per frame for responsive design
+     ImGuiViewport* viewport = ImGui::GetMainViewport();
+     viewport_width_ = viewport->WorkSize.x;
+     
+     ImGui::SetNextWindowPos(viewport->WorkPos);
+     ImGui::SetNextWindowSize(viewport->WorkSize);
+      ImGui::Begin("HunterMain", nullptr,
+                    ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                    ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
+                    ImGuiWindowFlags_NoBringToFrontOnFocus);
 
      // ─── Top strip ───
      {
-         ImGui::BeginChild("##top_strip", ImVec2(0, 20), false, ImGuiWindowFlags_NoBackground);
+         ImGui::BeginChild("##top_strip", ImVec2(0, Spacing::Small), false, ImGuiWindowFlags_NoBackground);
          ImGui::AlignTextToFramePadding();
          ImGui::Text("HUNTER");
          ImGui::SameLine();
@@ -2645,28 +1310,46 @@ void HunterGuiApp::renderFrame() {
     renderQrPopup();
     renderClearLivePopup();
 
-    // ─── Toast ───
-    {
-        std::lock_guard<std::mutex> lock(toast_mu_);
-        if (!toast_message_.empty() && glfwGetTime() < toast_until_) {
-            ImGui::SameLine(0, 16);
-            ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "%s", toast_message_.c_str());
-        }
-    }
+     // ─── Toast ───
+     {
+         std::lock_guard<std::mutex> lock(toast_mu_);
+          if (!toast_message_.empty() && glfwGetTime() < toast_until_) {
+              ImGui::SameLine(0, 16);
+              ImGui::TextColored(kSuccessGreen, "%s", toast_message_.c_str());
+          }
+     }
 
-    ImGui::End();
-}
+     // ─── Shutdown Overlay ───
+     if (shutdown_in_progress_.load()) {
+         ImGui::OpenPopup("ShutdownOverlay");
+     }
+     if (ImGui::BeginPopupModal("ShutdownOverlay", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
+         // Make it fullscreen
+         ImGui::SetNextWindowPos(ImVec2(0,0), ImGuiCond_Always);
+         ImGui::SetNextWindowSize(scaledSize(ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y), ImGuiCond_Always);
+         ImGui::BeginChild("##shutdown_child", ImVec2(0,0), true);
+         ImGui::Text("Shutting down...");
+         ImGui::ProgressBar(orch_.shutdownFraction(), ImVec2(-1,0), orch_.shutdownLabel().c_str());
+         ImGui::EndChild();
+         ImGui::EndPopup();
+     }
 
- void HunterGuiApp::renderAboutView() {
-     ImGui::TextColored(ImVec4(0.30f, 0.55f, 0.90f, 1.0f), "Hunter");
-     ImGui::SameLine();
-     ImGui::TextDisabled("Censorship Hunter — Autonomous Proxy Discovery Engine");
-     ImGui::Spacing();
+     ImGui::End();
+ }
 
-     ImGui::Text("Application Version: v%s", constants::HUNTER_VERSION);
-     ImGui::SameLine();
-     ImGui::TextDisabled("GitHub: https://github.com/bahmany/censorship_hunter");
-     ImGui::Spacing();
+void HunterGuiApp::renderAboutView() {
+      ImGui::TextColored(kAccentBlue, "Hunter");
+      ImGui::SameLine();
+      ImGui::TextDisabled("Censorship Hunter — Autonomous Proxy Discovery Engine");
+      ImGui::Spacing();
+
+      ImGui::Text("Application Version: v%s", constants::HUNTER_VERSION);
+      ImGui::SameLine();
+      ImGui::TextDisabled("GitHub: https://github.com/bahmany/censorship_hunter");
+      ImGui::Spacing();
+      ImGui::Spacing();
+
+      renderUpdatePanel();
  }
 
   void HunterGuiApp::renderMainView() {
@@ -2674,49 +1357,56 @@ void HunterGuiApp::renderFrame() {
       bool active = client_status.active;
       bool hunting = orchestrator_running_.load();
 
-      // ─── STATUS STRIP ───
-      {
-          ImVec4 bullet_color;
-          if (active) {
-              bullet_color = ImVec4(0.3f, 0.8f, 0.3f, 1.0f); // green
-          } else if (hunting) {
-              bullet_color = ImVec4(0.9f, 0.8f, 0.2f, 1.0f); // yellow
-          } else {
-              bullet_color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f); // grey
-          }
+        // ─── STATUS STRIP ───
+        {
+            ImVec4 bullet_color;
+            if (active) {
+                bullet_color = kSuccessGreen; // green
+            } else if (hunting) {
+                bullet_color = ImVec4(0.9f, 0.8f, 0.2f, 1.0f); // yellow
+            } else {
+                bullet_color = ImVec4(0.7f, 0.7f, 0.7f, 1.0f); // grey
+            }
 
-          std::string left_text;
-          if (active) {
-              std::string remark = "-";
-              // Look up the remark in the snapshot
-              for (const auto& row : snapshot_) {
-                  if (row.rec.uri == client_status.uri) {
-                      remark = row.ps.empty() ? "-" : row.ps;
-                      break;
-                  }
-              }
-              left_text = std::string("● ") + remark + " @ 127.0.0.1:" + std::to_string(client_status.port);
-          } else {
-              left_text = hunting ? "● Hunting..." : "● Idle";
-          }
+           std::string left_text;
+           if (active) {
+               std::string remark = "-";
+               // Look up the remark in the snapshot
+               for (const auto& row : snapshot_) {
+                   if (row.rec.uri == client_status.uri) {
+                       remark = row.ps.empty() ? "-" : row.ps;
+                       break;
+                   }
+               }
+               left_text = std::string("● ") + remark + " @ 127.0.0.1:" + std::to_string(client_status.port);
+           } else {
+               left_text = hunting ? "● Hunting..." : "● Idle";
+           }
 
-          std::string hunt_status;
-          if (hunting) {
-              hunt_status = "hunting · " + std::to_string(cached_alive_) + " alive";
-          } else {
-              hunt_status = "idle";
-          }
+           std::string hunt_status;
+           if (hunting) {
+               hunt_status = "hunting · " + std::to_string(cached_alive_) + " alive";
+           } else {
+               hunt_status = "idle";
+           }
 
-          // Calculate positions for right-aligned text
-          float start_x = ImGui::GetCursorPosX();
-          ImGui::TextColored(bullet_color, "%s", left_text.c_str());
-          float left_width = ImGui::CalcTextSize(left_text.c_str()).x;
-          ImGui::SetCursorPosX(start_x + left_width);
-          float window_width = ImGui::GetWindowWidth();
-          float right_width = ImGui::CalcTextSize(hunt_status.c_str()).x;
-          ImGui::SetCursorPosX(window_width - right_width);
-          ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", hunt_status.c_str());
-      }
+           // Responsive status strip
+           if (viewport_width_ < kNarrowThreshold) {
+               // Narrow mode: stack vertically
+               ImGui::TextColored(bullet_color, "%s", left_text.c_str());
+               ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", hunt_status.c_str());
+           } else {
+               // Wide mode: side by side
+               float start_x = ImGui::GetCursorPosX();
+               ImGui::TextColored(bullet_color, "%s", left_text.c_str());
+               float left_width = ImGui::CalcTextSize(left_text.c_str()).x;
+               ImGui::SetCursorPosX(start_x + left_width);
+               float window_width = ImGui::GetWindowWidth();
+               float right_width = ImGui::CalcTextSize(hunt_status.c_str()).x;
+               ImGui::SetCursorPosX(window_width - right_width);
+               ImGui::TextColored(ImVec4(0.7f, 0.7f, 0.7f, 1.0f), "%s", hunt_status.c_str());
+           }
+        }
       ImGui::Spacing();
 
      // ─── PROFILE TABLE ───
@@ -2728,17 +1418,20 @@ void HunterGuiApp::renderFrame() {
      float table_height = ImGui::GetContentRegionAvail().y - 100.0f; // reserve for action row and collapsing headers
      if (table_height < 100.0f) table_height = 100.0f;
 
-     if (!ImGui::BeginTable("main_profiles", 4, flags, ImVec2(0, table_height))) {
-         ImGui::EndTable();
-     } else {
-         ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed |
-                                            ImGuiTableColumnFlags_DefaultSort |
-                                            ImGuiTableColumnFlags_PreferSortAscending, 70.0f);
-         ImGui::TableSetupColumn("CC", ImGuiTableColumnFlags_WidthFixed, 50.0f);
-         ImGui::TableSetupColumn("Remark", ImGuiTableColumnFlags_WidthStretch);
-         ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
-         ImGui::TableSetupScrollFreeze(0, 1);
-         ImGui::TableHeadersRow();
+      int num_columns = (viewport_width_ < kNarrowThreshold) ? 3 : 4;
+      if (!ImGui::BeginTable("main_profiles", num_columns, flags, ImVec2(0, table_height))) {
+          ImGui::EndTable();
+      } else {
+          ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed |
+                                             ImGuiTableColumnFlags_DefaultSort |
+                                             ImGuiTableColumnFlags_PreferSortAscending, 70.0f);
+          ImGui::TableSetupColumn("CC", ImGuiTableColumnFlags_WidthFixed, 50.0f);
+          ImGui::TableSetupColumn("Remark", ImGuiTableColumnFlags_WidthStretch);
+          if (viewport_width_ >= kNarrowThreshold) {
+              ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
+          }
+          ImGui::TableSetupScrollFreeze(0, 1);
+          ImGui::TableHeadersRow();
 
          // Sort a pointer view over snapshot_ by the clicked column; latency uses
          // the fresh client_latency_results_ map (untested/failed sort last).
@@ -2756,18 +1449,23 @@ void HunterGuiApp::renderFrame() {
                  auto it = lat_copy.find(p->rec.uri);
                  return (it != lat_copy.end() && it->second >= 0) ? it->second : INT_MAX;
              };
-             std::stable_sort(rows_sorted.begin(), rows_sorted.end(),
-                              [&](const UiRow* a, const UiRow* b) {
-                 int c = 0;
-                 switch (spec.ColumnIndex) {
-                     case 0: c = lat_of(a) - lat_of(b); break;
-                     case 1: c = countryCell(a->rec.exit_country).compare(countryCell(b->rec.exit_country)); break;
-                     case 2: c = a->ps.compare(b->ps); break;
-                     case 3: c = a->rec.uri.compare(b->rec.uri); break;
-                 }
-                 if (c == 0) return a->rec.endpoint_key < b->rec.endpoint_key;
-                 return spec.SortDirection == ImGuiSortDirection_Ascending ? c < 0 : c > 0;
-             });
+              std::stable_sort(rows_sorted.begin(), rows_sorted.end(),
+                               [&](const UiRow* a, const UiRow* b) {
+                  int c = 0;
+                  switch (spec.ColumnIndex) {
+                      case 0: c = lat_of(a) - lat_of(b); break;
+                      case 1: c = countryCell(a->rec.exit_country).compare(countryCell(b->rec.exit_country)); break;
+                      case 2: c = a->ps.compare(b->ps); break;
+                      case 3: 
+                          // URI column - only exists in wide mode
+                          if (viewport_width_ >= kNarrowThreshold) {
+                              c = a->rec.uri.compare(b->rec.uri);
+                          }
+                          break;
+                  }
+                  if (c == 0) return a->rec.endpoint_key < b->rec.endpoint_key;
+                  return spec.SortDirection == ImGuiSortDirection_Ascending ? c < 0 : c > 0;
+              });
          }
 
          ImGuiListClipper clipper;
@@ -2804,18 +1502,18 @@ void HunterGuiApp::renderFrame() {
                          else          showToast("Failed to connect to " + uri);
                      }).detach();
                  }
-                 if (active && r.uri == client_status.uri) {
-                     ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
-                         ImGui::ColorConvertFloat4ToU32(ImVec4(0.2f, 0.3f, 0.2f, 0.5f)));
-                 }
+                  if (active && r.uri == client_status.uri) {
+                      ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
+                          ImGui::ColorConvertFloat4ToU32(ImVec4(kSuccessGreen.x, kSuccessGreen.y, kSuccessGreen.z, 0.5f)));
+                  }
                  ImGui::SameLine();
                  if (lat_ms >= 0) {
                      ImGui::Text("%.0f ms", (float)lat_ms);
-                 } else if (lat_ms == -1) {
-                     ImGui::TextColored(ImVec4(0.9f, 0.5f, 0.5f, 1.0f), "failed");
-                 } else {
-                     ImGui::TextDisabled("...");
-                 }
+                  } else if (lat_ms == -1) {
+                      ImGui::TextColored(kDangerRed, "failed");
+                  } else {
+                      ImGui::TextDisabled("...");
+                  }
                  ImGui::PopID();
 
                  ImGui::TableNextColumn();
@@ -2828,128 +1526,120 @@ void HunterGuiApp::renderFrame() {
                      else ImGui::TextUnformatted(countryCell(r.exit_country).c_str());
                  }
 
-                 ImGui::TableNextColumn();
-                 ImGui::TextUnformatted(row.ps.empty() ? "-" : row.ps.c_str());
+                  ImGui::TableNextColumn();
+                  ImGui::TextUnformatted(row.ps.empty() ? "-" : row.ps.c_str());
 
-                 ImGui::TableNextColumn();
-                 // URI column (elided/truncated)
-                 std::string uri_display = r.uri;
-                 if (uri_display.length() > 50) {
-                     uri_display = uri_display.substr(0, 47) + "...";
-                 }
-                 ImGui::TextUnformatted(uri_display.c_str());
-                 if (ImGui::IsItemHovered()) {
-                     ImGui::SetTooltip("%s", r.uri.c_str());
-                 }
+                  // URI column (only in wide mode)
+                  if (viewport_width_ >= kNarrowThreshold) {
+                      ImGui::TableNextColumn();
+                      // URI column (elided/truncated)
+                      std::string uri_display = r.uri;
+                      if (uri_display.length() > 50) {
+                          uri_display = uri_display.substr(0, 47) + "...";
+                      }
+                      ImGui::TextUnformatted(uri_display.c_str());
+                      if (ImGui::IsItemHovered()) {
+                          ImGui::SetTooltip("%s", r.uri.c_str());
+                      }
+                  }
              }
          }
          clipper.End();
          ImGui::EndTable();
      }
 
-     // ─── ACTION ROW ───
-     ImGui::Spacing();
-     if (ImGui::Button(active ? "Disconnect" : "Connect")) {
-         if (active) {
-             std::thread([this]() {
-                 orch_.deactivateClientConfig();
-                 showToast("Disconnected");
-             }).detach();
-         } else {
-             // Connect selected profile or first selected?
-             // The task says: double-click connects it (in the table). For the Connect button, we should connect the selected profile or if none selected, do nothing?
-             // We'll connect the first selected profile, or if none, do nothing and show a toast.
-             if (!selected_uris_.empty()) {
-                 std::string uri = *selected_uris_.begin();
-                 std::thread([this, uri]() {
-                     int port = orch_.activateClientConfig(uri);
-                     if (port > 0) {
-                         showToast("Connected to " + uri + " on port " + std::to_string(port));
-                     } else {
-                         showToast("Failed to connect to " + uri);
-                     }
-                 }).detach();
-             } else {
-                 showToast("No profile selected");
-             }
-         }
-     }
-     ImGui::SameLine();
-     if (ImGui::Button("Test")) {
-         std::vector<std::string> uris_to_test;
-         if (selected_uris_.empty()) {
-             for (const auto& row : snapshot_) {
-                 uris_to_test.push_back(row.rec.uri);
-             }
-         } else {
-             for (const auto& uri : selected_uris_) {
-                 uris_to_test.push_back(uri);
-             }
-         }
-         if (!uris_to_test.empty()) {
-             std::thread([this, uris_to_test]() {
-                 network::ProxyTester tester;
-                 network::BatchTestOptions opts;
-                 opts.timeout_seconds = 5; // default timeout
-                 opts.bulk = false;
-                 auto results = tester.testBatch(uris_to_test, opts);
-                 {
-                     std::lock_guard<std::mutex> lock(client_latency_mu_);
-                     for (size_t i = 0; i < results.size(); ++i) {
-                         const auto& res = results[i];
-                         int latency_ms = -1;
-                         if (res.success && res.has_probe) {
-                             latency_ms = static_cast<int>(res.latency_ms);
-                         }
-                         client_latency_results_[uris_to_test[i]] = latency_ms;
-                     }
-                 }
-                 showToast("Latency test completed for " + std::to_string(uris_to_test.size()) + " configs");
-             }).detach();
-         } else {
-             showToast("No configs to test");
-         }
-     }
-     ImGui::SameLine();
-     if (ImGui::Button("Import▾")) {
-         ImGui::OpenPopup("##import_menu");
-     }
-     if (ImGui::BeginPopup("##import_menu")) {
-         if (ImGui::MenuItem("Share links (uri list)")) {
-             std::string clipboard = ImGui::GetClipboardText();
-             auto uris = utils::extractRawUrisFromText(clipboard);
-             if (!uris.empty()) {
-                 orch_.configDb()->addConfigsWithPriority(uris, "manual");
-                 showToast("Added " + std::to_string(uris.size()) + " configs from clipboard");
-             } else {
-                 showToast("No valid URIs found in clipboard");
-             }
-         }
-         ImGui::EndPopup();
-     }
-     ImGui::SameLine();
-     if (ImGui::Button(orchestrator_running_.load() ? "Stop" : "Start")) {
-         if (orchestrator_running_.load()) {
-             std::thread([this]() {
-                 stopOrchestrator();
-                 showToast("Stopped");
-             }).detach();
-         } else {
-             startOrchestrator();
-             showToast("Started");
-         }
-     }
-     ImGui::SameLine();
-     if (ImGui::Button("Copy v2rayN")) {
-         int us = 0;
-         std::string text = buildV2rayNTop20Text(us);
-         if (text.empty()) {
-             showToast("No live configs yet");
-         } else {
-             ImGui::SetClipboardText(text.c_str());
-             showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) + " configs for v2rayN (" + std::to_string(us) + " US)");
-         }
-     }
+      // ─── ACTION ROW ───
+      ImGui::Spacing();
+
+      // Single handler lambdas — layout (one row vs wrapped rows) is the only
+      // difference between narrow and wide modes.
+      auto do_connect = [&]() {
+          if (active) {
+              std::thread([this]() {
+                  orch_.deactivateClientConfig();
+                  showToast("Disconnected");
+              }).detach();
+          } else if (!selected_uris_.empty()) {
+              std::string uri = *selected_uris_.begin();
+              std::thread([this, uri]() {
+                  int port = orch_.activateClientConfig(uri);
+                  if (port > 0) showToast("Connected on port " + std::to_string(port));
+                  else          showToast("Failed to connect to " + uri);
+              }).detach();
+          } else {
+              showToast("No profile selected");
+          }
+      };
+      auto do_test = [&]() {
+          std::vector<std::string> uris_to_test;
+          if (selected_uris_.empty()) {
+              for (const auto& row : snapshot_) uris_to_test.push_back(row.rec.uri);
+          } else {
+              for (const auto& uri : selected_uris_) uris_to_test.push_back(uri);
+          }
+          if (uris_to_test.empty()) { showToast("No configs to test"); return; }
+          std::thread([this, uris_to_test]() {
+              network::ProxyTester tester;
+              network::BatchTestOptions opts;
+              opts.timeout_seconds = 5;
+              opts.bulk = false;
+              auto results = tester.testBatch(uris_to_test, opts);
+              {
+                  std::lock_guard<std::mutex> lock(client_latency_mu_);
+                  for (size_t i = 0; i < results.size(); ++i) {
+                      const auto& res = results[i];
+                      client_latency_results_[uris_to_test[i]] =
+                          (res.success && res.has_probe) ? static_cast<int>(res.latency_ms) : -1;
+                  }
+              }
+              showToast("Latency test completed for " + std::to_string(uris_to_test.size()) + " configs");
+          }).detach();
+      };
+       auto do_start_stop = [&]() {
+           if (orchestrator_running_.load()) {
+               requestShutdown();
+               showToast("Stopping...");
+           } else {
+               startOrchestrator();
+               showToast("Started");
+           }
+       };
+      auto do_copy_v2rayn = [&]() {
+          int us = 0;
+          std::string text = buildV2rayNTop20Text(us);
+          if (text.empty()) {
+              showToast("No live configs yet");
+          } else {
+              ImGui::SetClipboardText(text.c_str());
+              showToast("Copied " + std::to_string(std::count(text.begin(), text.end(), '\n')) +
+                        " configs for v2rayN (" + std::to_string(us) + " US)");
+          }
+      };
+
+      const bool narrow = viewport_width_ < kNarrowThreshold;
+      if (ImGui::Button(active ? "Disconnect" : "Connect")) do_connect();
+      ImGui::SameLine();
+      if (ImGui::Button("Test")) do_test();
+      ImGui::SameLine();
+      if (ImGui::Button("Import▾")) ImGui::OpenPopup("##import_menu");
+      if (!narrow) ImGui::SameLine();
+      if (ImGui::Button(orchestrator_running_.load() ? "Stop" : "Start")) do_start_stop();
+      ImGui::SameLine();
+      if (ImGui::Button("Copy v2rayN")) do_copy_v2rayn();
+
+      if (ImGui::BeginPopup("##import_menu")) {
+          if (ImGui::MenuItem("Share links (uri list)")) {
+              std::string clipboard = ImGui::GetClipboardText();
+              auto uris = utils::extractRawUrisFromText(clipboard);
+              if (!uris.empty()) {
+                  orch_.configDb()->addConfigsWithPriority(uris, "manual");
+                  showToast("Added " + std::to_string(uris.size()) + " configs from clipboard");
+              } else {
+                  showToast("No valid URIs found in clipboard");
+              }
+          }
+          ImGui::EndPopup();
+      }
 
      // ─── CollapsingHeader "Subscriptions" ───
      ImGui::Spacing();
@@ -3236,6 +1926,10 @@ bool attemptGlFallbackRelaunch() {
 } // namespace
 
 int HunterGuiApp::run() {
+    // Enable DPI awareness on Windows (fallback to classic DPI awareness if needed)
+    #ifdef _WIN32
+    SetProcessDPIAware(); // Must be called before any window is created
+    #endif
     glfwSetErrorCallback(glfwErrorCallback);
     if (!glfwInit()) {
 #ifdef _WIN32
@@ -3261,12 +1955,26 @@ int HunterGuiApp::run() {
 #endif
 
     glfwMakeContextCurrent(window_);
+
     glfwSwapInterval(1);
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    // ------------------------------------------------------------
+    // DPI scaling (desktop platforms only)
+    // ------------------------------------------------------------
+    #ifndef __ANDROID__
+    float scaleX = 1.0f, scaleY = 1.0f;
+    glfwGetWindowContentScale(window_, &scaleX, &scaleY);
+    float dpiScale = (scaleX + scaleY) * 0.5f; // average for non‑uniform scaling
+    // Apply to ImGui global font scale and style sizes.
+    io.FontGlobalScale *= dpiScale;
+    ImGui::GetStyle().ScaleAllSizes(dpiScale);
+
+    auto scaledSize = [&](float w, float h) { return ImVec2(w * dpiScale, h * dpiScale); };
+    #endif
 
     // Apply modern dark theme (will also be called in renderFrame, but
     // applying here ensures the first frame looks right)
@@ -3284,53 +1992,83 @@ int HunterGuiApp::run() {
     // Checks GitHub releases 10s after startup, then every 6 hours.
     core::SelfUpdateManager::instance().startAutoCheck(21600, 10);
 
-    while (!glfwWindowShouldClose(window_)) {
-        glfwPollEvents();
-
-        // A second launch of Hunter exits immediately after leaving a request
-        // here; surface this window instead of letting the user think nothing
-        // happened. Throttled — this touches the filesystem.
-        if (show_request_poll_) {
-            double now = glfwGetTime();
-            if (last_show_poll_ < 0.0 || now - last_show_poll_ >= kShowPollIntervalSeconds) {
-                last_show_poll_ = now;
-                if (show_request_poll_()) {
-                    glfwShowWindow(window_);
-                    glfwRestoreWindow(window_);   // un-minimize
-                    glfwFocusWindow(window_);
-                    glfwRequestWindowAttention(window_);
-                }
-            }
-        }
-
-        ImGui_ImplOpenGL2_NewFrame();
-        ImGui_ImplGlfw_NewFrame();
-        ImGui::NewFrame();
-
-        renderFrame();
-
-        ImGui::Render();
-        int display_w, display_h;
-        glfwGetFramebufferSize(window_, &display_w, &display_h);
-        glViewport(0, 0, display_w, display_h);
-        glClearColor(0.06f, 0.07f, 0.09f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT);
-        ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
-
-        glfwSwapBuffers(window_);
-    }
-
-     stopOrchestrator();
-     core::SelfUpdateManager::instance().stopAutoCheck();
+     while (!glfwWindowShouldClose(window_)) {
+         glfwPollEvents();
  
-     ImGui_ImplOpenGL2_Shutdown();
-     ImGui_ImplGlfw_Shutdown();
-     ImGui::DestroyContext();
+         // A second launch of Hunter exits immediately after leaving a request
+         // here; surface this window instead of letting the user think nothing
+         // happened. Throttled — this touches the filesystem.
+         if (show_request_poll_) {
+             double now = glfwGetTime();
+             if (last_show_poll_ < 0.0 || now - last_show_poll_ >= kShowPollIntervalSeconds) {
+                 last_show_poll_ = now;
+                 if (show_request_poll_()) {
+                     glfwShowWindow(window_);
+                     glfwRestoreWindow(window_);   // un-minimize
+                     glfwFocusWindow(window_);
+                     glfwRequestWindowAttention(window_);
+                 }
+             }
+         }
  
-     glfwDestroyWindow(window_);
-     glfwTerminate();
-     return 0;
- }
+         ImGui_ImplOpenGL2_NewFrame();
+         ImGui_ImplGlfw_NewFrame();
+         ImGui::NewFrame();
+ 
+         renderFrame();
+ 
+         ImGui::Render();
+         int display_w, display_h;
+         glfwGetFramebufferSize(window_, &display_w, &display_h);
+         glViewport(0, 0, display_w, display_h);
+         glClearColor(0.06f, 0.07f, 0.09f, 1.0f);
+         glClear(GL_COLOR_BUFFER_BIT);
+         ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+ 
+         glfwSwapBuffers(window_);
+     }
+ 
+      // Instead of blocking stop, request shutdown and wait for it to finish with overlay
+      requestShutdown();
+      auto shutdown_start = std::chrono::steady_clock::now();
+      while (shutdown_in_progress_.load()) {
+          // Render frames to show the overlay
+          glfwPollEvents();
+          ImGui_ImplOpenGL2_NewFrame();
+          ImGui_ImplGlfw_NewFrame();
+          ImGui::NewFrame();
+ 
+          renderFrame();
+ 
+          ImGui::Render();
+          int display_w, display_h;
+          glfwGetFramebufferSize(window_, &display_w, &display_h);
+          glViewport(0, 0, display_w, display_h);
+          glClearColor(0.06f, 0.07f, 0.09f, 1.0f);
+          glClear(GL_COLOR_BUFFER_BIT);
+          ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
+ 
+          glfwSwapBuffers(window_);
+ 
+          // Hard cap: if shutdown takes too long, force exit
+          if (std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - shutdown_start).count() >= 8) {
+              utils::LogRingBuffer::instance().push("shutdown timed out, forcing exit");
+              break;
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(16)); // ~60 FPS
+      }
+  
+      // Note: orchestrator stop already stopped the updater (we moved it into orchestrator stop)
+      // So no need to call stopAutoCheck() here.
+  
+      ImGui_ImplOpenGL2_Shutdown();
+      ImGui_ImplGlfw_Shutdown();
+      ImGui::DestroyContext();
+  
+      glfwDestroyWindow(window_);
+      glfwTerminate();
+      return 0;
+  }
 
  #endif // __ANDROID__
 
