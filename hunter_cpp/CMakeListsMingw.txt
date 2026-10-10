@@ -327,6 +327,7 @@ set(QR_SOURCES
 add_executable(hunter WIN32
     src/gui/main.cpp
     src/gui/app.cpp
+    src/gui/update_panel.cpp
     src/gui/single_instance.cpp
     ${IMGUI_SOURCES}
     ${QR_SOURCES}

@@ -297,8 +297,23 @@ void SelfUpdateManager::startAutoCheck(int check_interval_seconds, int startup_d
 
 void SelfUpdateManager::stopAutoCheck() {
     stop_flag_.store(true);
-    if (check_thread_.joinable()) {
-        check_thread_.join();
+    // Join via a detached waiter so shutdown never blocks longer than ~2s:
+    // the check thread may be inside a long synchronous download that only
+    // notices stop_flag_ between iterations. SelfUpdateManager is a singleton
+    // (lives for the process), so a detached waiter joining later is safe.
+    std::atomic<bool> done{false};
+    std::thread([this, &done] {
+        if (check_thread_.joinable()) check_thread_.join();
+        done.store(true);
+    }).detach();
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    if (!done.load()) {
+        // Give up waiting. Do NOT detach here — the waiter may be inside
+        // join(); detaching the same thread object concurrently is UB. The
+        // waiter keeps the join and finishes in the background.
     }
 }
 
@@ -434,12 +449,19 @@ std::string SelfUpdateManager::findPlatformAsset(const ReleaseInfo& info) const 
 }
 
 bool SelfUpdateManager::downloadFile(const std::string& url, const std::string& dest_path) {
+    // Clear any previous download error
+    last_download_error_.clear();
+
     CURL* curl = curl_easy_init();
-    if (!curl) return false;
+    if (!curl) {
+        last_download_error_ = "Failed to initialize CURL";
+        return false;
+    }
 
     std::ofstream file(dest_path, std::ios::binary);
     if (!file.is_open()) {
         curl_easy_cleanup(curl);
+        last_download_error_ = "Failed to open destination file for writing";
         return false;
     }
 
@@ -467,6 +489,7 @@ bool SelfUpdateManager::downloadFile(const std::string& url, const std::string& 
 
     if (res != CURLE_OK) {
         std::remove(dest_path.c_str());
+        last_download_error_ = curl_easy_strerror(res);
         return false;
     }
 
@@ -529,7 +552,7 @@ bool SelfUpdateManager::downloadAndApply() {
     std::string download_path = download_dir + "hunter_update_" + info.tag_name + "_" + filename;
 
     if (!downloadFile(asset_url, download_path)) {
-        setState(UpdateState::Failed, "Failed to download update");
+        setState(UpdateState::Failed, "Failed to download update: " + last_download_error_);
         return false;
     }
 

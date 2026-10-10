@@ -10,6 +10,7 @@
 #include "network/proxy_tester.h"
 #include "network/sys_proxy.h"
 #include "network/import_filter.h"
+#include "core/updater.h"
 
 #include <iostream>
 #include <iomanip>
@@ -461,16 +462,74 @@ void HunterOrchestrator::start() {
 }
 
 void HunterOrchestrator::stop() {
+    // Set stop flag so that workers and download thread can exit
     stop_requested_ = true;
     paused_ = false;
+
+    // Reset progress tracking
+    shutdown_step_.store(0);
+    shutdown_total_.store(3);
     {
+        std::lock_guard<std::mutex> lk(shutdown_label_mu_);
+        shutdown_label_ = "Stopping services";
+    }
+    shutdown_frac_.store(0.0f);
+
+    // Stage A: parallel group of four tasks
+    std::vector<std::thread> stageA_threads;
+
+    // a1. download thread: bounded join — a detached waiter owns the join,
+    // we wait on a done-flag ≤3s. On timeout we do NOT detach (the waiter
+    // may be inside join(); join+detach on the same object is UB) — the
+    // waiter finishes in the background while shutdown proceeds.
+    stageA_threads.emplace_back([this] {
         std::lock_guard<std::mutex> lk(download_thread_mutex_);
-        if (download_thread_.joinable()) {
-            download_thread_.join();
+        if (!download_thread_.joinable()) return;
+        std::atomic<bool> done{false};
+        std::thread([this, &done] {
+            if (download_thread_.joinable()) download_thread_.join();
+            done.store(true);
+        }).detach();
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
+        while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    });
+
+    // a2. proxy_server_manager_.stopAll() then waitAllStopped(3.0)
+    stageA_threads.emplace_back([this] {
+        proxy_server_manager_.stopAll();
+        proxy_server_manager_.waitAllStopped(3.0);
+    });
+
+    // a3. thread_manager_->stopAll() with timeout 3.0f (instead of default 15.0f)
+    stageA_threads.emplace_back([this] {
+        if (thread_manager_) {
+            thread_manager_->stopAll(3.0f);
+        }
+    });
+
+    // a4. core::SelfUpdateManager::instance().stopAutoCheck()
+    stageA_threads.emplace_back([this] {
+        core::SelfUpdateManager::instance().stopAutoCheck();
+    });
+
+    // Wait for all stage A tasks to complete
+    for (auto& t : stageA_threads) {
+        if (t.joinable()) {
+            t.join();
         }
     }
 
-    // Persist ConfigDB and live cache before shutdown
+    // Update progress after stage A
+    shutdown_step_.store(1);
+    {
+        std::lock_guard<std::mutex> lk(shutdown_label_mu_);
+        shutdown_label_ = "Saving data";
+    }
+    shutdown_frac_.store(static_cast<float>(shutdown_step_.load()) / static_cast<float>(shutdown_total_.load()));
+
+    // Stage B: save ConfigDB and live cache and found history
     if (config_db_) {
         try {
             int saved = config_db_->saveToDisk("runtime/HUNTER_config_db.tsv");
@@ -485,18 +544,28 @@ void HunterOrchestrator::stop() {
         } catch (...) {}
     }
 
-    // Stop cleanup manager periodic thread
+    // Stage C: cleanup and reset
+    shutdown_step_.store(2);
+    {
+        std::lock_guard<std::mutex> lk(shutdown_label_mu_);
+        shutdown_label_ = "Cleaning up";
+    }
+    shutdown_frac_.store(static_cast<float>(shutdown_step_.load()) / static_cast<float>(shutdown_total_.load()));
+
     if (cleanup_manager_) {
         cleanup_manager_->stopPeriodicCleanup();
     }
-
-    // Stop all running proxy servers (release ports 3110-3120)
-    proxy_server_manager_.stopAll();
-
     if (thread_manager_) {
-        thread_manager_->stopAll();
         thread_manager_.reset();
     }
+
+    // Finalize progress
+    shutdown_step_.store(3);
+    {
+        std::lock_guard<std::mutex> lk(shutdown_label_mu_);
+        shutdown_label_ = "Done";
+    }
+    shutdown_frac_.store(1.0f);
 }
 
 // ─── Pause / Resume ───

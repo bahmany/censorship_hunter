@@ -24,6 +24,7 @@ pkg_check_modules(GLFW REQUIRED glfw3)
 
 # Include directories
 include_directories(${CMAKE_SOURCE_DIR}/include)
+include_directories(${CMAKE_SOURCE_DIR}/../include)
 include_directories(${CMAKE_SOURCE_DIR})
 
 # ─── Embedded Engine Support ───
@@ -300,7 +301,9 @@ set(QR_SOURCES
 add_executable(hunter
     src/gui/main.cpp
     src/gui/app.cpp
+    src/gui/update_panel.cpp
     src/gui/single_instance.cpp
+    src/ui/theme.cpp
     ${IMGUI_SOURCES}
     ${QR_SOURCES}
 )

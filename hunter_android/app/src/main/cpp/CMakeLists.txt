@@ -158,6 +158,7 @@ set(JNI_SOURCES
     config_embed_android.cpp
     vpn_jni.cpp
     ${HUNTER_SRC_DIR}/src/gui/app.cpp
+    ${HUNTER_SRC_DIR}/src/gui/update_panel.cpp
 )
 
 set_source_files_properties(${HUNTER_SRC_DIR}/src/gui/app.cpp PROPERTIES

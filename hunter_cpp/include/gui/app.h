@@ -64,6 +64,7 @@ public:
     // that non-GLFW frontends (e.g. Android GLES3) can reuse the same UI.
     void startOrchestrator();
     void stopOrchestrator();
+    void requestShutdown();          // idempotent; kicks ONE detached shutdown thread
     void renderFrame();
     void pollProxyServers();
 
@@ -84,23 +85,10 @@ private:
 
     // ─── Modern UI rendering ───
     void applyModernTheme();
-    void renderTabBar();
-    void renderConfigsTab();
-    void renderFoundTab();
-    void renderSettingsTab();
-    void renderAboutTab();
-    void renderClientTab(); // New Client tab
     void renderStatusBar();
-    void renderStatusCard(const char* label, const char* value, const ImVec4& color, float width);
-    void renderUpdatePanel();
     void renderMainView();
     void renderAboutView();
 
-    // Legacy rendering (used within tabs)
-    void renderControls();
-    void renderFilterBar();
-    void renderTable();
-    void renderLogPanel();
     void renderQrPopup();
     void renderClearLivePopup();
     void clearAllLive();
@@ -115,6 +103,7 @@ private:
     void exportFoundHistory();
     void exportToFile(const std::string& content, const char* default_name);
     void showToast(const std::string& msg);
+    void stopOrchestratorBlocking(); // blocking shutdown with bounded orchestrator thread join
 
     HunterOrchestrator& orch_;
     GLFWwindow* window_ = nullptr;
@@ -123,6 +112,7 @@ private:
     std::atomic<bool> orchestrator_running_{false};
     std::atomic<bool> transitioning_{false};
     std::atomic<bool> rescan_in_progress_{false};
+    std::atomic<bool> shutdown_in_progress_{false};
 
     // ─── Live log display ───
     // We read directly from utils::LogRingBuffer (the orchestrator's own
@@ -239,15 +229,18 @@ private:
     View currentView_ = View::Main;
     bool theme_applied_ = false;
 
-    // ─── Client tab state ───
-    std::unordered_map<std::string, int> client_latency_results_; // uri -> latency in ms
-    std::mutex client_latency_mu_;                               // guarded by this
-    std::set<std::string> client_selected_uris_; // selected rows in client tab
-    std::string client_last_clicked_uri_;
-    bool client_show_subscription_modal_ = false;
-    char client_subscription_url_input_[256] = {0};
-    char client_subscription_remark_input_[256] = {0};
-    int client_latency_test_timeout_ = 5; // seconds
+     // ─── Client tab state ───
+     std::unordered_map<std::string, int> client_latency_results_; // uri -> latency in ms
+     std::mutex client_latency_mu_;                               // guarded by this
+     std::set<std::string> client_selected_uris_; // selected rows in client tab
+     std::string client_last_clicked_uri_;
+     bool client_show_subscription_modal_ = false;
+     char client_subscription_url_input_[256] = {0};
+     char client_subscription_remark_input_[256] = {0};
+     int client_latency_test_timeout_ = 5; // seconds
+     
+      // ─── Responsive design ───
+      float viewport_width_ = 0.0f;  // Cached viewport width for responsive layout
 
     // Remark editing state
     std::string editing_remark_uri_;

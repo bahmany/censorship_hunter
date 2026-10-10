@@ -139,6 +139,14 @@ public:
     std::vector<std::pair<std::string, float>>& lastGoodConfigs() { return last_good_configs_; }
     int cachedConfigCount() const;
 
+    // ─── Shutdown Progress ───
+    int   shutdownStep() const { return shutdown_step_.load(); }
+    float shutdownFraction() const { return shutdown_frac_.load(); }
+    std::string shutdownLabel() const {
+        std::lock_guard<std::mutex> lk(shutdown_label_mu_);
+        return shutdown_label_;
+    }
+
     // ─── Pause / Resume ───
     void pause();
     void resume();
@@ -209,6 +217,13 @@ private:
     std::mutex download_thread_mutex_;
     std::thread download_thread_;
 
+    // Shutdown progress reporting
+    std::atomic<int>    shutdown_step_{0};     // 0..N
+    std::atomic<int>    shutdown_total_{1};
+    std::atomic<float>  shutdown_frac_{0.0f};  // 0..1
+    mutable std::mutex          shutdown_label_mu_;
+    std::string         shutdown_label_;       // e.g. "Stopping workers"
+
     // Speed controls (atomic for thread-safe live updates)
     std::atomic<int> speed_max_threads_{10};
     std::atomic<int> speed_test_timeout_{5};
@@ -242,9 +257,9 @@ private:
     void initComponents();
     void onConfigFound(const std::string& uri, double now);
     void saveToFiles(const std::vector<BenchResult>& gold,
-                     const std::vector<BenchResult>& silver);
+                      const std::vector<BenchResult>& silver);
     int appendUniqueLines(const std::string& filepath,
-                          const std::vector<std::string>& lines);
+                           const std::vector<std::string>& lines);
     int computeAdaptiveSleep();
 };
 

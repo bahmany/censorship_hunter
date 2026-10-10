@@ -181,6 +181,7 @@ private:
     std::mutex callback_mutex_;
 
     std::string downloaded_file_path_;
+    std::string last_download_error_;
 };
 
 } // namespace core
