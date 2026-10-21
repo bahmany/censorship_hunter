@@ -1189,8 +1189,33 @@ void HunterGuiApp::applyModernTheme() {
       // Drag-drop target
       colors[ImGuiCol_DragDropTarget]  = ImVec4(kAccentBlue.x, kAccentBlue.y, kAccentBlue.z, 0.90f);
 
+     // Scale every metric by the current display content scale. The base
+     // values above are design pixels and are rewritten first on every call,
+     // so this is idempotent across DPI changes (never compounds).
+     style.ScaleAllSizes(ui_scale_);
+
      theme_applied_ = true;
  }
+
+ImVec2 HunterGuiApp::scaledSize(float w, float h) const {
+    return ImVec2(w * ui_scale_, h * ui_scale_);
+}
+
+void HunterGuiApp::refreshDpiScale() {
+#ifndef __ANDROID__
+    if (!window_) return;
+    float sx = 1.0f, sy = 1.0f;
+    glfwGetWindowContentScale(window_, &sx, &sy);
+    float s = (sx + sy) * 0.5f;
+    if (s <= 0.0f) s = 1.0f;
+    if (s != ui_scale_) {
+        ui_scale_ = s;
+        ImGui::GetIO().FontGlobalScale = ui_scale_;
+        theme_applied_ = false;   // rewrite base metrics, then re-scale on top
+        applyModernTheme();
+    }
+#endif
+}
 
 void HunterGuiApp::renderStatusBar() {
     // Bottom status bar with quick stats
@@ -1262,6 +1287,7 @@ void HunterGuiApp::renderStatusBar() {
 
 void HunterGuiApp::renderFrame() {
      refreshSnapshotIfDue();
+     refreshDpiScale();   // picks up monitor-to-monitor DPI moves (no-op on Android)
 
      if (!theme_applied_) applyModernTheme();
 
@@ -1323,10 +1349,11 @@ void HunterGuiApp::renderFrame() {
      if (shutdown_in_progress_.load()) {
          ImGui::OpenPopup("ShutdownOverlay");
      }
-     if (ImGui::BeginPopupModal("ShutdownOverlay", nullptr, ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
-         // Make it fullscreen
-         ImGui::SetNextWindowPos(ImVec2(0,0), ImGuiCond_Always);
-         ImGui::SetNextWindowSize(scaledSize(ImGui::GetIO().DisplaySize.x, ImGui::GetIO().DisplaySize.y), ImGuiCond_Always);
+     // Fullscreen: DisplaySize is already in real UI coordinates — must NOT
+     // be passed through scaledSize() (that would double-apply the factor).
+     ImGui::SetNextWindowPos(ImVec2(0, 0), ImGuiCond_Always);
+     ImGui::SetNextWindowSize(ImGui::GetIO().DisplaySize, ImGuiCond_Always);
+     if (ImGui::BeginPopupModal("ShutdownOverlay", nullptr, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize)) {
          ImGui::BeginChild("##shutdown_child", ImVec2(0,0), true);
          ImGui::Text("Shutting down...");
          ImGui::ProgressBar(orch_.shutdownFraction(), ImVec2(-1,0), orch_.shutdownLabel().c_str());
@@ -1965,15 +1992,15 @@ int HunterGuiApp::run() {
     // ------------------------------------------------------------
     // DPI scaling (desktop platforms only)
     // ------------------------------------------------------------
+    // Style metrics are scaled inside applyModernTheme() — it writes base
+    // design-pixel values first, then applies ScaleAllSizes(ui_scale_) on
+    // top, so re-applying after a DPI change never compounds the factor.
     #ifndef __ANDROID__
     float scaleX = 1.0f, scaleY = 1.0f;
     glfwGetWindowContentScale(window_, &scaleX, &scaleY);
-    float dpiScale = (scaleX + scaleY) * 0.5f; // average for non‑uniform scaling
-    // Apply to ImGui global font scale and style sizes.
-    io.FontGlobalScale *= dpiScale;
-    ImGui::GetStyle().ScaleAllSizes(dpiScale);
-
-    auto scaledSize = [&](float w, float h) { return ImVec2(w * dpiScale, h * dpiScale); };
+    ui_scale_ = (scaleX + scaleY) * 0.5f; // average for non-uniform scaling
+    if (ui_scale_ <= 0.0f) ui_scale_ = 1.0f;
+    io.FontGlobalScale = ui_scale_;
     #endif
 
     // Apply modern dark theme (will also be called in renderFrame, but

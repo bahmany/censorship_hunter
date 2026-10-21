@@ -20,6 +20,7 @@
 #include "core/utils.h"  // for utils::LogRingBuffer
 
 struct GLFWwindow;
+struct ImVec2;
 struct ImVec4;
 
 namespace hunter {
@@ -241,6 +242,11 @@ private:
      
       // ─── Responsive design ───
       float viewport_width_ = 0.0f;  // Cached viewport width for responsive layout
+
+    // ─── DPI / display scaling ───
+    float ui_scale_ = 1.0f;          // GLFW content scale; polled per frame for per-monitor changes
+    void refreshDpiScale();          // re-reads content scale; reapplies font + style scaling on change
+    ImVec2 scaledSize(float w, float h) const;  // design px -> ui_scale_-scaled px (explicit sizes only)
 
     // Remark editing state
     std::string editing_remark_uri_;
