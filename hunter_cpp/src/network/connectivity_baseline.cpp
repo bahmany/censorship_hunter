@@ -1,4 +1,5 @@
 #include "network/connectivity_baseline.h"
+#include <iostream>
 
 #include <chrono>
 #include <cstdlib>
@@ -134,7 +135,20 @@ BaselineSnapshot ConnectivityBaseline::measure() {
     uint64_t gen = generation();
     TrafficProbe probe(transport_, cfg_, clock_);
     auto once = [&](bool* a, bool* b) {
-        auto fb = std::async(std::launch::async, [&] { TraceInfo ti; return probe.checkB(0, &ti); });
+        auto fb = std::async(std::launch::async, [&] {
+            TraceInfo ti;
+            try {
+                return probe.checkB(0, &ti);
+            } catch (const std::exception& e) {
+                std::cerr << "[Thread] baselineCheckB exception: " << e.what() << std::endl;
+                CheckOutcome o; o.status = CheckStatus::Fail; o.detail = "baseline check threw";
+                return o;
+            } catch (...) {
+                std::cerr << "[Thread] baselineCheckB unknown exception" << std::endl;
+                CheckOutcome o; o.status = CheckStatus::Fail; o.detail = "baseline check threw";
+                return o;
+            }
+        });
         CheckOutcome ca = probe.checkA(0);
         CheckOutcome cb = fb.get();
         *a = ca.status == CheckStatus::Pass;

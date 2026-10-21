@@ -40,6 +40,7 @@ set(CORE_SOURCES
     ${HUNTER_SRC_DIR}/src/core/config.cpp
     ${HUNTER_SRC_DIR}/src/core/models.cpp
     ${HUNTER_SRC_DIR}/src/core/utils.cpp
+    ${HUNTER_SRC_DIR}/src/core/client_export.cpp
     ${HUNTER_SRC_DIR}/src/core/task_manager.cpp
     ${HUNTER_SRC_DIR}/src/core/seed_data.cpp
     ${HUNTER_SRC_DIR}/src/core/engine_embed.cpp

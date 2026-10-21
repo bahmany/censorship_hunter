@@ -190,6 +190,7 @@ set(CORE_SOURCES
     src/core/health_score.cpp
     src/core/db_format.cpp
     src/core/utils.cpp
+    src/core/client_export.cpp
     src/core/task_manager.cpp
     src/core/seed_data.cpp
     src/core/engine_embed.cpp

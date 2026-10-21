@@ -1,4 +1,5 @@
 #include "proxy/health_monitor.h"
+#include <iostream>
 
 #include <algorithm>
 #include <chrono>
@@ -44,16 +45,22 @@ const char* eventKindName(EventKind k) {
 ThreadPoolExecutor::ThreadPoolExecutor(size_t threads) : st_(std::make_shared<State>()) {
     for (size_t i = 0; i < std::max<size_t>(1, threads); i++) {
         th_.emplace_back([st = st_] {
-            for (;;) {
-                std::function<void()> fn;
-                {
-                    std::unique_lock<std::mutex> lk(st->mu);
-                    st->cv.wait(lk, [&] { return st->stop || !st->q.empty(); });
-                    if (st->q.empty()) return;   // stop && drained
-                    fn = std::move(st->q.front());
-                    st->q.pop_front();
+            try {
+                for (;;) {
+                    std::function<void()> fn;
+                    {
+                        std::unique_lock<std::mutex> lk(st->mu);
+                        st->cv.wait(lk, [&] { return st->stop || !st->q.empty(); });
+                        if (st->q.empty()) return;   // stop && drained
+                        fn = std::move(st->q.front());
+                        st->q.pop_front();
+                    }
+                    try { fn(); } catch (...) {}
                 }
-                try { fn(); } catch (...) {}
+            } catch (const std::exception& e) {
+                std::cerr << "[Thread] poolWorker exception: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[Thread] poolWorker unknown exception" << std::endl;
             }
         });
     }

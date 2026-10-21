@@ -2,10 +2,14 @@
 #include "core/updater.h"
 #include "core/constants.h"
 #include "imgui.h"
+#include "ui/theme.hpp"
 
 #include <thread>
 
 namespace hunter { namespace gui {
+
+using UI::Theme::Colors;
+using UI::Theme::Spacing;
 
 void renderUpdatePanel() {
     using namespace hunter::core;
@@ -16,45 +20,35 @@ void renderUpdatePanel() {
     float progress = updater.downloadProgress();
     ReleaseInfo release = updater.latestRelease();
 
-    // Begin a child window for the panel with some padding and background
     ImGui::BeginChild("##update_panel", ImVec2(0, 0), false);
     {
-        // Current version line
         ImGui::Text("Installed: v%s", constants::HUNTER_VERSION);
         ImGui::Separator();
+        ImGui::Spacing();
 
-        // Status and action area
         switch (state) {
         case SelfUpdateManager::UpdateState::Idle:
         case SelfUpdateManager::UpdateState::Checking: {
-            ImGui::Text("Checking for updates...");
-            // Simple spinner: we can use an animated text or a progress bar in indeterminate mode
-            // We'll use a rotating text for simplicity
+            ImGui::TextDisabled("Checking for updates...");
             static int spinner_counter = 0;
             const char* spinner_chars = "|/-\\";
             ImGui::SameLine();
-            ImGui::Text("%c", spinner_chars[spinner_counter / 8 % 4]);
+            ImGui::TextColored(Colors::AccentBlue, "%c", spinner_chars[spinner_counter / 8 % 4]);
             spinner_counter++;
 
-            // Check again button (small text button)
             if (ImGui::SmallButton("Check again")) {
-                std::thread([&updater]() {
-                    updater.checkForUpdate();
-                }).detach();
+                std::thread([&updater]() { updater.checkForUpdate(); }).detach();
             }
             break;
         }
         case SelfUpdateManager::UpdateState::UpToDate: {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "You're up to date");
+            ImGui::TextColored(Colors::SuccessGreen, "You're up to date");
             if (!release.tag_name.empty()) {
                 ImGui::SameLine();
-                ImGui::Text("(v%s)", release.tag_name.c_str());
+                ImGui::TextDisabled("(v%s)", release.tag_name.c_str());
             }
-            // Check again button
             if (ImGui::SmallButton("Check again")) {
-                std::thread([&updater]() {
-                    updater.checkForUpdate();
-                }).detach();
+                std::thread([&updater]() { updater.checkForUpdate(); }).detach();
             }
             break;
         }
@@ -62,8 +56,6 @@ void renderUpdatePanel() {
             ImGui::Text("Update available: %s", release.tag_name.c_str());
             ImGui::SameLine();
             if (ImGui::SmallButton("View release notes")) {
-                // We'll implement a simple popup or collapsible header for release notes
-                // For now, we just open a popup
                 ImGui::OpenPopup("release_notes");
             }
             if (ImGui::BeginPopup("release_notes")) {
@@ -71,11 +63,8 @@ void renderUpdatePanel() {
                 ImGui::EndPopup();
             }
             ImGui::SameLine();
-            // Update Now button (primary)
-            if (ImGui::Button("Update Now")) {
-                std::thread([&updater]() {
-                    updater.downloadAndApply();
-                }).detach();
+            if (ImGui::Button("Update Now", ImVec2(120 * ImGui::GetIO().FontGlobalScale, 0))) {
+                std::thread([&updater]() { updater.downloadAndApply(); }).detach();
             }
             break;
         }
@@ -83,31 +72,25 @@ void renderUpdatePanel() {
             ImGui::ProgressBar(progress, ImVec2(-1.0f, 0.0f), "");
             ImGui::SameLine();
             ImGui::Text("%.0f%%", progress * 100.0f);
-            ImGui::TextUnformatted(status.c_str());
+            ImGui::TextDisabled("%s", status.c_str());
             break;
         }
         case SelfUpdateManager::UpdateState::DownloadComplete:
         case SelfUpdateManager::UpdateState::Applying: {
-            ImGui::TextUnformatted("Installing...");
+            ImGui::TextColored(Colors::WarnAmber, "Installing...");
             ImGui::SameLine();
-            ImGui::TextUnformatted(status.c_str());
+            ImGui::TextDisabled("%s", status.c_str());
             break;
         }
         case SelfUpdateManager::UpdateState::UpdateComplete: {
-            ImGui::TextColored(ImVec4(0.0f, 1.0f, 0.0f, 1.0f), "Update installed — restart required");
-            // Note: The manager already handles relaunch, so we just inform the user.
+            ImGui::TextColored(Colors::SuccessGreen, "Update installed — restart required");
             break;
         }
         case SelfUpdateManager::UpdateState::Failed: {
-            // Check if the status message indicates a network error
             bool is_network_error = false;
-            const std::string& msg = status;
-            // Convert to lowercase for case-insensitive check
             std::string lower_msg;
-            lower_msg.reserve(msg.size());
-            for (char c : msg) {
-                lower_msg += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-            }
+            lower_msg.reserve(status.size());
+            for (char c : status) lower_msg += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
             if (lower_msg.find("network") != std::string::npos ||
                 lower_msg.find("connect") != std::string::npos ||
                 lower_msg.find("resolve") != std::string::npos ||
@@ -117,29 +100,23 @@ void renderUpdatePanel() {
             }
 
             if (is_network_error) {
-                ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.0f, 1.0f), "Offline / update server unreachable");
+                ImGui::TextColored(Colors::WarnAmber, "Offline / update server unreachable");
             } else {
-                ImGui::TextColored(ImVec4(1.0f, 0.0f, 0.0f, 1.0f), "Update failed");
+                ImGui::TextColored(Colors::DangerRed, "Update failed");
             }
-            ImGui::TextUnformatted(status.c_str());
+            ImGui::TextDisabled("%s", status.c_str());
 
-            // Retry button
             if (ImGui::SmallButton("Retry")) {
-                std::thread([&updater]() {
-                    updater.checkForUpdate();
-                }).detach();
+                std::thread([&updater]() { updater.checkForUpdate(); }).detach();
             }
-            // Check again button (small text button)
             ImGui::SameLine();
             if (ImGui::SmallButton("Check again")) {
-                std::thread([&updater]() {
-                    updater.checkForUpdate();
-                }).detach();
+                std::thread([&updater]() { updater.checkForUpdate(); }).detach();
             }
             break;
         }
         default:
-            ImGui::TextUnformatted("Unknown state");
+            ImGui::TextDisabled("Unknown state");
             break;
         }
     }

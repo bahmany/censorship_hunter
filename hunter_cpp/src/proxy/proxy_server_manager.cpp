@@ -1,4 +1,5 @@
 #include "proxy/proxy_server_manager.h"
+#include <iostream>
 #include "proxy/process_runner.h"
 #include "proxy/xray_manager.h"
 #include "network/uri_parser.h"
@@ -104,7 +105,15 @@ void ProxyServerManager::init() {
         };
     }
     if (!deps_.port_free) deps_.port_free = [](int p) { return utils::isPortFree(p); };
-    if (deps_.start_watchdog) watchdog_ = std::thread([this] { watchdogLoop(); });
+    if (deps_.start_watchdog) watchdog_ = std::thread([this] {
+        try {
+            watchdogLoop();
+        } catch (const std::exception& e) {
+            std::cerr << "[Thread] watchdogLoop exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Thread] watchdogLoop unknown exception" << std::endl;
+        }
+    });
 }
 
 ProxyServerManager::~ProxyServerManager() {

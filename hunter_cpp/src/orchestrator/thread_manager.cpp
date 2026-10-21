@@ -246,81 +246,87 @@ bool BaseWorker::sleepInterruptible(std::chrono::milliseconds duration) {
 }
 
 void BaseWorker::runLoop() {
-    utils::LogRingBuffer::instance().push("[" + name + "] Thread started");
-    while (!stop_.load()) {
-        while (!stop_.load() && pause_callback_ && pause_callback_()) {
+    try {
+        utils::LogRingBuffer::instance().push("[" + name + "] Thread started");
+        while (!stop_.load()) {
+            while (!stop_.load() && pause_callback_ && pause_callback_()) {
+                {
+                    std::lock_guard<std::mutex> lock(status_mutex_);
+                    status_.state = WorkerState::SLEEPING;
+                    status_.next_run_in = 0.0;
+                    status_.extra["paused"] = "true";
+                }
+                sleepInterruptible(std::chrono::milliseconds(250));
+            }
+            {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                status_.extra["paused"] = "false";
+            }
+            {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                status_.state = WorkerState::RUNNING;
+            }
+            try {
+                execute();
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                status_.runs++;
+                status_.last_run = utils::nowTimestamp();
+                status_.last_error.clear();
+            } catch (const std::exception& e) {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                status_.errors++;
+                status_.last_error = e.what();
+                status_.state = WorkerState::WORKER_ERROR;
+                std::cerr << "[" << name << "] Error: " << e.what() << std::endl;
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(status_mutex_);
+                status_.errors++;
+                status_.last_error = "unknown non-std exception";
+                status_.state = WorkerState::WORKER_ERROR;
+                std::cerr << "[" << name << "] Error: unknown non-std exception" << std::endl;
+            }
+
+            if (stop_.load()) break;
+
+            // Sleep with countdown
             {
                 std::lock_guard<std::mutex> lock(status_mutex_);
                 status_.state = WorkerState::SLEEPING;
-                status_.next_run_in = 0.0;
-                status_.extra["paused"] = "true";
             }
-            sleepInterruptible(std::chrono::milliseconds(250));
-        }
-        {
-            std::lock_guard<std::mutex> lock(status_mutex_);
-            status_.extra["paused"] = "false";
-        }
-        {
-            std::lock_guard<std::mutex> lock(status_mutex_);
-            status_.state = WorkerState::RUNNING;
-        }
-        try {
-            execute();
-            std::lock_guard<std::mutex> lock(status_mutex_);
-            status_.runs++;
-            status_.last_run = utils::nowTimestamp();
-            status_.last_error.clear();
-        } catch (const std::exception& e) {
-            std::lock_guard<std::mutex> lock(status_mutex_);
-            status_.errors++;
-            status_.last_error = e.what();
-            status_.state = WorkerState::WORKER_ERROR;
-            std::cerr << "[" << name << "] Error: " << e.what() << std::endl;
-        } catch (...) {
-            std::lock_guard<std::mutex> lock(status_mutex_);
-            status_.errors++;
-            status_.last_error = "unknown non-std exception";
-            status_.state = WorkerState::WORKER_ERROR;
-            std::cerr << "[" << name << "] Error: unknown non-std exception" << std::endl;
-        }
-
-        if (stop_.load()) break;
-
-        // Sleep with countdown
-        {
-            std::lock_guard<std::mutex> lock(status_mutex_);
-            status_.state = WorkerState::SLEEPING;
-        }
-        int remaining = interval_seconds;
-        while (remaining > 0 && !stop_.load()) {
-            if (pause_callback_ && pause_callback_()) {
-                while (!stop_.load() && pause_callback_ && pause_callback_()) {
+            int remaining = interval_seconds;
+            while (remaining > 0 && !stop_.load()) {
+                if (pause_callback_ && pause_callback_()) {
+                    while (!stop_.load() && pause_callback_ && pause_callback_()) {
+                        {
+                            std::lock_guard<std::mutex> lock(status_mutex_);
+                            status_.state = WorkerState::SLEEPING;
+                            status_.next_run_in = 0.0;
+                            status_.extra["paused"] = "true";
+                        }
+                        sleepInterruptible(std::chrono::milliseconds(250));
+                    }
                     {
                         std::lock_guard<std::mutex> lock(status_mutex_);
-                        status_.state = WorkerState::SLEEPING;
-                        status_.next_run_in = 0.0;
-                        status_.extra["paused"] = "true";
+                        status_.extra["paused"] = "false";
                     }
-                    sleepInterruptible(std::chrono::milliseconds(250));
                 }
                 {
                     std::lock_guard<std::mutex> lock(status_mutex_);
-                    status_.extra["paused"] = "false";
+                    status_.next_run_in = (double)remaining;
                 }
+                int sleep_ms = std::min(remaining, 1) * 1000;
+                sleepInterruptible(std::chrono::milliseconds(sleep_ms));
+                remaining -= 1;
             }
-            {
-                std::lock_guard<std::mutex> lock(status_mutex_);
-                status_.next_run_in = (double)remaining;
-            }
-            int sleep_ms = std::min(remaining, 1) * 1000;
-            sleepInterruptible(std::chrono::milliseconds(sleep_ms));
-            remaining -= 1;
         }
-    }
-    {
-        std::lock_guard<std::mutex> lock(status_mutex_);
-        status_.state = WorkerState::STOPPED;
+        {
+            std::lock_guard<std::mutex> lock(status_mutex_);
+            status_.state = WorkerState::STOPPED;
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "[Thread] runLoop exception: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[Thread] runLoop unknown exception" << std::endl;
     }
 }
 

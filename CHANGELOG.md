@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-10-21
+
+### Changed
+- **Redesigned UI**: new minimal dark theme (single accent colour, rounded
+  surfaces, consistent spacing). Top bar with status pill + Start/Stop,
+  four stat cards (Alive / Tested / Found / Proxy), one action bar with a
+  single primary button, and a clean sortable config table. Advanced
+  sections (Subscriptions, Found history) are collapsed by default.
+  Narrow screens (Android) stack the layout vertically.
+
+### Fixed
+- **Copying/exporting configs into other clients** (v2rayN on Windows,
+  v2rayNG, NekoBox, Hiddify): every copy, export, "Copy v2rayN" and QR path
+  now goes through one normalizer (`core/client_export`). It repairs links
+  scraped from Telegram/HTML (stray spaces before `#`, raw spaces/emoji in
+  `path=`, `&amp;`), maps `hy2://`→`hysteria2://` and `socks5://`→`socks://`,
+  re-encodes url-safe/unpadded vmess, drops truncated vmess and schemes
+  v2rayN cannot import, removes duplicates, adds a remark when missing, and
+  uses CRLF line endings on Windows. Export files no longer start with
+  `#` comment lines that clients rejected.
+- **Random crashes / sudden exits**: exceptions escaping background
+  threads no longer terminate the app; SIGPIPE is ignored on Linux/Android;
+  any fatal error is now written to `runtime/hunter_crash.log`.
+- Main table no longer crashes when it is scrolled out of view.
+- Version bump: Android `versionName` 2.4.0 (`versionCode` 6).
+
 ## [1.8.0] - 2026-10-09
 
 ### Changed

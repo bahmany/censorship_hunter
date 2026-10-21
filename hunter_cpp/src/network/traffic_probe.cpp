@@ -1,4 +1,5 @@
 #include "network/traffic_probe.h"
+#include <iostream>
 
 #include <algorithm>
 #include <cctype>
@@ -353,7 +354,19 @@ RawProbe TrafficProbe::run(int port, bool with_bulk) const {
     p.port = port;
     p.started_at = clock_();
     TraceInfo info;
-    auto fb = std::async(std::launch::async, [this, port, &info]() { return checkB(port, &info); });
+    auto fb = std::async(std::launch::async, [this, port, &info]() {
+        try {
+            return checkB(port, &info);
+        } catch (const std::exception& e) {
+            std::cerr << "[Thread] trafficCheckB exception: " << e.what() << std::endl;
+            CheckOutcome o; o.status = CheckStatus::Fail; o.detail = "checkB threw";
+            return o;
+        } catch (...) {
+            std::cerr << "[Thread] trafficCheckB unknown exception" << std::endl;
+            CheckOutcome o; o.status = CheckStatus::Fail; o.detail = "checkB threw";
+            return o;
+        }
+    });
     p.a = checkA(port);
     p.b = fb.get();
     if (p.b.status == CheckStatus::Pass) { p.exit_ip = info.ip; p.exit_country = info.loc; }

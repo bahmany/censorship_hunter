@@ -310,14 +310,20 @@ void RuntimeCleanupManager::stopPeriodicCleanup() {
 }
 
 void RuntimeCleanupManager::periodicLoop() {
-    while (!stop_flag_.load()) {
-        for (int i = 0; i < interval_seconds_ && !stop_flag_.load(); ++i) {
-            std::this_thread::sleep_for(std::chrono::seconds(1));
+    try {
+        while (!stop_flag_.load()) {
+            for (int i = 0; i < interval_seconds_ && !stop_flag_.load(); ++i) {
+                std::this_thread::sleep_for(std::chrono::seconds(1));
+            }
+            if (stop_flag_.load()) break;
+            try {
+                runCleanup();
+            } catch (...) {}
         }
-        if (stop_flag_.load()) break;
-        try {
-            runCleanup();
-        } catch (...) {}
+    } catch (const std::exception& e) {
+        std::cerr << "[Thread] periodicLoop exception: " << e.what() << std::endl;
+    } catch (...) {
+        std::cerr << "[Thread] periodicLoop unknown exception" << std::endl;
     }
 }
 

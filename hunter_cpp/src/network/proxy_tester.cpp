@@ -351,16 +351,22 @@ struct ProxyTester::Impl {
             Item* it = group[i];
             int port = ports[i];
             fs.push_back(std::async(std::launch::async, [this, it, port, &sem, &alive]() {
-                BatchSlotGuard slot(sem);
                 try {
-                    it->raw = t.probe_->run(port, opts.bulk);
-                    it->probed = true;
-                    if (alive && !alive()) it->raw.engine_died = true;   // crash during the round
-                    captureEvidence(*it);
+                    BatchSlotGuard slot(sem);
+                    try {
+                        it->raw = t.probe_->run(port, opts.bulk);
+                        it->probed = true;
+                        if (alive && !alive()) it->raw.engine_died = true;   // crash during the round
+                        captureEvidence(*it);
+                    } catch (const std::exception& e) {
+                        terminalFail(*it, ProbeOutcome::EngineError, std::string("probe exception: ") + e.what());
+                    } catch (...) {
+                        terminalFail(*it, ProbeOutcome::EngineError, "probe exception");
+                    }
                 } catch (const std::exception& e) {
-                    terminalFail(*it, ProbeOutcome::EngineError, std::string("probe exception: ") + e.what());
+                    std::cerr << "[Thread] probeGroup exception: " << e.what() << std::endl;
                 } catch (...) {
-                    terminalFail(*it, ProbeOutcome::EngineError, "probe exception");
+                    std::cerr << "[Thread] probeGroup unknown exception" << std::endl;
                 }
             }));
         }
@@ -523,7 +529,15 @@ struct ProxyTester::Impl {
         }
 
         // Shared xray process (bisected) concurrently with isolated sing-box/mihomo workers.
-        auto xfut = std::async(std::launch::async, [&] { runXrayTop(xray_g); });
+        auto xfut = std::async(std::launch::async, [&] {
+            try {
+                runXrayTop(xray_g);
+            } catch (const std::exception& e) {
+                std::cerr << "[Thread] xrayTop exception: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[Thread] xrayTop unknown exception" << std::endl;
+            }
+        });
         {
             std::atomic<size_t> next{0};
             int workers = std::max(1, std::min<int>((int)other_g.size(), std::min(8, getMaxConcurrentTests())));

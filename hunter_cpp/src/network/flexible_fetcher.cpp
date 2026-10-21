@@ -1,4 +1,5 @@
 #include "network/flexible_fetcher.h"
+#include <iostream>
 #include "core/utils.h"
 #include "core/constants.h"
 #include "core/task_manager.h"
@@ -91,7 +92,17 @@ std::vector<FetchResult> FlexibleFetcher::fetchHttpSourcesParallel(
             FetchResult r;
             r.source = m.name;
             r.error = "Circuit breaker open";
-            futures.push_back(std::async(std::launch::deferred, [r]() { return r; }));
+            futures.push_back(std::async(std::launch::deferred, [r]() {
+                try {
+                    return r;
+                } catch (const std::exception& e) {
+                    std::cerr << "[Thread] fetchDeferred exception: " << e.what() << std::endl;
+                    return r;
+                } catch (...) {
+                    std::cerr << "[Thread] fetchDeferred unknown exception" << std::endl;
+                    return r;
+                }
+            }));
             continue;
         }
 

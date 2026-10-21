@@ -1,6 +1,8 @@
 #include <csignal>
 #include <cstdio>
 #include <ctime>
+#include <cstdlib>
+#include <exception>
 #include <filesystem>
 #include <string>
 
@@ -23,6 +25,57 @@ void handleSignal(int) {
     if (g_app) g_app->requestClose();
 }
 
+// Local wall-clock stamp for the crash log (portable localtime_s/localtime_r).
+std::string crashTimestamp() {
+    time_t now = time(nullptr);
+    struct tm tmv;
+#ifdef _WIN32
+    localtime_s(&tmv, &now);
+#else
+    localtime_r(&now, &tmv);
+#endif
+    char buf[64];
+    if (strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tmv) == 0) return std::string("unknown-time");
+    return std::string(buf);
+}
+
+// Append one line to runtime/hunter_crash.log. Must never throw or abort:
+// it is called from the crash paths themselves.
+void appendCrashLog(const std::string& line) {
+    try {
+        FILE* f = fopen("runtime/hunter_crash.log", "a");
+        if (!f) return;
+        fputs(line.c_str(), f);
+        fputc('\n', f);
+        fflush(f);
+        fclose(f);
+    } catch (...) {
+        // never let the crash reporter itself crash
+    }
+}
+
+// std::terminate handler: an exception escaped every catch (most often from a
+// thread body, where it would otherwise kill the whole app silently).
+void terminateHandler() {
+    std::string what = "unknown exception";
+    try {
+        std::exception_ptr ep = std::current_exception();
+        if (ep) {
+            try {
+                std::rethrow_exception(ep);
+            } catch (const std::exception& e) {
+                what = e.what();
+            } catch (...) {
+                what = "unknown non-std exception";
+            }
+        }
+    } catch (...) {
+        what = "exception description unavailable";
+    }
+    appendCrashLog("[" + crashTimestamp() + "] TERMINATE: " + what);
+    std::abort();
+}
+
 #ifdef _WIN32
 // Windows crash handler
 LONG WINAPI crashHandler(EXCEPTION_POINTERS* info) {
@@ -42,6 +95,16 @@ LONG WINAPI crashHandler(EXCEPTION_POINTERS* info) {
                 info->ExceptionRecord->ExceptionAddress);
         fflush(logFile);
         fclose(logFile);
+    }
+
+    // Same crash record in the shared runtime/hunter_crash.log
+    {
+        char record[160];
+        snprintf(record, sizeof(record), "[%s] CRASH: Exception 0x%08X at 0x%p",
+                 crashTimestamp().c_str(),
+                 static_cast<unsigned int>(info->ExceptionRecord->ExceptionCode),
+                 info->ExceptionRecord->ExceptionAddress);
+        appendCrashLog(std::string(record));
     }
     
     // Show message box to user
@@ -101,6 +164,14 @@ public:
 } // namespace
 
 int main() {
+#ifndef _WIN32
+    // Writing to a closed pipe (engine subprocess, curl socket) must not kill
+    // the whole app: ignore SIGPIPE and take the EPIPE error instead.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
+    // An exception that escapes every catch (most often from a thread body)
+    // ends in std::terminate: record it before the process dies.
+    std::set_terminate(terminateHandler);
 #ifdef _WIN32
     // Install crash handler as early as possible
     SetUnhandledExceptionFilter(crashHandler);

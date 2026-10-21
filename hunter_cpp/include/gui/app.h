@@ -86,7 +86,11 @@ private:
 
     // ─── Modern UI rendering ───
     void applyModernTheme();
-    void renderStatusBar();
+    void renderTopBar();
+    void renderStatCards();
+    void renderActionBar();
+    void renderConfigTable();
+    void renderAdvancedPanels();
     void renderMainView();
     void renderAboutView();
 

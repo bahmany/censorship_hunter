@@ -184,6 +184,7 @@ set(CORE_SOURCES
     src/core/health_score.cpp
     src/core/db_format.cpp
     src/core/utils.cpp
+    src/core/client_export.cpp
     src/core/task_manager.cpp
     src/core/seed_data.cpp
     src/core/engine_embed.cpp
@@ -377,6 +378,12 @@ foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_pr
     target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
     target_link_libraries(${_t} PRIVATE hunter_core)
 endforeach()
+
+# Client export tests
+add_executable(test_client_export tests/test_client_export.cpp)
+target_link_options(test_client_export PRIVATE -static-libgcc -static-libstdc++)
+target_link_libraries(test_client_export PRIVATE hunter_core)
+add_test(NAME test_client_export COMMAND test_client_export)
 
 # Opt-in integration test: real xray against a local test server (needs HUNTER_XRAY_PATH).
 option(HUNTER_INTEGRATION_TESTS "Register opt-in integration tests (real engines, loopback only)" OFF)

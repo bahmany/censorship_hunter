@@ -1,4 +1,5 @@
 #include "core/updater.h"
+#include <iostream>
 #include "core/constants.h"
 #include "core/utils.h"
 #include "network/http_client.h"
@@ -291,7 +292,13 @@ void SelfUpdateManager::startAutoCheck(int check_interval_seconds, int startup_d
 
     stop_flag_.store(false);
     check_thread_ = std::thread([this, check_interval_seconds, startup_delay_seconds]() {
-        autoCheckLoop(check_interval_seconds, startup_delay_seconds);
+        try {
+            autoCheckLoop(check_interval_seconds, startup_delay_seconds);
+        } catch (const std::exception& e) {
+            std::cerr << "[Thread] autoCheck exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Thread] autoCheck unknown exception" << std::endl;
+        }
     });
 }
 
@@ -303,7 +310,13 @@ void SelfUpdateManager::stopAutoCheck() {
     // (lives for the process), so a detached waiter joining later is safe.
     std::atomic<bool> done{false};
     std::thread([this, &done] {
-        if (check_thread_.joinable()) check_thread_.join();
+        try {
+            if (check_thread_.joinable()) check_thread_.join();
+        } catch (const std::exception& e) {
+            std::cerr << "[Thread] autoCheckJoinWaiter exception: " << e.what() << std::endl;
+        } catch (...) {
+            std::cerr << "[Thread] autoCheckJoinWaiter unknown exception" << std::endl;
+        }
         done.store(true);
     }).detach();
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);

@@ -440,14 +440,20 @@ void HunterOrchestrator::start() {
             sub_manager_.updateDue(utils::nowTimestamp(), config_.subUpdateIntervalMin() * 60.0)) {
             std::string proxy = "socks5h://127.0.0.1:" + std::to_string(config_.clientListenPort());
             std::thread([this, proxy]() {
-                std::string err;
-                int imported = sub_manager_.updateAll(proxy, &err);
-                if (imported >= 0) {
-                    utils::LogRingBuffer::instance().push(
-                        "[Subscriptions] Updated " + std::to_string(imported) + " configs");
-                } else {
-                    utils::LogRingBuffer::instance().push(
-                        "[Subscriptions] Update failed: " + err);
+                try {
+                    std::string err;
+                    int imported = sub_manager_.updateAll(proxy, &err);
+                    if (imported >= 0) {
+                        utils::LogRingBuffer::instance().push(
+                            "[Subscriptions] Updated " + std::to_string(imported) + " configs");
+                    } else {
+                        utils::LogRingBuffer::instance().push(
+                            "[Subscriptions] Update failed: " + err);
+                    }
+                } catch (const std::exception& e) {
+                    std::cerr << "[Thread] subAutoupdate exception: " << e.what() << std::endl;
+                } catch (...) {
+                    std::cerr << "[Thread] subAutoupdate unknown exception" << std::endl;
                 }
             }).detach();
         }
@@ -487,7 +493,13 @@ void HunterOrchestrator::stop() {
         if (!download_thread_.joinable()) return;
         std::atomic<bool> done{false};
         std::thread([this, &done] {
-            if (download_thread_.joinable()) download_thread_.join();
+            try {
+                if (download_thread_.joinable()) download_thread_.join();
+            } catch (const std::exception& e) {
+                std::cerr << "[Thread] downloadJoinWaiter exception: " << e.what() << std::endl;
+            } catch (...) {
+                std::cerr << "[Thread] downloadJoinWaiter unknown exception" << std::endl;
+            }
             done.store(true);
         }).detach();
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
