@@ -159,42 +159,39 @@ ProxyTester::ProxyTester() {
         if (!es.empty() && utils::fileExists(es)) singbox_path_ = es;
     }
 
-    // Priority 2: env overrides (for xray/sing-box not yet set, and always for mihomo).
+    // Priority 2: env overrides (absolute paths only — prevents binary planting).
     const char* env_xray = std::getenv("HUNTER_XRAY_PATH");
     const char* env_singbox = std::getenv("HUNTER_SINGBOX_PATH");
     const char* env_mihomo = std::getenv("HUNTER_MIHOMO_PATH");
-    if (xray_path_.empty() && env_xray && *env_xray && utils::fileExists(env_xray))
-        xray_path_ = env_xray;
-    if (singbox_path_.empty() && env_singbox && *env_singbox && utils::fileExists(env_singbox))
-        singbox_path_ = env_singbox;
+    if (xray_path_.empty() && env_xray && *env_xray) {
+        std::string p(env_xray);
+        bool abs_path = !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+        if (abs_path && utils::fileExists(p)) xray_path_ = p;
+    }
+    if (singbox_path_.empty() && env_singbox && *env_singbox) {
+        std::string p(env_singbox);
+        bool abs_path = !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+        if (abs_path && utils::fileExists(p)) singbox_path_ = p;
+    }
 
-    // Priority 3: classic bin/ lookup for anything not yet resolved.
-    auto resolvePath = [](const char* env_val,
-                          std::initializer_list<const char*> candidates) -> std::string {
-        if (env_val && *env_val && utils::fileExists(env_val)) return env_val;
-        for (const char* c : candidates) {
-            if (utils::fileExists(c)) return c;
-        }
-        return candidates.begin()[0];
-    };
-
-#ifdef _WIN32
+    // Priority 3: safe executable-relative lookup (no bare CWD names).
     if (xray_path_.empty()) {
-        xray_path_ = "bin/xray.exe";
-        if (!utils::fileExists(xray_path_) && utils::fileExists("xray.exe")) xray_path_ = "xray.exe";
+        std::string found = utils::findEngineBinary("xray");
+        if (!found.empty() && utils::fileExists(found)) xray_path_ = found;
     }
     if (singbox_path_.empty()) {
-        singbox_path_ = "bin/sing-box.exe";
-        if (!utils::fileExists(singbox_path_) && utils::fileExists("sing-box.exe")) singbox_path_ = "sing-box.exe";
+        std::string found = utils::findEngineBinary("sing-box");
+        if (!found.empty() && utils::fileExists(found)) singbox_path_ = found;
     }
-    mihomo_path_ = resolvePath(env_mihomo, {"bin/mihomo.exe", "mihomo.exe", "./mihomo.exe"});
-#else
-    if (xray_path_.empty())
-        xray_path_    = resolvePath(env_xray,    {"bin/xray",    "xray",    "./xray",    "/app/bin/xray"});
-    if (singbox_path_.empty())
-        singbox_path_ = resolvePath(env_singbox, {"bin/sing-box", "sing-box", "./sing-box", "/app/bin/sing-box"});
-    mihomo_path_  = resolvePath(env_mihomo,  {"bin/mihomo",   "mihomo",   "./mihomo",   "/app/bin/mihomo"});
-#endif
+    if (mihomo_path_.empty() && env_mihomo && *env_mihomo) {
+        std::string p(env_mihomo);
+        bool abs_path = !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+        if (abs_path && utils::fileExists(p)) mihomo_path_ = p;
+    }
+    if (mihomo_path_.empty()) {
+        std::string found = utils::findEngineBinary("mihomo");
+        if (!found.empty() && utils::fileExists(found)) mihomo_path_ = found;
+    }
 
     // Log resolved engine paths once per process (ProxyTester may be
     // constructed multiple times as a local variable in validator/bench).

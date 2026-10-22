@@ -309,8 +309,12 @@ struct EngineRecord {
             makeExecutable(path);
             return true;
         }
+        // Cached digest mismatch — clean up bad file/stamp before re-extracting.
+        std::error_code ec_rm;
+        fs::remove(path, ec_rm);
+        fs::remove(stamp, ec_rm);
         utils::LogRingBuffer::instance().push(
-            std::string("[EngineEmbed] ") + engine + " cached copy digest mismatch — re-extracting");
+            std::string("[EngineEmbed] ") + engine + " cached copy digest mismatch — removing bad file and re-extracting");
     }
 
     utils::LogRingBuffer::instance().push(
@@ -334,12 +338,17 @@ struct EngineRecord {
         return false;
     }
 
-    // Verify digest — reject if tampered.
+    // Verify digest — reject if tampered (fail closed).
     std::string actual = sha256_hex(buf.data(), r);
     if (sha_expected && sha_expected[0] && actual != sha_expected) {
         utils::LogRingBuffer::instance().push(
-            std::string("[EngineEmbed] SECURITY: sha256 mismatch for ") + engine +
-            " — extracted data does not match embedded digest, rejecting");
+            std::string("[EngineEmbed] SECURITY ERROR: sha256 mismatch for ") + engine +
+            " — embedded digest does not match extracted data, refusing to use file (" +
+            std::string(sha_expected ? sha_expected : "(none)") + " vs " + actual + ")");
+        // Clean up any existing bad file / stamp so the engine is not used.
+        std::error_code ec_remove;
+        fs::remove(path, ec_remove);
+        fs::remove(stamp, ec_remove);
         return false;
     }
     utils::LogRingBuffer::instance().push(

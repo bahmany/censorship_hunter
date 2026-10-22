@@ -1425,8 +1425,14 @@ void HunterGuiApp::renderActionBar() {
             std::string uri = *selected_uris_.begin();
             runBackground([this, uri]() {
                 int port = orch_.activateClientConfig(uri);
-                if (port > 0) showToast("Connected on port " + std::to_string(port));
-                else showToast("Failed to connect to " + uri);
+                if (port > 0) {
+                    showToast("Connected: 127.0.0.1:" + std::to_string(port) + " (SOCKS5 + HTTP)");
+                } else {
+                    std::string why = orch_.clientError(uri);
+                    if (why.empty()) why = "unknown error";
+                    std::fprintf(stderr, "[gui] connect failed: %s\n", why.c_str());
+                    showToast("Connect failed: " + why);
+                }
             });
         } else {
             showToast("No profile selected");

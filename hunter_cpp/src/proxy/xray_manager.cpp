@@ -15,6 +15,8 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <sys/stat.h>
 #endif
 
 namespace fs = std::filesystem;
@@ -33,8 +35,7 @@ namespace {
 XRayManager::XRayManager() {
     temp_dir_ = "runtime/xray_tmp";
 
-    // Priority 1: Embedded or externally-placed engine (single-file build / Android).
-    // ensureExtracted() handles both .incbin extraction and external dir lookup.
+    // Priority 1: Embedded extraction.
     embed::ensureExtracted();
     std::string embedded = embed::xrayPath();
     if (!embedded.empty() && utils::fileExists(embedded)) {
@@ -42,29 +43,23 @@ XRayManager::XRayManager() {
         return;
     }
 
-    // Priority 2: HUNTER_XRAY_PATH env override.
+    // Priority 2: env override (absolute paths only).
     const char* env_xray = std::getenv("HUNTER_XRAY_PATH");
-    if (env_xray && *env_xray && utils::fileExists(env_xray)) {
-        xray_path_ = env_xray;
-        return;
+    if (env_xray && *env_xray) {
+        std::string p(env_xray);
+        bool absolute = !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+        if (absolute && utils::fileExists(p)) {
+            xray_path_ = p;
+            return;
+        }
     }
 
-#ifdef _WIN32
-    // Priority 3: bin/xray.exe (classic portable layout)
-    xray_path_ = "bin/xray.exe";
-    if (!utils::fileExists(xray_path_) && utils::fileExists("xray.exe")) xray_path_ = "xray.exe";
-#else
-    // Priority 3: bin/xray (project root CWD), then xray (bin/ CWD), then /app/bin/xray
-    if (utils::fileExists("bin/xray")) {
-        xray_path_ = "bin/xray";
-    } else if (utils::fileExists("xray")) {
-        xray_path_ = "xray";
-    } else if (utils::fileExists("/app/bin/xray")) {
-        xray_path_ = "/app/bin/xray";
-    } else {
-        xray_path_ = "bin/xray"; // default fallback
+    // Priority 3: safe executable-relative lookup (no bare CWD names).
+    std::string found = utils::findEngineBinary("xray");
+    if (!found.empty() && utils::fileExists(found)) {
+        xray_path_ = found;
+        return;
     }
-#endif
 }
 
 XRayManager::~XRayManager() {
@@ -77,14 +72,30 @@ bool XRayManager::isAvailable() const {
 
 void XRayManager::ensureTempDir() {
     utils::mkdirRecursive(temp_dir_);
+#ifndef _WIN32
+    chmod(temp_dir_.c_str(), 0700);
+#endif
 }
 
 std::string XRayManager::writeConfigFile(const std::string& json_config) {
     ensureTempDir();
     std::string filename = temp_dir_ + "/xray_" +
                            utils::sha1Hex(json_config).substr(0, 8) + ".json";
-    std::ofstream f(filename);
+#ifndef _WIN32
+    int fd = open(filename.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) return "";
+    size_t off = 0;
+    while (off < json_config.size()) {
+        ssize_t n = write(fd, json_config.data() + off, json_config.size() - off);
+        if (n <= 0) { if (errno == EINTR) continue; close(fd); return ""; }
+        off += (size_t)n;
+    }
+    close(fd);
+    chmod(filename.c_str(), 0600);
+#else
+    std::ofstream f(filename, std::ios::binary | std::ios::trunc);
     if (f) f << json_config;
+#endif
     return filename;
 }
 
@@ -289,19 +300,18 @@ std::string XRayManager::generateConfig(const ParsedConfig& parsed, int socks_po
     // Build inbound tags for DNS routing
     std::string client_inbounds = "\"mixed-in\"";
 
-    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"final\":\"blackhole\",\"rules\":[";
-    // 1. Client DNS queries → dns-out (intercept and resolve via XRay DNS)
-    ss <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"port\":53,\"outboundTag\":\"dns-out\"},";
-    // 2. DNS module resolves through proxy (bypasses Iranian DNS censorship)
-    ss <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"outboundTag\":\"proxy\"},";
-    // 3. Internal DNS → direct
-    ss <<     "{\"type\":\"field\",\"port\":53,\"outboundTag\":\"direct\"},";
-    // 4. Private/local IPs → direct
-    ss <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},";
-    // 5. All other client traffic → balancer (proxy outbound, before final blackhole)
-    ss << ",{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"balancerTag\":\"proxy-balancer\"}";
-    ss << "],\"balancers\":[{\"tag\":\"proxy-balancer\",\"selector\":[\"proxy\"],\"strategy\":{\"type\":\"leastPing\"}}]}";
-    ss << ",\"observatory\":{\"subjectSelector\":[\"proxy\"],\"probeURL\":\"http://1.1.1.1/generate_204\",\"probeInterval\":\"30s\"}";
+    // Rules are evaluated in order; the last rule sends all remaining client
+    // traffic through the proxy. Nothing falls through to a direct egress.
+    ss << "  \"routing\":{\"domainStrategy\":\"AsIs\",\"rules\":["
+       // 1. Client DNS queries -> dns-out (resolved by xray's DNS module)
+       <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"port\":53,\"outboundTag\":\"dns-out\"},"
+       // 2. The DNS module itself resolves through the proxy (no plaintext local DNS)
+       <<     "{\"type\":\"field\",\"inboundTag\":[\"dns-module\"],\"outboundTag\":\"proxy\"},"
+       // 3. Private/local destinations stay local
+       <<     "{\"type\":\"field\",\"ip\":[\"10.0.0.0/8\",\"172.16.0.0/12\",\"192.168.0.0/16\",\"127.0.0.0/8\",\"169.254.0.0/16\"],\"outboundTag\":\"direct\"},"
+       // 4. Everything else from the client -> proxy
+       <<     "{\"type\":\"field\",\"inboundTag\":[" << client_inbounds << "],\"outboundTag\":\"proxy\"}"
+       << "]}\n";
     ss << "}\n";
     return ss.str();
 }

@@ -155,35 +155,38 @@ void ProxyServerManager::resolveEnginePaths() {
     if (paths_resolved_) return;
     paths_resolved_ = true;
 
-    // Environment overrides win over embedded copies (documented priority), then the embedded
-    // single-file engines, then the classic bin/ lookup.
+    // Priority 1: env overrides (absolute paths only — prevents binary planting).
     const char* env_xray = std::getenv("HUNTER_XRAY_PATH");
     const char* env_singbox = std::getenv("HUNTER_SINGBOX_PATH");
-    if (env_xray && *env_xray && utils::fileExists(env_xray)) xray_path_ = env_xray;
-    if (env_singbox && *env_singbox && utils::fileExists(env_singbox)) singbox_path_ = env_singbox;
+    if (env_xray && *env_xray) {
+        std::string p(env_xray);
+        bool absolute = !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+        if (absolute && utils::fileExists(p)) xray_path_ = p;
+    }
+    if (env_singbox && *env_singbox) {
+        std::string p(env_singbox);
+        bool absolute = !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+        if (absolute && utils::fileExists(p)) singbox_path_ = p;
+    }
 
+    // Priority 2: embedded extraction dir.
     if (xray_path_.empty() || singbox_path_.empty()) {
         embed::ensureExtracted();
-        std::string ex = embed::xrayPath();
-        std::string es = embed::singBoxPath();
-        if (xray_path_.empty() && !ex.empty() && utils::fileExists(ex)) xray_path_ = ex;
-        if (singbox_path_.empty() && !es.empty() && utils::fileExists(es)) singbox_path_ = es;
     }
-#ifdef _WIN32
+    std::string ex = embed::xrayPath();
+    std::string es = embed::singBoxPath();
+    if (xray_path_.empty() && !ex.empty() && utils::fileExists(ex)) xray_path_ = ex;
+    if (singbox_path_.empty() && !es.empty() && utils::fileExists(es)) singbox_path_ = es;
+
+    // Priority 3: executable-relative only (no bare CWD names).
     if (xray_path_.empty()) {
-        for (const char* c : {"bin/xray.exe", "xray.exe"}) if (utils::fileExists(c)) { xray_path_ = c; break; }
+        std::string found = utils::findEngineBinary("xray");
+        if (!found.empty() && utils::fileExists(found)) xray_path_ = found;
     }
     if (singbox_path_.empty()) {
-        for (const char* c : {"bin/sing-box.exe", "sing-box.exe"}) if (utils::fileExists(c)) { singbox_path_ = c; break; }
+        std::string found = utils::findEngineBinary("sing-box");
+        if (!found.empty() && utils::fileExists(found)) singbox_path_ = found;
     }
-#else
-    if (xray_path_.empty()) {
-        for (const char* c : {"bin/xray", "xray", "./xray", "/app/bin/xray"}) if (utils::fileExists(c)) { xray_path_ = c; break; }
-    }
-    if (singbox_path_.empty()) {
-        for (const char* c : {"bin/sing-box", "sing-box", "./sing-box", "/app/bin/sing-box"}) if (utils::fileExists(c)) { singbox_path_ = c; break; }
-    }
-#endif
     // Unresolved stays empty: the launcher reports BinaryMissing instead of exec'ing a bogus path.
 }
 
@@ -204,6 +207,38 @@ BuiltConfig ProxyServerManager::buildEngineConfig(const std::string& uri, int po
     if (!sb_cfg.empty()) { out.ok = true; out.engine = "sing-box"; out.config_text = sb_cfg; return out; }
     std::string why = config.unsupportedReason(quic || insecure ? "sing-box" : "xray");
     out.error = why.empty() ? "config cannot be expressed by any installed engine" : "unsupported: " + why;
+    return out;
+}
+
+// Client mode: xray first (the user's chosen core). sing-box only for what
+// xray cannot express (hysteria2/tuic, or configs that demand insecure TLS).
+BuiltConfig ProxyServerManager::buildClientEngineConfig(const std::string& uri, int port) {
+    BuiltConfig out;
+    auto parsed = network::UriParser::parse(uri);
+    if (!parsed.has_value() || !parsed->isValid()) { out.error = "invalid or unsupported config URI"; return out; }
+    const ParsedConfig& config = parsed.value();
+    const bool quic = config.protocol == "hysteria2" || config.protocol == "tuic";
+    const bool insecure = config.insecureTls();
+    auto avail = [&](const char* e) { return launcher_ && launcher_->available(e); };
+
+    if (!quic && !insecure && avail("xray")) {
+        std::string why = config.unsupportedReason("xray");
+        if (why.empty()) {
+            out.ok = true; out.engine = "xray";
+            out.config_text = XRayManager::generateConfig(config, port, port);  // mixed inbound
+            return out;
+        }
+        out.error = "unsupported by xray: " + why;
+    }
+    if ((quic || insecure) && avail("sing-box")) {
+        std::string sb = config.toSingBoxConfigJson(port);
+        if (!sb.empty()) { out.ok = true; out.engine = "sing-box"; out.config_text = sb; return out; }
+    }
+    if (out.error.empty()) {
+        out.error = !avail("xray") ? "xray core not found next to Hunter"
+                  : quic ? config.protocol + " needs sing-box, which is not installed"
+                  : "config requires insecure TLS, which xray does not allow";
+    }
     return out;
 }
 
@@ -460,22 +495,32 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
     }
 
     int ProxyServerManager::startClientProxy(const std::string& uri, int port) {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::unique_lock<std::mutex> lk(mutex_);
         
-        // Check if port is already held by another managed session
-        std::string conflicting_uri;
-        for (const auto& [u, s] : sessions_) {
-            if (s.port == port && occupies(s)) {
-                conflicting_uri = u;
-                break;
+        // Stop whatever holds this port or this URI (previous Connect). Done
+        // with mutex_ released: stopProxy()/monitor teardown take it again.
+        std::vector<std::shared_ptr<HealthMonitor>> to_stop;
+        for (auto it = sessions_.begin(); it != sessions_.end();) {
+            if ((it->second.port == port && occupies(it->second)) || it->first == uri) {
+                to_stop.push_back(it->second.mon);
+                retired_.push_back(std::move(it->second));   // keep alive until torn down
+                it = sessions_.erase(it);
+            } else {
+                ++it;
             }
         }
-        
-        if (!conflicting_uri.empty()) {
-            // Stop the conflicting session first
-            stopProxy(conflicting_uri);
+        if (!to_stop.empty()) {
+            lk.unlock();
+            for (auto& m : to_stop) {
+                if (m) m->stop();
+            }
+            // The engine releases the port asynchronously after being killed.
+            for (int i = 0; i < 60 && deps_.port_free && !deps_.port_free(port); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            }
+            lk.lock();
         }
-        
+
         // Check if port is free (not taken by foreign process)
         if (!deps_.port_free || !deps_.port_free(port)) {
             errors_[uri] = "port busy";
@@ -486,14 +531,21 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
         // Clear any previous error for this URI
         errors_.erase(uri);
         
-        // Use buildEngineConfig but for xray use generateConfig with same port for mixed inbound
+        // Client sessions get a real client config (one "mixed" SOCKS+HTTP
+        // inbound on 127.0.0.1, LAN direct) instead of the test-probe config.
         MonitorDeps md = deps_.monitor;
         if (!md.executor) md.executor = std::make_shared<ThreadPoolExecutor>(2);
+        md.build_config = [this](const std::string& u, int p) { return buildClientEngineConfig(u, p); };
+
+        // Validate up front so the user gets a reason instead of a silent failure.
+        BuiltConfig probe = buildClientEngineConfig(uri, port);
+        if (!probe.ok) {
+            errors_[uri] = probe.error;
+            utils::LogRingBuffer::instance().push("[ProxyServer] " + probe.error);
+            return -1;
+        }
+
         auto mon = HealthMonitor::create(mcfg_, md);
-        
-        Session s; s.mon = mon; s.uri = uri; s.port = port;
-        sessions_[uri] = std::move(s);
-        
         mon->setEventCallback([this, uri](const SessionEvent& e) {
             SessionEventCallback cb;
             { std::lock_guard<std::mutex> lk(mutex_); cb = event_cb_; }
@@ -503,49 +555,15 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
                     sessionStateName(e.snapshot.state) + (e.detail.empty() ? "" : ": " + e.detail));
             if (cb) cb(uri, e);
         });
-        
-        // Build engine config - for client mode we want mixed inbound (same port for socks and http)
-        BuiltConfig out;
-        auto parsed = network::UriParser::parse(uri);
-        if (!parsed.has_value() || !parsed->isValid()) { 
-            out.error = "invalid or unsupported config URI"; 
-        } else {
-            ParsedConfig config = parsed.value();
-            const bool quic = config.protocol == "hysteria2" || config.protocol == "tuic";
-            const bool insecure = config.insecureTls();   // modern xray cannot honour allowInsecure
-            auto avail = [&](const char* e) { return launcher_ && launcher_->available(e); };
 
-            std::string xray_cfg;
-            if (!quic && !insecure) {
-                // Use generateConfig instead of generateTestConfig for mixed inbound
-                xray_cfg = XRayManager::generateConfig(config, port, port);
-            }
-            std::string sb_cfg = config.toSingBoxConfigJson(port);
-            
-            if (!xray_cfg.empty() && (avail("xray") || sb_cfg.empty())) {
-                out.ok = true; out.engine = "xray"; out.config_text = xray_cfg; 
-            } else if (!sb_cfg.empty()) {
-                out.ok = true; out.engine = "sing-box"; out.config_text = sb_cfg; 
-            } else {
-                std::string why = config.unsupportedReason(quic || insecure ? "sing-box" : "xray");
-                out.error = why.empty() ? "config cannot be expressed by any installed engine" : "unsupported: " + why;
-            }
-        }
-        
-        if (!out.ok) {
-            sessions_.erase(uri);
-            errors_[uri] = out.error;
-            utils::LogRingBuffer::instance().push("[ProxyServer] " + out.error);
-            return -1;
-        }
-        
-        // Start the monitor
-        s.mon->start(uri, port, SwitchMode::Auto);   // non-blocking: launch + first probe run
-        
-        // Track as active client proxy
+        Session s; s.mon = mon; s.uri = uri; s.port = port;
+        sessions_[uri] = std::move(s);   // `s` is moved-from below this line: use `mon`
+
         active_client_uri_ = uri;
         active_client_port_ = port;
-        
+        // The event callback takes mutex_; never start (which may emit events) while holding it.
+        lk.unlock();
+        mon->start(uri, port, SwitchMode::Auto);   // non-blocking: launch + first probe run
         return port;
     }
 
@@ -560,11 +578,15 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
     }
 
     bool ProxyServerManager::stopClientProxy() {
+        std::string uri;
+        {
+            std::lock_guard<std::mutex> lk(mutex_);
+            if (active_client_uri_.empty()) return false;
+            uri = active_client_uri_;
+        }
+        bool result = stopProxy(uri);   // takes mutex_ itself: must not be held here
         std::lock_guard<std::mutex> lk(mutex_);
-        if (active_client_uri_.empty()) return false;
-        
-        bool result = stopProxy(active_client_uri_);
-        if (result) {
+        if (active_client_uri_ == uri) {      // cleared even if the session had already ended
             active_client_uri_.clear();
             active_client_port_ = 0;
         }

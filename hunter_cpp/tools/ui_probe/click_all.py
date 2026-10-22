@@ -84,9 +84,11 @@ def main():
     def alive():
         return app.poll() is None
 
+    origin = [0, 0]
+
     def click(x, y, n=1, gap=0.0):
         for _ in range(n):
-            sh(["xdotool", "mousemove", str(int(x)), str(int(y)), "click", "1"], env)
+            sh(["xdotool", "mousemove", str(int(x + origin[0])), str(int(y + origin[1])), "click", "1"], env)
             if gap:
                 time.sleep(gap)
 
@@ -100,6 +102,14 @@ def main():
             sh(["xdotool", "windowmove", wid[0], "0", "0"], env)
             sh(["xdotool", "windowsize", wid[0], str(w), str(h)], env)
         time.sleep(a.settle)
+        # Widget rects are relative to the client area; with a window manager the
+        # client sits below the title bar, so add its real screen position.
+        ox = oy = 0
+        if wid:
+            info = sh(["xwininfo", "-id", wid[0]], env).stdout   # xdotool's geometry double-counts decorations
+            ox = int(re.search(r"Absolute upper-left X:\s*(-?\d+)", info).group(1))
+            oy = int(re.search(r"Absolute upper-left Y:\s*(-?\d+)", info).group(1))
+        report["client_origin"] = origin[:] = [ox, oy]
         shot("start")
         clicked, queue = set(), []
         key = lambda i: f"{re.sub(r'[(]\d+[)]', '', i['label']).strip()}@{int(i['y'] // 12)}"

@@ -23,6 +23,7 @@ struct ReleaseInfo {
         std::string name;                   // e.g. "hunter-windows-x64.exe"
         std::string browser_download_url;   // Direct download URL
         int size_bytes = 0;                 // File size
+        std::string digest;                 // GitHub digest, e.g. "sha256:<64 hex>"
     };
     std::vector<Asset> assets;
 };

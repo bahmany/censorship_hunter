@@ -14,6 +14,18 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <process.h>
+// SHGetKnownFolderPath declared manually for cross-compile environments
+// that lack shlobj_core.h (MinGW cross on Linux).
+extern "C" long __stdcall SHGetKnownFolderPath(const GUID*, unsigned int, void*, wchar_t**);
+// FOLDERID_LocalAppData = {FDC04C6D-6A76-4B66-8F53-3F0A4F498C3D}
+static const GUID FOLDERID_LocalAppData_ = {
+    0xFDC04C6D, 0x6A76, 0x4B66, {0x8F, 0x53, 0x3F, 0x0A, 0x4F, 0x49, 0x8C, 0x3D}
+};
+#define FOLDERID_LocalAppData (&FOLDERID_LocalAppData_)
+#endif
+#ifndef _WIN32
+#include <unistd.h>
+#include <sys/stat.h>
 #endif
 
 using namespace hunter;
@@ -163,7 +175,82 @@ public:
 
 } // namespace
 
+#ifndef __ANDROID__
+namespace {
+
+bool isDirWritable(const std::filesystem::path& p) {
+    std::string test_path = (p / ".hunter_write_test").string();
+    FILE* f = std::fopen(test_path.c_str(), "w");
+    if (!f) return false;
+    std::fclose(f);
+    std::remove(test_path.c_str());
+#ifndef _WIN32
+    struct stat st;
+    if (stat(p.string().c_str(), &st) == 0) {
+        // Reject world-writable directories that lack the sticky bit.
+        if ((st.st_mode & S_IWOTH) && !(st.st_mode & S_ISVTX)) return false;
+    }
+#endif
+    return true;
+}
+
+std::filesystem::path getPerUserDataDir() {
+#ifdef _WIN32
+    PWSTR path = nullptr;
+    if (SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, NULL, &path) == S_OK) {
+        std::wstring w(path);
+        CoTaskMemFree(path);
+        int size_needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+        std::string s(size_needed, 0);
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], size_needed, nullptr, nullptr);
+        return std::filesystem::path(s) / "Hunter";
+    }
+    return std::filesystem::path(".");
+#elif defined(__APPLE__)
+    const char* home = std::getenv("HOME");
+    if (home && *home) return std::filesystem::path(home) / "Library" / "Application Support" / "Hunter";
+    return std::filesystem::path(".");
+#else
+    const char* xdg = std::getenv("XDG_DATA_HOME");
+    if (xdg && *xdg) return std::filesystem::path(xdg) / "hunter";
+    const char* home = std::getenv("HOME");
+    if (home && *home) return std::filesystem::path(home) / ".local" / "share" / "hunter";
+    return std::filesystem::path(".");
+#endif
+}
+
+} // namespace
+#endif
+
 int main() {
+#ifndef __ANDROID__
+    {
+        std::filesystem::path data_dir;
+        std::string exe_dir_str = utils::executableDir();
+        std::filesystem::path exe_dir = exe_dir_str.empty() ? std::filesystem::current_path() : std::filesystem::path(exe_dir_str);
+        bool writable = isDirWritable(exe_dir);
+        if (writable) {
+            data_dir = exe_dir;
+        } else {
+            data_dir = getPerUserDataDir();
+            try {
+                std::filesystem::create_directories(data_dir);
+                std::filesystem::permissions(data_dir,
+                    std::filesystem::perms::owner_read | std::filesystem::perms::owner_write | std::filesystem::perms::owner_exec,
+                    std::filesystem::perm_options::replace);
+            } catch (...) {}
+        }
+        std::string data_dir_str = data_dir.string();
+        std::fprintf(stderr, "[startup] data directory: %s\n", data_dir_str.c_str());
+#ifdef _WIN32
+        SetCurrentDirectoryW(data_dir.wstring().c_str());
+#else
+        int chdir_rc = chdir(data_dir_str.c_str());
+        (void)chdir_rc;
+#endif
+    }
+#endif
+
 #ifndef _WIN32
     // Writing to a closed pipe (engine subprocess, curl socket) must not kill
     // the whole app: ignore SIGPIPE and take the EPIPE error instead.

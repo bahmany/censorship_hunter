@@ -177,6 +177,8 @@ public:
     // ─── Client Mode ───
     int activateClientConfig(const std::string& uri);
     void deactivateClientConfig();
+    // Why the last activateClientConfig(uri) failed ("" if it did not).
+    std::string clientError(const std::string& uri) const { return proxy_server_manager_.getError(uri); }
     struct ClientStatus {
         bool active = false;
         std::string uri;

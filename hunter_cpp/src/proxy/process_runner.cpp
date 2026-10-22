@@ -236,7 +236,12 @@ LaunchResult ManagedEngineLauncher::launch(const LaunchRequest& req) {
         out.detail = req.engine + " binary not found";
         return out;
     }
-    try { utils::mkdirRecursive("runtime"); } catch (...) {}
+    try {
+        utils::mkdirRecursive("runtime");
+#ifndef _WIN32
+        chmod("runtime", 0700);
+#endif
+    } catch (...) {}
     const int tag_port = req.ports.empty() ? 0 : req.ports.front();
     const bool mihomo = req.engine == "mihomo";
     auto proc = std::make_shared<ManagedProcess>();

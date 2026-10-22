@@ -129,6 +129,7 @@ private:
     static bool occupies(const Session& s);
     void watchdogLoop();
     void resolveEnginePaths();
+    BuiltConfig buildClientEngineConfig(const std::string& uri, int port);
     BuiltConfig buildEngineConfig(const std::string& uri, int port);
     std::pair<unsigned long long, unsigned long long> readProcessIo(int pid) const;
     ProxyInstance toInstance(const Session& s, const SessionSnapshot& snap) const;

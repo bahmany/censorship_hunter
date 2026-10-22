@@ -681,7 +681,6 @@ struct HealthMonitor::Impl : std::enable_shared_from_this<HealthMonitor::Impl> {
         auto self = shared_from_this();
         deps.executor->post([self, vic]() {
             vic->clear();   // guard dtors: terminate + reap children, remove config files
-            self->reapGraveyard();
             {
                 std::lock_guard<std::mutex> lk(self->mu);
                 self->teardown_done = true;
@@ -689,6 +688,7 @@ struct HealthMonitor::Impl : std::enable_shared_from_this<HealthMonitor::Impl> {
                 self->maybeFinishStopLocked();
                 self->cv.notify_all();
             }
+            self->reapGraveyard();
             self->deliver();
         });
     }

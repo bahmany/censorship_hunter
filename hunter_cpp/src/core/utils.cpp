@@ -1,4 +1,5 @@
 #include "core/utils.h"
+#include "core/engine_embed.h"
 #include "core/win_compat.h"
 
 #include <ctime>
@@ -274,6 +275,85 @@ bool fileExists(const std::string& path) {
     try{return fs::exists(path);}catch(...){return false;}
 }
 
+std::string executableDir() {
+#ifdef _WIN32
+    wchar_t path[MAX_PATH] = {0};
+    HMODULE hMod = nullptr;
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                           (LPCWSTR)&executableDir, &hMod)) {
+        DWORD len = GetModuleFileNameW(hMod, path, MAX_PATH);
+        if (len > 0 && len < MAX_PATH) {
+            std::wstring w(path, len);
+            int size_needed = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+            std::string result(size_needed, 0);
+            WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &result[0], size_needed, nullptr, nullptr);
+            size_t pos = result.find_last_of("\\/");
+            return pos != std::string::npos ? result.substr(0, pos) : ".";
+        }
+    }
+    return ".";
+#elif defined(__ANDROID__)
+    // Android: keep existing embed/external dir logic; no /proc/self/exe guarantee.
+    return ".";
+#else
+    char path[4096] = {0};
+    ssize_t len = readlink("/proc/self/exe", path, sizeof(path) - 1);
+    if (len > 0) {
+        path[len] = '\0';
+        std::string p(path);
+        size_t pos = p.find_last_of("/");
+        return pos != std::string::npos ? p.substr(0, pos) : ".";
+    }
+    return ".";
+#endif
+}
+
+std::string findEngineBinary(const std::string& engine_name) {
+    // Priority 1: env override (absolute paths only, security)
+    const char* env_path = nullptr;
+    if (engine_name == "xray" || engine_name == "sing-box" || engine_name == "mihomo") {
+        std::string env_name = "HUNTER_" + (engine_name == "sing-box" ? std::string("SINGBOX") : (engine_name == "mihomo" ? std::string("MIHOMO") : std::string("XRAY"))) + std::string("_PATH");
+        env_path = std::getenv(env_name.c_str());
+    }
+    if (env_path && *env_path) {
+        std::string p(env_path);
+        // Only absolute paths allowed (prevents binary planting from CWD)
+        bool absolute = !p.empty() && (p[0] == '/' || (p.size() > 2 && p[1] == ':' && (p[2] == '\\' || p[2] == '/')));
+        if (absolute && utils::fileExists(p)) return p;
+    }
+
+    // Priority 2: embedded extraction dir
+    try {
+        std::string embed_path = embed::extractionDir();
+        std::string full = embed_path + "/" + (engine_name == "sing-box" ? "sing-box" : (engine_name == "xray" ? "xray" : engine_name));
+#ifdef _WIN32
+        full += ".exe";
+#endif
+        if (utils::fileExists(full)) return full;
+    } catch (...) {}
+
+    // Priority 3: executable-relative paths only (no bare CWD names)
+    std::string exe_dir = executableDir();
+    std::vector<std::string> candidates;
+#ifdef _WIN32
+    candidates = {
+        exe_dir + "\\" + (engine_name == "sing-box" ? "sing-box.exe" : (engine_name == "xray" ? "xray.exe" : engine_name + ".exe")),
+        exe_dir + "\\bin\\" + (engine_name == "sing-box" ? "sing-box.exe" : (engine_name == "xray" ? "xray.exe" : engine_name + ".exe")),
+        exe_dir + "\\..\\bin\\" + (engine_name == "sing-box" ? "sing-box.exe" : (engine_name == "xray" ? "xray.exe" : engine_name + ".exe")),
+    };
+#else
+    candidates = {
+        exe_dir + "/" + (engine_name == "sing-box" ? "sing-box" : (engine_name == "xray" ? "xray" : engine_name)),
+        exe_dir + "/bin/" + (engine_name == "sing-box" ? "sing-box" : (engine_name == "xray" ? "xray" : engine_name)),
+        exe_dir + "/../bin/" + (engine_name == "sing-box" ? "sing-box" : (engine_name == "xray" ? "xray" : engine_name)),
+    };
+#endif
+    for (const auto& c : candidates) {
+        if (utils::fileExists(c)) return c;
+    }
+    return "";
+}
+
 std::string dirName(const std::string& path) {
     try{return fs::path(path).parent_path().string();}catch(...){
         auto pos=path.find_last_of("/\\");
@@ -414,36 +494,6 @@ SOCKET connectLocalPort(int port, int timeout_ms) {
 }
 
 } // namespace
-
-std::string execCommand(const std::string& cmd) {
-    std::string result;
-#ifdef _WIN32
-    std::string shell_cmd = "cmd /c " + cmd;
-    FILE* pipe = _popen(shell_cmd.c_str(), "r");
-#else
-    FILE* pipe = popen(cmd.c_str(), "r");
-#endif
-    
-    if (!pipe) return result;
-    
-    char buffer[4096];
-    while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-        result += buffer;
-    }
-    
-#ifdef _WIN32
-    _pclose(pipe);
-#else
-    pclose(pipe);
-#endif
-    
-    // Remove trailing newlines
-    while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) {
-        result.pop_back();
-    }
-    
-    return result;
-}
 
 bool isPortAlive(int port, int timeout_ms) {
 #ifdef _WIN32
@@ -790,6 +840,26 @@ std::string JsonBuilder::build() const {
 
 #include <curl/curl.h>
 
+void applyTlsVerification(void* curl_handle) {
+    if (!curl_handle) return;
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYPEER, 1L);
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_VERIFYHOST, 2L);
+    const char* ca_bundle = getenv("HUNTER_CA_BUNDLE");
+    if (ca_bundle && *ca_bundle) {
+        curl_easy_setopt(curl_handle, CURLOPT_CAINFO, ca_bundle);
+    } else {
+#ifdef __ANDROID__
+        // Android has no curl default bundle; use the system trust store.
+        curl_easy_setopt(curl_handle, CURLOPT_CAPATH, "/system/etc/security/cacerts");
+#endif  // elsewhere curl's built-in default (Linux bundle / Windows Schannel store) applies
+    }
+#ifdef _WIN32
+#ifdef CURLSSLOPT_NATIVE_CA
+    curl_easy_setopt(curl_handle, CURLOPT_SSL_OPTIONS, CURLSSLOPT_NATIVE_CA);
+#endif
+#endif
+}
+
 struct DownloadProgress {
     size_t total_bytes;
     std::chrono::steady_clock::time_point start;
@@ -831,8 +901,7 @@ float downloadSpeedViaSocks5(const std::string& url, const std::string& proxy_ho
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &prog);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, (long)timeout_seconds);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, (long)std::min(timeout_seconds, 10));
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    applyTlsVerification(curl);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");

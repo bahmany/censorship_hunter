@@ -45,6 +45,12 @@ public:
      * @brief Check if system proxy is currently enabled
      */
     static bool isEnabled();
+
+    /**
+     * @brief Recover stale backup file from a previous crash.
+     *        If a backup exists at startup, restore it and delete it.
+     */
+    static void recoverStale();
 };
 
 } // namespace network

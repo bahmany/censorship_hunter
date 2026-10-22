@@ -139,10 +139,7 @@ socket_t createTcpSocket(const std::string& host, int port, double timeout_sec);
  */
 void closeSocket(socket_t fd);
 
-/**
- * @brief Execute system command and get output
- */
-std::string execCommand(const std::string& cmd);
+
 
 /**
  * @brief Trim whitespace from both ends
@@ -185,6 +182,17 @@ bool mkdirRecursive(const std::string& path);
 bool fileExists(const std::string& path);
 
 /**
+ * @brief Get directory of the current executable (fail-safe: empty on error)
+ */
+std::string executableDir();
+
+/**
+ * @brief Find an engine binary safely (env > embedded > executable-dir relative).
+ *        Returns absolute path or empty. Only absolute env paths are accepted.
+ */
+std::string findEngineBinary(const std::string& engine_name);
+
+/**
  * @brief Get directory of a file path
  */
 std::string dirName(const std::string& path);
@@ -221,6 +229,8 @@ LocalProxyProbeResult probeLocalMixedPort(int port, int timeout_ms = 2000);
  * @return true if connection succeeds within timeout
  */
 bool tcpConnect(const std::string& host, int port, int timeout_ms = 3000);
+
+void applyTlsVerification(void* curl_handle);
 
 /**
  * @brief Measure TCP connect latency to local port

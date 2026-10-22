@@ -201,11 +201,16 @@ HunterOrchestrator::HunterOrchestrator(HunterConfig& config) :
 }
 
 HunterOrchestrator::~HunterOrchestrator() {
+    // Never leave the user's system proxy pointing at an engine that is about to die.
+    deactivateClientConfig();
     stop();
     if (sub_update_thread_.joinable()) sub_update_thread_.join();
 }
 
 void HunterOrchestrator::initComponents() {
+    // A previous run that crashed while connected may have left the system
+    // proxy pointing at 127.0.0.1:<port>; restore the user's own settings.
+    network::SysProxy::recoverStale();
     // Config database
     config_db_ = std::make_unique<network::ConfigDatabase>(constants::CONFIG_DB_MAX_SIZE);
     // Failover candidates come from, and every live-session probe is recorded in, this database.

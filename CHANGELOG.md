@@ -5,6 +5,51 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-10-22
+
+### Fixed
+- **Connect crashed / never connected.**
+  - Starting the client proxy used a moved-from session (null pointer), and
+    switching configs re-locked a held mutex (deadlock).
+  - Client mode was launched with the probe-only test config.
+  - Connect now runs the **xray core** with a proper client config: one
+    `mixed` SOCKS5+HTTP inbound on `127.0.0.1:10808`, LAN destinations
+    direct, everything else through the proxy (the routing JSON was also
+    invalid).
+  - sing-box is used only for what xray cannot express (hysteria2/tuic).
+- A failed Connect now shows the actual reason instead of a generic message.
+
+### Security
+- **TLS certificate verification is now enforced** for all HTTPS (it was
+  disabled everywhere). It uses the OS trust store on Windows and
+  `/system/etc/security/cacerts` on Android; `HUNTER_CA_BUNDLE` overrides.
+- **No binary planting.** xray/sing-box are run only from an absolute
+  override, the verified embedded copy, or next to the Hunter executable —
+  never from the current working directory. An embedded engine that fails
+  its SHA-256 check is refused.
+- **Private files.** Engine configs (which contain server credentials) are
+  written `0600` in `0700` directories.
+- **Verified updates.** The self-updater applies a download only if its
+  SHA-256 matches the GitHub release asset digest, and requires https.
+- **System proxy respects the user's settings.**
+  - The previous proxy configuration is saved and restored on disconnect and
+    exit.
+  - After a crash it is recovered on the next start, so a dead local proxy
+    never stays set.
+  - Settings are per-user only (HKCU registry API on Windows, no `reg.exe`
+    or shell); no elevation is requested.
+- No shell command strings are executed anywhere: helper processes are
+  started with argv vectors.
+- **Data location.** Hunter keeps its data next to the executable when that
+  directory is writable, otherwise in the per-user data directory
+  (`%LOCALAPPDATA%\Hunter`, `~/.local/share/hunter`). It never writes into
+  protected or foreign directories.
+
+### Added
+- `test_client_connect` integration test (runs when
+  `HUNTER_TEST_CONNECT_URIS` and `HUNTER_XRAY_PATH` are set; skips in CI).
+- Version bump: Android `versionName` 2.6.0 (`versionCode` 8).
+
 ## [1.10.0] - 2026-10-22
 
 ### Fixed

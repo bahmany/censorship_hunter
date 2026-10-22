@@ -2,9 +2,11 @@
 #include <iostream>
 #include "core/constants.h"
 #include "core/utils.h"
+#include "core/endpoint_key.h"
 #include "network/http_client.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <cstdio>
 #include <cstdlib>
@@ -145,6 +147,7 @@ std::vector<ReleaseInfo::Asset> extractAssets(const std::string& json) {
         asset.name = jsonExtractString(obj, "name");
         asset.browser_download_url = jsonExtractString(obj, "browser_download_url");
         asset.size_bytes = jsonExtractInt(obj, "size");
+        asset.digest = jsonExtractString(obj, "digest");
         if (!asset.name.empty() && !asset.browser_download_url.empty()) {
             assets.push_back(asset);
         }
@@ -391,8 +394,11 @@ bool SelfUpdateManager::checkForUpdate() {
 
 bool SelfUpdateManager::fetchLatestRelease(ReleaseInfo& out) {
     network::HttpClient http;
-    // Use GitHub API to get latest release
+    // Require https:// for the API URL
     std::string url = "https://api.github.com/repos/bahmany/censorship_hunter/releases/latest";
+    if (url.find("https://") != 0) {
+        return false;
+    }
 
     // GitHub API requires a User-Agent header
     std::string response = http.get(url, 15000);
@@ -423,6 +429,7 @@ std::string SelfUpdateManager::findPlatformAsset(const ReleaseInfo& info) const 
 
 #if defined(_WIN32)
     for (const auto& asset : info.assets) {
+        if (asset.browser_download_url.find("https://") != 0) continue;
         if (asset.name.find("windows") != std::string::npos &&
             asset.name.find(".exe") != std::string::npos) {
             return asset.browser_download_url;
@@ -430,12 +437,14 @@ std::string SelfUpdateManager::findPlatformAsset(const ReleaseInfo& info) const 
     }
     // Fallback: any .exe (legacy naming)
     for (const auto& asset : info.assets) {
+        if (asset.browser_download_url.find("https://") != 0) continue;
         if (asset.name.find(".exe") != std::string::npos) {
             return asset.browser_download_url;
         }
     }
 #elif defined(__ANDROID__)
     for (const auto& asset : info.assets) {
+        if (asset.browser_download_url.find("https://") != 0) continue;
         if (asset.name.find("android") != std::string::npos &&
             asset.name.find(".apk") != std::string::npos) {
             return asset.browser_download_url;
@@ -443,6 +452,7 @@ std::string SelfUpdateManager::findPlatformAsset(const ReleaseInfo& info) const 
     }
 #else
     for (const auto& asset : info.assets) {
+        if (asset.browser_download_url.find("https://") != 0) continue;
         if (asset.name.find("linux") != std::string::npos &&
             asset.name.find(".exe") == std::string::npos) {
             return asset.browser_download_url;
@@ -450,6 +460,7 @@ std::string SelfUpdateManager::findPlatformAsset(const ReleaseInfo& info) const 
     }
     // Fallback: any non-exe, non-apk asset
     for (const auto& asset : info.assets) {
+        if (asset.browser_download_url.find("https://") != 0) continue;
         if (asset.name.find(".exe") == std::string::npos &&
             asset.name.find(".apk") == std::string::npos &&
             asset.name.find(".dmg") == std::string::npos) {
@@ -462,6 +473,12 @@ std::string SelfUpdateManager::findPlatformAsset(const ReleaseInfo& info) const 
 }
 
 bool SelfUpdateManager::downloadFile(const std::string& url, const std::string& dest_path) {
+    // Require https:// for download URL
+    if (url.find("https://") != 0) {
+        last_download_error_ = "Download URL must use https://";
+        return false;
+    }
+
     // Clear any previous download error
     last_download_error_.clear();
 
@@ -493,8 +510,7 @@ bool SelfUpdateManager::downloadFile(const std::string& url, const std::string& 
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT, 300L);  // 5 min timeout
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30L);
-    curl_easy_setopt(curl, CURLOPT_USERAGENT, "Hunter-Updater/1.0");
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 1L);
+    utils::applyTlsVerification(curl);
 
     CURLcode res = curl_easy_perform(curl);
     curl_easy_cleanup(curl);
@@ -567,6 +583,50 @@ bool SelfUpdateManager::downloadAndApply() {
     if (!downloadFile(asset_url, download_path)) {
         setState(UpdateState::Failed, "Failed to download update: " + last_download_error_);
         return false;
+    }
+
+    // Integrity verification: find digest for the selected asset
+    std::string selected_digest;
+    for (const auto& asset : info.assets) {
+        if (asset.browser_download_url == asset_url) {
+            selected_digest = asset.digest;
+            break;
+        }
+    }
+
+    if (selected_digest.empty()) {
+        std::remove(download_path.c_str());
+        setState(UpdateState::Failed, "update rejected: release has no SHA-256 digest");
+        return false;
+    }
+
+    // Read downloaded file and compute SHA-256
+    {
+        std::ifstream verify_file(download_path, std::ios::binary);
+        if (!verify_file.is_open()) {
+            std::remove(download_path.c_str());
+            setState(UpdateState::Failed, "update rejected: integrity check failed");
+            return false;
+        }
+        std::string file_content((std::istreambuf_iterator<char>(verify_file)),
+                                  std::istreambuf_iterator<char>());
+        verify_file.close();
+
+        std::string computed_hex = sha256Hex(file_content);
+        std::string expected_hex = selected_digest;
+        if (expected_hex.find("sha256:") == 0) {
+            expected_hex = expected_hex.substr(7);
+        }
+        // Normalize to lowercase for case-insensitive comparison
+        for (auto& c : expected_hex) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+
+        if (computed_hex != expected_hex) {
+            std::remove(download_path.c_str());
+            setState(UpdateState::Failed, "update rejected: integrity check failed");
+            return false;
+        }
     }
 
     setState(UpdateState::DownloadComplete, "Download complete, applying update...");

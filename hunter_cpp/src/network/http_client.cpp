@@ -80,8 +80,7 @@ std::string HttpClient::get(const std::string& url, int timeout_ms, const std::s
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)std::min(timeout_ms, 4000));
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    utils::applyTlsVerification(curl);
     curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
     curl_easy_setopt(curl, CURLOPT_MAXREDIRS, 3L);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, 
@@ -106,8 +105,7 @@ int HttpClient::head(const std::string& url, int timeout_ms, const std::string& 
     curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
     curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT_MS, (long)std::min(timeout_ms, 4000));
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    utils::applyTlsVerification(curl);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, 
                      user_agent.empty() ? randomUserAgent().c_str() : user_agent.c_str());
 
@@ -141,8 +139,7 @@ std::string HttpClient::post(const std::string& url, const std::string& body,
     curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, writeCallback);
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
     curl_easy_setopt(curl, CURLOPT_TIMEOUT_MS, (long)timeout_ms);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
-    curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
+    utils::applyTlsVerification(curl);
     curl_easy_setopt(curl, CURLOPT_USERAGENT, 
                      user_agent.empty() ? randomUserAgent().c_str() : user_agent.c_str());
 
