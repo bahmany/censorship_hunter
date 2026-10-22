@@ -38,3 +38,12 @@ This project includes third-party software components and datasets distributed u
 - **Author**: Meta Platforms, Inc.
 - **License**: BSD 3-Clause License / GPLv2
 - **URL**: https://github.com/facebook/zstd
+
+---
+
+## Noto Sans
+
+- **Project**: Noto Sans (Regular), embedded as the UI font (`hunter_cpp/include/gui/fonts/noto_sans_regular.inc`)
+- **Author**: Google LLC / The Noto Project Authors
+- **License**: SIL Open Font License, Version 1.1
+- **URL**: https://github.com/notofonts/latin-greek-cyrillic

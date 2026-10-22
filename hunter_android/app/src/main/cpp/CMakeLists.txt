@@ -160,6 +160,7 @@ set(JNI_SOURCES
     vpn_jni.cpp
     ${HUNTER_SRC_DIR}/src/gui/app.cpp
     ${HUNTER_SRC_DIR}/src/gui/update_panel.cpp
+    ${HUNTER_SRC_DIR}/src/gui/ui_fonts.cpp
     ${HUNTER_SRC_DIR}/src/ui/theme.cpp
 )
 

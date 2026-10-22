@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <atomic>
 #include <condition_variable>
 #include <map>
@@ -90,7 +91,15 @@ private:
     void renderStatCards();
     void renderActionBar();
     void renderConfigTable();
-    void renderAdvancedPanels();
+    void renderSubscriptionsTab();
+    // Fire-and-forget work from UI actions: exceptions are reported (log +
+    // toast) instead of terminating, and the destructor waits for them.
+    void runBackground(std::function<void()> fn);
+    bool waitForBackgroundTasks(std::chrono::milliseconds timeout);  // true when none remain
+    std::atomic<int> bg_inflight_{0};
+    std::mutex lifecycle_mu_;  // serializes orchestrator start/stop
+    void renderFoundTab();
+    void refreshFoundCacheIfDue();
     void renderMainView();
     void renderAboutView();
 

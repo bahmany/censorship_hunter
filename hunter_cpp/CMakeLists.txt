@@ -303,11 +303,19 @@ add_executable(hunter
     src/gui/main.cpp
     src/gui/app.cpp
     src/gui/update_panel.cpp
+    src/gui/ui_fonts.cpp
     src/gui/single_instance.cpp
     src/ui/theme.cpp
     ${IMGUI_SOURCES}
     ${QR_SOURCES}
 )
+
+# ─── Optional UI probe (interaction-test builds only) ───
+option(HUNTER_UI_PROBE "Dump widget rectangles for tools/ui_probe/click_all.py" OFF)
+if(HUNTER_UI_PROBE)
+    target_sources(hunter PRIVATE tools/ui_probe/ui_probe_hooks.cpp)
+    target_compile_definitions(hunter PRIVATE IMGUI_ENABLE_TEST_ENGINE)
+endif()
 
 # ─── Application icon ───
 # Embed the icon + version info into the binary on Windows via resources.rc.
@@ -365,7 +373,7 @@ target_link_options(test_embed PRIVATE -static-libgcc -static-libstdc++)
 target_link_libraries(test_embed PRIVATE hunter_core)
 
 # Stage 4 A1 unit suites (pure logic, no network)
-foreach(_t test_endpoint_key test_health_score test_config_db_v4)
+foreach(_t test_endpoint_key test_health_score test_config_db_v4 test_worker_join)
     add_executable(${_t} tests/${_t}.cpp)
     target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
     target_link_libraries(${_t} PRIVATE hunter_core)
@@ -405,6 +413,7 @@ add_test(NAME hunter_tests COMMAND hunter_tests)
 add_test(NAME test_endpoint_key COMMAND test_endpoint_key)
 add_test(NAME test_health_score COMMAND test_health_score)
 add_test(NAME test_config_db_v4 COMMAND test_config_db_v4)
+add_test(NAME test_worker_join COMMAND test_worker_join)
 add_test(NAME test_embed COMMAND test_embed)
 foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
            test_uri_parser test_curl_transport test_engine_launcher test_subscription_parse)

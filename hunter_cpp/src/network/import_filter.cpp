@@ -7,7 +7,8 @@ namespace network {
 bool isImportableProxyUri(const std::string& uri) {
     if (uri.size() < 10) return false;
     // ssr:// deliberately excluded — no embedded engine can run it.
-    static const std::vector<std::string> schemes = {
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::vector<std::string>& schemes = *new std::vector<std::string>{
         "vmess://", "vless://", "trojan://", "ss://",
         "hysteria2://", "hy2://", "tuic://", "wireguard://"
     };

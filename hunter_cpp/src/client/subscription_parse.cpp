@@ -44,7 +44,8 @@ std::string trimLine(const std::string& s) {
 
 // Check if a string starts with any of the supported scheme prefixes
 bool hasSupportedScheme(const std::string& s) {
-    static const std::vector<std::string> prefixes = {
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::vector<std::string>& prefixes = *new std::vector<std::string>{
         "vmess://", "vless://", "trojan://", "ss://", "ssr://",
         "hysteria2://", "hy2://", "tuic://", "wireguard://",
         "socks://", "socks5://", "anytls://"

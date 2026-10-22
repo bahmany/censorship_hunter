@@ -5,6 +5,59 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.10.0] - 2026-10-22
+
+### Fixed
+- **Crashes and hangs on Stop / Start / close**:
+  - Start right after Stop could reassign a still-joinable `std::thread`
+    (`std::terminate`).
+  - Stop and window-close could both join/detach the orchestrator thread.
+  - The orchestrator thread was detached after 4 s and kept running into
+    teardown.
+  - Start/stop is now serialized; the thread is really joined, and Start is
+    disabled while stopping.
+- **Unbounded shutdown**: `BaseWorker::join(timeout)` ignored its timeout, so
+  Stop and window-close waited for a whole scan cycle (minutes). Joins are now
+  bounded, the scan cycle and batch tester check the stop flag between
+  phases/batches, and Stop completes in seconds.
+- **Memory errors found under AddressSanitizer** during real-click testing:
+  - `thread_manager_` was reset by `stop()` while `start()` still used it.
+  - The download-join waiter wrote to a dead stack frame.
+  - Lookup tables were destroyed by `exit()` while worker threads still read
+    them.
+- Background work started from buttons (Connect, Test, subscriptions, rescan)
+  now reports failures as a toast + log instead of terminating the app, and
+  is awaited before the window object is destroyed.
+
+### Changed
+- **No more page scrolling**: the main window never scrolls. Live configs,
+  Subscriptions and Found are tabs over one body area, and only the active
+  list scrolls (previously the table filled the window and the collapsible
+  sections below it pushed the whole page into a scroll).
+- **Sharp text**: the UI now embeds Noto Sans and rasterizes it at the real
+  DPI-scaled size (imgui 1.92 dynamic fonts) instead of stretching the 13 px
+  bitmap ProggyClean font with `FontGlobalScale`, which was the blur. Style
+  metrics are reset before DPI scaling so they no longer compound on monitor
+  changes.
+- **Responsive layout**:
+  - One top bar at every width: title, a status pill (no longer a fake
+    button), Start/Stop and About, right-aligned. The narrow layout used to
+    hide About.
+  - The action bar is an equal-width flow layout that wraps to two rows on
+    narrow windows.
+  - The narrow table no longer shows an empty column.
+- Remarks drop emoji/flag/unsupported-script glyphs instead of showing tofu
+  boxes; long URIs are truncated without splitting UTF-8 characters.
+- Found count is shared by the stat card and the tab (it showed 0 before).
+- Version bump: Android `versionName` 2.5.0 (`versionCode` 7).
+
+### Added
+- `tools/ui_probe/`: a real-click GUI regression harness
+  (`-DHUNTER_UI_PROBE=ON` build + `click_all.py`). It clicks every labelled
+  control under Xvfb + openbox, plus rapid clicks, a Stop→Start race, live
+  resizes and an Alt+F4 close. Runs under ASan/UBSan.
+- `test_worker_join` regression test for bounded worker joins.
+
 ## [1.9.0] - 2026-10-21
 
 ### Changed

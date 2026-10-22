@@ -1,5 +1,6 @@
 // Android app wrapper - uses the same HunterGuiApp rendering logic
 // but with ImGui Android backend + GLES3 instead of GLFW + OpenGL2
+#include "gui/ui_fonts.h"
 #include "android_app.h"
 #include "imgui_impl_android_custom.h"
 #include "imgui_impl_opengl3.h"
@@ -54,9 +55,7 @@ void AndroidApp::onSurfaceCreated() {
         ImGui::StyleColorsDark();
 
         // Scale font for mobile display
-        ImFontConfig font_cfg;
-        font_cfg.SizePixels = 32.0f;  // Larger font for touch screens
-        io.Fonts->AddFontDefault(&font_cfg);
+        hunter::gui::loadUiFonts(28.0f);  // Noto Sans, large for touch screens
 
         // Initialize backends
         ImGui_ImplAndroid_Init();

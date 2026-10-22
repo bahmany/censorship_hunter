@@ -30,6 +30,9 @@
 #endif
 
 #include "imgui.h"
+#ifdef IMGUI_ENABLE_TEST_ENGINE
+#include "imgui_internal.h"
+#endif
 #include "gui/update_panel.h"
 
 #include "core/constants.h"
@@ -46,6 +49,7 @@
 #include "network/proxy_tester.h"
 #include "network/sys_proxy.h"
 #include "core/client_export.h"
+#include "gui/ui_fonts.h"
 
 // ─── stb_image for runtime icon loading (Linux/macOS) ───
 // On Windows the icon is embedded via resources.rc and GLFW picks it up
@@ -67,6 +71,9 @@ namespace gui {
 using Spacing = UI::Theme::Spacing;
 using Colors   = UI::Theme::Colors;
 constexpr float kNarrowThreshold = UI::Theme::NarrowThreshold;
+constexpr float kUiFontSizePx = 16.0f;    // body text, design px
+constexpr float kStatFontSizePx = 24.0f;  // stat-card numbers, design px
+constexpr float kTitleFontSizePx = 20.0f; // top-bar title, design px
 
 // Aliases for readability (optional – can be removed later)
 constexpr float kSpaceS = Spacing::Small;
@@ -395,6 +402,19 @@ HunterGuiApp::HunterGuiApp(HunterOrchestrator& orchestrator) : orch_(orchestrato
 }
 
 HunterGuiApp::~HunterGuiApp() {
+    // Background tasks capture `this`; let them finish before members die.
+    // Stop the orchestrator first so long-running tasks (tests, rescans) end.
+    stopOrchestratorBlocking();
+    if (!waitForBackgroundTasks(std::chrono::seconds(20))) {
+        // A task (e.g. a long connectivity test) still references `this`.
+        // Destroying members under it would be a use-after-free; the
+        // orchestrator has already persisted its state, so end the process
+        // without running destructors instead.
+        std::fprintf(stderr, "[gui] %d background task(s) still running at exit; exiting now\n",
+                     bg_inflight_.load());
+        std::fflush(nullptr);
+        std::_Exit(0);
+    }
     stopSnapshotWorker();   // also stops the country + baseline workers
     if (auto* db = orch_.configDb()) db->setBatchPrioritizer(nullptr);
     stopOrchestratorBlocking();
@@ -428,7 +448,15 @@ void HunterGuiApp::saveConfigNow() {
 }
 
 void HunterGuiApp::startOrchestrator() {
+    if (shutdown_in_progress_.load()) {
+        showToast("Still stopping - try again in a moment");
+        return;
+    }
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mu_);
     if (orchestrator_running_.load()) return;
+    // A previous run's thread has finished (running == false) but must be
+    // joined before the std::thread is reassigned, or std::terminate fires.
+    if (orchestrator_thread_.joinable()) orchestrator_thread_.join();
     transitioning_ = true;
     orchestrator_running_ = true;
     orchestrator_thread_ = std::thread([this]() {
@@ -436,6 +464,10 @@ void HunterGuiApp::startOrchestrator() {
             orch_.start();
         } catch (const std::exception& e) {
             std::fprintf(stderr, "[gui] orchestrator error: %s\n", e.what());
+            showToast(std::string("Hunter stopped: ") + e.what());
+        } catch (...) {
+            std::fprintf(stderr, "[gui] orchestrator error: unknown exception\n");
+            showToast("Hunter stopped after an unexpected error");
         }
         orchestrator_running_ = false;
     });
@@ -449,29 +481,52 @@ void HunterGuiApp::stopOrchestrator() {
 
 void HunterGuiApp::requestShutdown() {
     if (shutdown_in_progress_.exchange(true)) return; // idempotent
-    std::thread([this]() {
+    runBackground([this]() {
         stopOrchestratorBlocking();
         shutdown_in_progress_.store(false);
-    }).detach();
+    });
 }
 
 void HunterGuiApp::stopOrchestratorBlocking() {
+    // Serialized with startOrchestrator(): the Stop button (background task)
+    // and the destructor may both get here; two threads joining/detaching the
+    // same std::thread throws std::system_error -> std::terminate.
+    std::lock_guard<std::mutex> lifecycle(lifecycle_mu_);
     if (!orchestrator_running_.load()) {
         if (orchestrator_thread_.joinable()) orchestrator_thread_.join();
         return;
     }
     transitioning_ = true;
     orch_.stop();
-    // Bounded join for orchestrator_thread_: if it doesn't exit within ~4s after orch_.stop() returns, detach it.
-    auto start = std::chrono::steady_clock::now();
-    while (orchestrator_thread_.joinable() && 
-           std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - start).count() < 4) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-    if (orchestrator_thread_.joinable()) {
-        orchestrator_thread_.detach();
-    }
+    // orch_.start() returns once stop() has been requested (worker joins are
+    // bounded). Always join: a detached thread would keep using orch_ and
+    // `this` after they are destroyed.
+    if (orchestrator_thread_.joinable()) orchestrator_thread_.join();
     transitioning_ = false;
+}
+
+void HunterGuiApp::runBackground(std::function<void()> fn) {
+    bg_inflight_.fetch_add(1);
+    std::thread([this, fn = std::move(fn)]() {
+        try {
+            fn();
+        } catch (const std::exception& e) {
+            std::fprintf(stderr, "[gui] background task failed: %s\n", e.what());
+            showToast(std::string("Action failed: ") + e.what());
+        } catch (...) {
+            std::fprintf(stderr, "[gui] background task failed: unknown exception\n");
+            showToast("Action failed (unexpected error)");
+        }
+        bg_inflight_.fetch_sub(1);
+    }).detach();
+}
+
+bool HunterGuiApp::waitForBackgroundTasks(std::chrono::milliseconds timeout) {
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    while (bg_inflight_.load() > 0 && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return bg_inflight_.load() == 0;
 }
 
 void HunterGuiApp::requestClose() {
@@ -487,12 +542,12 @@ void HunterGuiApp::setShowRequestPoll(std::function<bool()> poll) {
 
 void HunterGuiApp::triggerRescan() {
     if (rescan_in_progress_.exchange(true)) return;
-    std::thread([this]() {
+    runBackground([this]() {
         try {
             orch_.runCycle();
         } catch (...) {}
         rescan_in_progress_ = false;
-    }).detach();
+    });
 }
 
 const ParsedConfig& HunterGuiApp::parsedFor(const std::string& uri) {
@@ -679,7 +734,7 @@ void HunterGuiApp::snapshotWorker() {
                     }
                     row.protocol = std::get<0>(pc->second);
                     row.address = std::get<1>(pc->second);
-                    row.ps = std::get<2>(pc->second);
+                    row.ps = displaySafeText(std::get<2>(pc->second));
                     row.port = std::get<3>(pc->second);
                     snap->rows.push_back(std::move(row));
                 }
@@ -1049,6 +1104,10 @@ void HunterGuiApp::applyModernTheme() {
      if (theme_applied_) return;
 
      ImGuiStyle& style = ImGui::GetStyle();
+     // Start from defaults so ScaleAllSizes() below never compounds on fields
+     // this function does not rewrite explicitly.
+     style = ImGuiStyle();
+     style.FontSizeBase = kUiFontSizePx;
 
      // Modern rounded corners (6-8)
      style.WindowRounding = 8.0f;
@@ -1163,6 +1222,9 @@ void HunterGuiApp::applyModernTheme() {
      // values above are design pixels and are rewritten first on every call,
      // so this is idempotent across DPI changes (never compounds).
      style.ScaleAllSizes(ui_scale_);
+     // Fonts are rasterized at FontSizeBase * FontScaleDpi (imgui 1.92 dynamic
+     // fonts), so text stays sharp at any DPI instead of being stretched.
+     style.FontScaleDpi = ui_scale_;
 
      theme_applied_ = true;
  }
@@ -1180,7 +1242,6 @@ void HunterGuiApp::refreshDpiScale() {
     if (s <= 0.0f) s = 1.0f;
     if (s != ui_scale_) {
         ui_scale_ = s;
-        ImGui::GetIO().FontGlobalScale = ui_scale_;
         theme_applied_ = false;   // rewrite base metrics, then re-scale on top
         applyModernTheme();
     }
@@ -1188,113 +1249,73 @@ void HunterGuiApp::refreshDpiScale() {
 }
 
 void HunterGuiApp::renderTopBar() {
-    ImGui::BeginGroup();
-    
-    float avail_width = ImGui::GetContentRegionAvail().x;
-    const bool narrow = avail_width < kNarrowThreshold;
-    
-    if (narrow) {
-        // Stack vertically on narrow screens
+    // One row at every width: [title] [status pill] ........ [Start/Stop] [About]
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const bool hunting = orchestrator_running_.load();
+    const bool stopping = shutdown_in_progress_.load();
+    const bool active = orch_.clientStatus().active;
+
+    ImVec4 status_color = kTextDisabled;
+    const char* status_text = "Idle";
+    if (stopping) { status_color = kWarnAmber; status_text = "Stopping"; }
+    else if (active) { status_color = kSuccessGreen; status_text = "Connected"; }
+    else if (hunting) { status_color = kWarnAmber; status_text = "Hunting"; }
+
+    const float row_h = ImGui::GetFrameHeight();
+    const float avail = ImGui::GetContentRegionAvail().x;
+    if (avail >= 420.0f * ui_scale_) {
+        ImGui::AlignTextToFramePadding();
+        ImGui::PushFont(nullptr, kTitleFontSizePx);
         ImGui::TextColored(kAccentBlue, "Hunter");
-        ImGui::Separator();
-        
-        // Status pill
-        bool hunting = orchestrator_running_.load();
-        auto client_status = orch_.clientStatus();
-        bool active = client_status.active;
-        
-        ImVec4 status_color;
-        const char* status_text;
-        if (active) {
-            status_color = kSuccessGreen;
-            status_text = "Connected";
-        } else if (hunting) {
-            status_color = kWarnAmber;
-            status_text = "Hunting...";
+        ImGui::PopFont();
+        ImGui::SameLine(0, style.ItemSpacing.x * 2.0f);
+    }
+
+    // Status pill: a label, not a button (it has no action).
+    {
+        const ImVec2 text_size = ImGui::CalcTextSize(status_text);
+        const ImVec2 pill(text_size.x + style.FramePadding.x * 4.0f, row_h);
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        ImDrawList* dl = ImGui::GetWindowDrawList();
+        dl->AddRectFilled(p0, ImVec2(p0.x + pill.x, p0.y + pill.y),
+                          ImGui::GetColorU32(ImVec4(status_color.x, status_color.y, status_color.z, 0.18f)),
+                          pill.y * 0.5f);
+        const float dot_r = row_h * 0.16f;
+        dl->AddCircleFilled(ImVec2(p0.x + style.FramePadding.x * 1.2f + dot_r, p0.y + pill.y * 0.5f), dot_r,
+                            ImGui::GetColorU32(status_color));
+        dl->AddText(ImVec2(p0.x + style.FramePadding.x * 2.2f + dot_r, p0.y + (pill.y - text_size.y) * 0.5f),
+                    ImGui::GetColorU32(status_color), status_text);
+        ImGui::Dummy(ImVec2(pill.x + dot_r * 2.0f, pill.y));
+    }
+
+    // Right-aligned actions.
+    const float btn_w = 96.0f * ui_scale_;
+    ImGui::SameLine(std::max(ImGui::GetCursorPosX(),
+                             ImGui::GetWindowContentRegionMax().x - btn_w * 2.0f - style.ItemSpacing.x));
+    ImGui::BeginDisabled(stopping);
+    ImGui::PushStyleColor(ImGuiCol_Button, hunting ? ImVec4(0.55f, 0.20f, 0.20f, 1.0f) : kAccentBlue);
+    if (ImGui::Button(hunting ? "Stop" : "Start", ImVec2(btn_w, 0))) {
+        if (hunting) {
+            requestShutdown();
+            showToast("Stopping...");
         } else {
-            status_color = kTextDisabled;
-            status_text = "Idle";
-        }
-        
-        ImGui::PushStyleColor(ImGuiCol_Button, status_color);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(status_color.x, status_color.y, status_color.z, 0.8f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(status_color.x * 0.7f, status_color.y * 0.7f, status_color.z * 0.7f, 1.0f));
-        ImGui::Button(status_text, ImVec2(-1, 0));
-        ImGui::PopStyleColor(3);
-        
-        // Primary action button
-        if (ImGui::Button(hunting ? "Stop" : "Start", ImVec2(-1, 0))) {
-            if (hunting) {
-                requestShutdown();
-                showToast("Stopping...");
-            } else {
-                startOrchestrator();
-                showToast("Started");
-            }
-        }
-        
-        ImGui::Spacing();
-    } else {
-        // Horizontal layout on wide screens
-        ImGui::TextColored(kAccentBlue, "Hunter");
-        ImGui::SameLine(0, Spacing::Large);
-        
-        // Status pill
-        bool hunting = orchestrator_running_.load();
-        auto client_status = orch_.clientStatus();
-        bool active = client_status.active;
-        
-        ImVec4 status_color;
-        const char* status_text;
-        if (active) {
-            status_color = kSuccessGreen;
-            status_text = "Connected";
-        } else if (hunting) {
-            status_color = kWarnAmber;
-            status_text = "Hunting";
-        } else {
-            status_color = kTextDisabled;
-            status_text = "Idle";
-        }
-        
-        ImGui::PushStyleColor(ImGuiCol_Button, status_color);
-        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(status_color.x, status_color.y, status_color.z, 0.8f));
-        ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(status_color.x * 0.7f, status_color.y * 0.7f, status_color.z * 0.7f, 1.0f));
-        ImGui::Button(status_text, ImVec2(120 * ui_scale_, 0));
-        ImGui::PopStyleColor(3);
-        
-        ImGui::SameLine(0, Spacing::Medium);
-        
-        // Primary action button (Start/Stop)
-        if (ImGui::Button(hunting ? "Stop" : "Start", ImVec2(100 * ui_scale_, 0))) {
-            if (hunting) {
-                requestShutdown();
-                showToast("Stopping...");
-            } else {
-                startOrchestrator();
-                showToast("Started");
-            }
-        }
-        
-        // About button on the right
-        ImGui::SameLine(avail_width - 100 * ui_scale_);
-        if (currentView_ == View::Main) {
-            if (ImGui::Button("About", ImVec2(80 * ui_scale_, 0))) {
-                currentView_ = View::About;
-            }
-        } else {
-            if (ImGui::Button("< Back", ImVec2(80 * ui_scale_, 0))) {
-                currentView_ = View::Main;
-            }
+            startOrchestrator();
+            showToast("Started");
         }
     }
-    
-    ImGui::EndGroup();
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (currentView_ == View::Main) {
+        if (ImGui::Button("About", ImVec2(btn_w, 0))) currentView_ = View::About;
+    } else {
+        if (ImGui::Button("< Back", ImVec2(btn_w, 0))) currentView_ = View::Main;
+    }
     ImGui::Separator();
 }
 
 void HunterGuiApp::renderStatCards() {
-    const float card_height = ImGui::GetTextLineHeightWithSpacing() * 2.5f + ImGui::GetStyle().WindowPadding.y * 2.0f;
+    const float card_height = ImGui::GetTextLineHeightWithSpacing() + kStatFontSizePx * ui_scale_ + ImGui::GetStyle().ItemSpacing.y + ImGui::GetStyle().WindowPadding.y * 2.0f;
     const bool narrow = viewport_width_ < kNarrowThreshold;
     
     if (narrow) {
@@ -1304,7 +1325,7 @@ void HunterGuiApp::renderStatCards() {
         auto renderCard = [&](const char* label, const char* value, ImVec4 color) {
             ImGui::PushID(label); ImGui::BeginChild("##card", ImVec2(card_width, card_height), true);
             ImGui::TextDisabled("%s", label);
-            ImGui::SetWindowFontScale(1.5f); ImGui::TextColored(color, "%s", value); ImGui::SetWindowFontScale(1.0f);
+            ImGui::PushFont(nullptr, kStatFontSizePx); ImGui::TextColored(color, "%s", value); ImGui::PopFont();
             ImGui::EndChild(); ImGui::PopID();
         };
         
@@ -1314,7 +1335,7 @@ void HunterGuiApp::renderStatCards() {
         renderCard("Tested", std::to_string(cached_tested_).c_str(), kAccentBlue);
         
         // Row 2: Found, Proxy
-        int found_count = (int)orch_.foundHistory().snapshot().size();
+        int found_count = (int)found_cache_.size();
         renderCard("Found", std::to_string(found_count).c_str(), kWarnAmber);
         ImGui::SameLine();
         {
@@ -1327,7 +1348,7 @@ void HunterGuiApp::renderStatCards() {
                 proxy_state = "On";
                 proxy_color = kSuccessGreen;
             }
-            ImGui::SetWindowFontScale(1.5f); ImGui::TextColored(proxy_color, "%s", proxy_state); ImGui::SetWindowFontScale(1.0f);
+            ImGui::PushFont(nullptr, kStatFontSizePx); ImGui::TextColored(proxy_color, "%s", proxy_state); ImGui::PopFont();
             ImGui::EndChild(); ImGui::PopID();
         }
     } else {
@@ -1337,7 +1358,7 @@ void HunterGuiApp::renderStatCards() {
         auto renderCard = [&](const char* label, const char* value, ImVec4 color) {
             ImGui::PushID(label); ImGui::BeginChild("##card", ImVec2(card_width, card_height), true);
             ImGui::TextDisabled("%s", label);
-            ImGui::SetWindowFontScale(1.5f); ImGui::TextColored(color, "%s", value); ImGui::SetWindowFontScale(1.0f);
+            ImGui::PushFont(nullptr, kStatFontSizePx); ImGui::TextColored(color, "%s", value); ImGui::PopFont();
             ImGui::EndChild(); ImGui::PopID();
         };
         
@@ -1346,7 +1367,7 @@ void HunterGuiApp::renderStatCards() {
         renderCard("Tested", std::to_string(cached_tested_).c_str(), kAccentBlue);
         ImGui::SameLine();
         {
-            int found_count = (int)orch_.foundHistory().snapshot().size();
+            int found_count = (int)found_cache_.size();
             renderCard("Found", std::to_string(found_count).c_str(), kWarnAmber);
         }
         ImGui::SameLine();
@@ -1360,7 +1381,7 @@ void HunterGuiApp::renderStatCards() {
                 proxy_state = "On";
                 proxy_color = kSuccessGreen;
             }
-            ImGui::SetWindowFontScale(1.5f); ImGui::TextColored(proxy_color, "%s", proxy_state); ImGui::SetWindowFontScale(1.0f);
+            ImGui::PushFont(nullptr, kStatFontSizePx); ImGui::TextColored(proxy_color, "%s", proxy_state); ImGui::PopFont();
             ImGui::EndChild(); ImGui::PopID();
         }
     }
@@ -1376,29 +1397,42 @@ void HunterGuiApp::renderActionBar() {
     bool has_snapshot = !snapshot_.empty();
     
     const float btn_height = 0; // auto
-    const float btn_w = 140 * ui_scale_;
+    // Flow layout: equal-width buttons fill the row and wrap onto more rows
+    // when the window is narrower than kActionCount * min width.
+    constexpr int kActionCount = 8;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const float min_w = 110.0f * ui_scale_;
+    const int per_row = std::max(1, std::min(kActionCount, (int)((avail + spacing) / (min_w + spacing))));
+    const int rows = (kActionCount + per_row - 1) / per_row;
+    const int cols = (kActionCount + rows - 1) / rows;  // balance rows (e.g. 4+4, not 7+1)
+    const float btn_w = std::floor((avail - spacing * (cols - 1)) / cols);
+    int slot = 0;
+    auto nextSlot = [&]() {
+        if (++slot % cols != 0) ImGui::SameLine();
+    };
     
     ImGui::PushStyleColor(ImGuiCol_Button, kAccentBlue);
     const bool connect_clicked = ImGui::Button(active ? "Disconnect" : "Connect", ImVec2(btn_w, btn_height));
     ImGui::PopStyleColor();
     if (connect_clicked) {
         if (active) {
-            std::thread([this]() {
+            runBackground([this]() {
                 orch_.deactivateClientConfig();
                 showToast("Disconnected");
-            }).detach();
+            });
         } else if (has_selection) {
             std::string uri = *selected_uris_.begin();
-            std::thread([this, uri]() {
+            runBackground([this, uri]() {
                 int port = orch_.activateClientConfig(uri);
                 if (port > 0) showToast("Connected on port " + std::to_string(port));
                 else showToast("Failed to connect to " + uri);
-            }).detach();
+            });
         } else {
             showToast("No profile selected");
         }
     }
-    ImGui::SameLine();
+    nextSlot();
     
     if (ImGui::Button("Test", ImVec2(btn_w, btn_height))) {
         std::vector<std::string> uris_to_test;
@@ -1408,7 +1442,7 @@ void HunterGuiApp::renderActionBar() {
             for (const auto& uri : selected_uris_) uris_to_test.push_back(uri);
         }
         if (uris_to_test.empty()) { showToast("No configs to test"); return; }
-        std::thread([this, uris_to_test]() {
+        runBackground([this, uris_to_test]() {
             network::ProxyTester tester;
             network::BatchTestOptions opts;
             opts.timeout_seconds = 5;
@@ -1423,9 +1457,9 @@ void HunterGuiApp::renderActionBar() {
                 }
             }
             showToast("Latency test completed for " + std::to_string(uris_to_test.size()) + " configs");
-        }).detach();
+        });
     }
-    ImGui::SameLine();
+    nextSlot();
     
     if (ImGui::Button("Copy Selected", ImVec2(btn_w, btn_height))) {
         if (has_selection) {
@@ -1437,7 +1471,7 @@ void HunterGuiApp::renderActionBar() {
             showToast("No selection");
         }
     }
-    ImGui::SameLine();
+    nextSlot();
     
     if (ImGui::Button("Copy All", ImVec2(btn_w, btn_height))) {
         if (has_snapshot) {
@@ -1449,7 +1483,7 @@ void HunterGuiApp::renderActionBar() {
             showToast("No configs");
         }
     }
-    ImGui::SameLine();
+    nextSlot();
     
     if (ImGui::Button("Copy v2rayN", ImVec2(btn_w, btn_height))) {
         int us = 0;
@@ -1463,7 +1497,7 @@ void HunterGuiApp::renderActionBar() {
             showToast("Copied " + std::to_string(n) + " configs for v2rayN (" + std::to_string(us) + " US)");
         }
     }
-    ImGui::SameLine();
+    nextSlot();
     
     if (ImGui::Button("Export", ImVec2(btn_w, btn_height))) {
         if (has_snapshot) {
@@ -1473,7 +1507,7 @@ void HunterGuiApp::renderActionBar() {
             showToast("No configs to export");
         }
     }
-    ImGui::SameLine();
+    nextSlot();
     
     if (ImGui::Button("QR", ImVec2(btn_w, btn_height))) {
         if (has_selection) {
@@ -1483,7 +1517,7 @@ void HunterGuiApp::renderActionBar() {
             showToast("Select a profile first");
         }
     }
-    ImGui::SameLine();
+    nextSlot();
     
     if (ImGui::Button("Import", ImVec2(btn_w, btn_height))) {
         ImGui::OpenPopup("##import_menu");
@@ -1513,10 +1547,9 @@ void HunterGuiApp::renderConfigTable() {
         ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
         ImGuiTableFlags_ContextMenuInBody | ImGuiTableFlags_Hideable | ImGuiTableFlags_Reorderable;
 
-    float table_height = ImGui::GetContentRegionAvail().y;
-    if (table_height < 200.0f) table_height = 200.0f;
+    const float table_height = ImGui::GetContentRegionAvail().y;
 
-    int num_columns = (viewport_width_ < kNarrowThreshold) ? 4 : 7;
+    const int num_columns = (viewport_width_ < kNarrowThreshold) ? 3 : 7;
     if (!ImGui::BeginTable("main_profiles", num_columns, flags, ImVec2(0, table_height))) {
         return;  // table clipped this frame; EndTable must not be called
 
@@ -1526,7 +1559,7 @@ void HunterGuiApp::renderConfigTable() {
     ImGui::TableSetupColumn("Latency", ImGuiTableColumnFlags_WidthFixed |
                                            ImGuiTableColumnFlags_DefaultSort |
                                            ImGuiTableColumnFlags_PreferSortAscending, 80 * ui_scale_);
-    ImGui::TableSetupColumn("Exit", ImGuiTableColumnFlags_WidthFixed, 80 * ui_scale_);
+    ImGui::TableSetupColumn("Exit", ImGuiTableColumnFlags_WidthFixed, 130 * ui_scale_);
     ImGui::TableSetupColumn("Remark", ImGuiTableColumnFlags_WidthStretch);
     if (viewport_width_ >= kNarrowThreshold) {
         ImGui::TableSetupColumn("Server", ImGuiTableColumnFlags_WidthFixed, 80 * ui_scale_);
@@ -1612,11 +1645,11 @@ void HunterGuiApp::renderConfigTable() {
                 else selected_uris_.insert(r.uri);
             }
             if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
-                std::thread([this, uri = r.uri]() {
+                runBackground([this, uri = r.uri]() {
                     int port = orch_.activateClientConfig(uri);
                     if (port > 0) showToast("Connected on port " + std::to_string(port));
                     else showToast("Failed to connect to " + uri);
-                }).detach();
+                });
             }
             if (active && r.uri == client_status.uri) {
                 ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0,
@@ -1656,10 +1689,7 @@ void HunterGuiApp::renderConfigTable() {
                 ImGui::TextUnformatted(row.address.c_str());
 
                 ImGui::TableNextColumn();
-                std::string uri_display = r.uri;
-                if (uri_display.length() > 60) {
-                    uri_display = uri_display.substr(0, 57) + "...";
-                }
+                const std::string uri_display = truncateUtf8(r.uri, 57);
                 ImGui::TextUnformatted(uri_display.c_str());
                 if (ImGui::IsItemHovered()) {
                     ImGui::SetTooltip("%s", r.uri.c_str());
@@ -1671,16 +1701,39 @@ void HunterGuiApp::renderConfigTable() {
     ImGui::EndTable();
 }
 
-void HunterGuiApp::renderAdvancedPanels() {
-    // Subscriptions
-    if (ImGui::CollapsingHeader("Subscriptions")) {
-        ImGui::SeparatorText("Subscriptions");
+void HunterGuiApp::renderSubscriptionsTab() {
+    {
+        const float add_w = ImGui::CalcTextSize("Add").x + ImGui::GetStyle().FramePadding.x * 4.0f;
+        const float remark_w = std::min(200.0f * ui_scale_, ImGui::GetContentRegionAvail().x * 0.3f);
+        ImGui::SetNextItemWidth(ImGui::GetContentRegionAvail().x - remark_w - add_w - ImGui::GetStyle().ItemSpacing.x * 2.0f);
+        ImGui::InputTextWithHint("##new_sub_url", "Subscription URL", client_subscription_url_input_, sizeof(client_subscription_url_input_));
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(remark_w);
+        ImGui::InputTextWithHint("##new_sub_remark", "Remark", client_add_sub_remark_input_, sizeof(client_add_sub_remark_input_));
+        ImGui::SameLine();
+        if (ImGui::Button("Add", ImVec2(add_w, 0))) {
+            std::string url = client_subscription_url_input_;
+            std::string remark = client_add_sub_remark_input_;
+            if (!url.empty()) {
+                std::string id = orch_.subscriptionManager().add(url, remark);
+                if (!id.empty()) {
+                    showToast("Subscription added: " + url);
+                    memset(client_subscription_url_input_, 0, sizeof(client_subscription_url_input_));
+                    memset(client_add_sub_remark_input_, 0, sizeof(client_add_sub_remark_input_));
+                } else {
+                    showToast("Failed to add subscription (maybe duplicate)");
+                }
+            } else {
+                showToast("URL cannot be empty");
+            }
+        }
+        ImGui::Spacing();
         
         static ImGuiTableFlags sub_flags =
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
-            ImGuiTableFlags_SizingStretchProp;
+            ImGuiTableFlags_SizingStretchProp | ImGuiTableFlags_ScrollY;
 
-        if (ImGui::BeginTable("subscriptions", 7, sub_flags)) {
+        if (ImGui::BeginTable("subscriptions", 7, sub_flags, ImVec2(0, ImGui::GetContentRegionAvail().y))) {
             ImGui::TableSetupColumn("Enabled", ImGuiTableColumnFlags_NoSort | ImGuiTableColumnFlags_WidthFixed, 60 * ui_scale_);
             ImGui::TableSetupColumn("Remarks", ImGuiTableColumnFlags_WidthStretch);
             ImGui::TableSetupColumn("URL", ImGuiTableColumnFlags_WidthStretch);
@@ -1697,10 +1750,10 @@ void HunterGuiApp::renderAdvancedPanels() {
                 bool enabled = sub.enabled;
                 if (ImGui::Checkbox("##sub_enabled", &enabled)) {
                     if (enabled != sub.enabled) {
-                        std::thread([this, id = sub.id, enabled]() {
+                        runBackground([this, id = sub.id, enabled]() {
                             orch_.subscriptionManager().setEnabled(id, enabled);
                             showToast(std::string("Subscription ") + (enabled ? "enabled" : "disabled"));
-                        }).detach();
+                        });
                     }
                 }
                 ImGui::TableNextColumn();
@@ -1726,7 +1779,7 @@ void HunterGuiApp::renderAdvancedPanels() {
                 }
                 ImGui::TableNextColumn();
                 if (ImGui::SmallButton("Update")) {
-                    std::thread([this, id = sub.id]() {
+                    runBackground([this, id = sub.id]() {
                         std::string err;
                         int count = orch_.subscriptionManager().update(id, "", &err);
                         if (count >= 0) {
@@ -1734,63 +1787,42 @@ void HunterGuiApp::renderAdvancedPanels() {
                         } else {
                             showToast("Subscription update failed: " + err);
                         }
-                    }).detach();
+                    });
                 }
                 ImGui::SameLine();
                 if (ImGui::SmallButton("Delete")) {
-                    std::thread([this, id = sub.id]() {
+                    runBackground([this, id = sub.id]() {
                         bool removed = orch_.subscriptionManager().remove(id);
                         if (removed) {
                             showToast("Subscription removed");
                         } else {
                             showToast("Failed to remove subscription");
                         }
-                    }).detach();
+                    });
                 }
             }
             ImGui::EndTable();
         }
 
-        ImGui::Spacing();
-        ImGui::SeparatorText("Add subscription");
-        ImGui::SetNextItemWidth(300 * ui_scale_);
-        ImGui::InputText("##new_sub_url", client_subscription_url_input_, sizeof(client_subscription_url_input_));
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(200 * ui_scale_);
-        ImGui::InputText("##new_sub_remark", client_add_sub_remark_input_, sizeof(client_add_sub_remark_input_));
-        ImGui::SameLine();
-        if (ImGui::Button("Add", ImVec2(80 * ui_scale_, 0))) {
-            std::string url = client_subscription_url_input_;
-            std::string remark = client_add_sub_remark_input_;
-            if (!url.empty()) {
-                std::string id = orch_.subscriptionManager().add(url, remark);
-                if (!id.empty()) {
-                    showToast("Subscription added: " + url);
-                    memset(client_subscription_url_input_, 0, sizeof(client_subscription_url_input_));
-                    memset(client_add_sub_remark_input_, 0, sizeof(client_add_sub_remark_input_));
-                } else {
-                    showToast("Failed to add subscription (maybe duplicate)");
-                }
-            } else {
-                showToast("URL cannot be empty");
-            }
+    }
+}
+
+void HunterGuiApp::refreshFoundCacheIfDue() {
+    double now = glfwGetTime();
+    if (last_found_refresh_ < 0.0 || now - last_found_refresh_ >= kFoundRefreshIntervalSeconds) {
+        last_found_refresh_ = now;
+        found_cache_ = orch_.foundHistory().snapshot();
+        found_info_by_uri_.clear();
+        for (const auto& row : snapshot_) {
+            std::string country = row.rec.exit_country.empty() ? row.rec.server_country : row.rec.exit_country;
+            found_info_by_uri_[row.rec.uri] = {countryCell(country), row.rec.latency_ms};
         }
     }
+}
 
-    // Found History
-    if (ImGui::CollapsingHeader("Found History")) {
-        ImGui::SeparatorText("Found History");
-        
-        double now = glfwGetTime();
-        if (last_found_refresh_ < 0.0 || now - last_found_refresh_ >= kFoundRefreshIntervalSeconds) {
-            last_found_refresh_ = now;
-            found_cache_ = orch_.foundHistory().snapshot();
-            found_info_by_uri_.clear();
-            for (const auto& row : snapshot_) {
-                std::string country = row.rec.exit_country.empty() ? row.rec.server_country : row.rec.exit_country;
-                found_info_by_uri_[row.rec.uri] = {countryCell(country), row.rec.latency_ms};
-            }
-        }
+void HunterGuiApp::renderFoundTab() {
+    {
+        const double now = glfwGetTime();
 
         if (ImGui::Button("Copy All", ImVec2(120 * ui_scale_, 0))) {
             std::string text = buildFoundClipboardText();
@@ -1810,7 +1842,7 @@ void HunterGuiApp::renderAdvancedPanels() {
 
         ImGuiTableFlags flags = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
                                 ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable;
-        if (ImGui::BeginTable("found", 3, flags, ImVec2(0, 200 * ui_scale_))) {
+        if (ImGui::BeginTable("found", 3, flags, ImVec2(0, ImGui::GetContentRegionAvail().y))) {
             ImGui::TableSetupColumn("When", ImGuiTableColumnFlags_WidthFixed, 100 * ui_scale_);
             ImGui::TableSetupColumn("Country", ImGuiTableColumnFlags_WidthFixed, 140 * ui_scale_);
             ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
@@ -1855,7 +1887,8 @@ void HunterGuiApp::renderFrame() {
      ImGui::Begin("HunterMain", nullptr,
                   ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                   ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoCollapse |
-                  ImGuiWindowFlags_NoBringToFrontOnFocus);
+                  ImGuiWindowFlags_NoBringToFrontOnFocus |
+                  ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
 
      // ─── Top bar ───
      renderTopBar();
@@ -1922,6 +1955,7 @@ void HunterGuiApp::renderAboutView() {
 }
 
 void HunterGuiApp::renderMainView() {
+    refreshFoundCacheIfDue();
     auto client_status = orch_.clientStatus();
     bool active = client_status.active;
     bool hunting = orchestrator_running_.load();
@@ -1937,13 +1971,27 @@ void HunterGuiApp::renderMainView() {
     ImGui::PopStyleColor(2);
     ImGui::Spacing();
 
-    // Main config table
-    ImGui::SeparatorText("Live Configs");
-    renderConfigTable();
-
-    // Advanced panels (collapsible)
-    ImGui::Spacing();
-    renderAdvancedPanels();
+    // One body region, three lists. Only the active list scrolls; the page never does.
+    if (ImGui::BeginTabBar("##body_tabs")) {
+        char live_label[48], subs_label[48], found_label[48];
+        std::snprintf(live_label, sizeof(live_label), "Live configs (%d)###tab_live", cached_alive_);
+        std::snprintf(subs_label, sizeof(subs_label), "Subscriptions (%d)###tab_subs",
+                      (int)orch_.subscriptionManager().list().size());
+        std::snprintf(found_label, sizeof(found_label), "Found (%d)###tab_found", (int)found_cache_.size());
+        if (ImGui::BeginTabItem(live_label)) {
+            renderConfigTable();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(subs_label)) {
+            renderSubscriptionsTab();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem(found_label)) {
+            renderFoundTab();
+            ImGui::EndTabItem();
+        }
+        ImGui::EndTabBar();
+    }
 }
 
 #ifndef __ANDROID__
@@ -2089,6 +2137,9 @@ int HunterGuiApp::run() {
 
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
+#ifdef IMGUI_ENABLE_TEST_ENGINE
+    ImGui::GetCurrentContext()->TestEngineHookItems = true;  // UI probe build only
+#endif
     ImGuiIO& io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     // ------------------------------------------------------------
@@ -2102,8 +2153,8 @@ int HunterGuiApp::run() {
     glfwGetWindowContentScale(window_, &scaleX, &scaleY);
     ui_scale_ = (scaleX + scaleY) * 0.5f; // average for non-uniform scaling
     if (ui_scale_ <= 0.0f) ui_scale_ = 1.0f;
-    io.FontGlobalScale = ui_scale_;
     #endif
+    loadUiFonts(kUiFontSizePx);
 
     // Apply modern dark theme (will also be called in renderFrame, but
     // applying here ensures the first frame looks right)

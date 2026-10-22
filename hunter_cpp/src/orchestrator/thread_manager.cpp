@@ -204,7 +204,13 @@ BaseWorker::BaseWorker(const std::string& worker_name, int interval,
 }
 
 BaseWorker::~BaseWorker() {
-    if (thread_.joinable()) thread_.join();
+    // Never detach: the loop dereferences `this`. A busy worker is waited for.
+    if (thread_.joinable()) {
+        if (!finished_.load()) {
+            std::cerr << "[ThreadManager] waiting for busy worker '" << name << "'" << std::endl;
+        }
+        thread_.join();
+    }
 }
 
 void BaseWorker::start() {
@@ -212,10 +218,20 @@ void BaseWorker::start() {
     thread_ = std::thread(&BaseWorker::runLoop, this);
 }
 
-void BaseWorker::join(float timeout) {
-    if (thread_.joinable()) {
-        thread_.join();
+bool BaseWorker::join(float timeout) {
+    if (!thread_.joinable()) return true;
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds((int)(std::max(timeout, 0.1f) * 1000.0f));
+    while (!finished_.load() && std::chrono::steady_clock::now() < deadline) {
+        requestStop();
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
+    if (!finished_.load()) {
+        std::cerr << "[ThreadManager] worker '" << name << "' still busy after " << timeout << "s" << std::endl;
+        return false;
+    }
+    thread_.join();
+    return true;
 }
 
 void BaseWorker::requestStop() {
@@ -246,6 +262,10 @@ bool BaseWorker::sleepInterruptible(std::chrono::milliseconds duration) {
 }
 
 void BaseWorker::runLoop() {
+    struct FinishedFlag {
+        std::atomic<bool>& f;
+        ~FinishedFlag() { f.store(true); }
+    } finished_guard{finished_};
     try {
         utils::LogRingBuffer::instance().push("[" + name + "] Thread started");
         while (!stop_.load()) {
@@ -885,16 +905,25 @@ void ThreadManager::startAll() {
 }
 
 void ThreadManager::stopAll(float timeout) {
+    std::lock_guard<std::mutex> serial(stop_mu_);
     std::cout << "ThreadManager: stopping all workers..." << std::endl;
     stop_event_ = true;
     for (auto* w : all_workers_) {
         if (!w) continue;
         try { w->requestStop(); } catch (...) {}
     }
+    // One shared deadline: every worker has been told to stop, so they wind
+    // down in parallel; a slow one must not eat the others' budget.
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::milliseconds((int)(timeout * 1000.0f));
+    int busy = 0;
     for (auto* w : all_workers_) {
-        try { w->join(timeout / (float)all_workers_.size()); } catch (...) {}
+        if (!w) continue;
+        const float left = std::chrono::duration<float>(deadline - std::chrono::steady_clock::now()).count();
+        try { if (!w->join(std::max(left, 0.1f))) ++busy; } catch (...) {}
     }
-    std::cout << "ThreadManager: all workers stopped" << std::endl;
+    if (busy) std::cout << "ThreadManager: " << busy << " worker(s) still busy" << std::endl;
+    else std::cout << "ThreadManager: all workers stopped" << std::endl;
 }
 
 ThreadManager::Status ThreadManager::getStatus() const {

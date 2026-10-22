@@ -405,7 +405,8 @@ EndpointKey computeEndpointKey(const std::string& uri) {
         put("alpn", get("alpn"));  // spelling preserved: never folded
         std::string aid = get("aid");
         if (!aid.empty() && aid != "0") opts["aid"] = aid;
-        static const std::set<std::string> handled = {"v", "ps", "add", "port", "id", "tls", "net", "type", "scy", "sni",
+        // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+        static const std::set<std::string>& handled = *new std::set<std::string>{"v", "ps", "add", "port", "id", "tls", "net", "type", "scy", "sni",
                                                       "host", "path", "fp", "alpn", "aid"};
         for (const auto& [k, v] : j) {
             if (isInsecureKey(k)) { if (truthy(v)) opts["insecure"] = "1"; continue; }

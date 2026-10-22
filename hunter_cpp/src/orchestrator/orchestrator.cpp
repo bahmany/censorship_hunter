@@ -1,3 +1,4 @@
+#include <optional>
 #include "orchestrator/orchestrator.h"
 #include "orchestrator/thread_manager.h"
 #include "core/utils.h"
@@ -201,6 +202,7 @@ HunterOrchestrator::HunterOrchestrator(HunterConfig& config) :
 
 HunterOrchestrator::~HunterOrchestrator() {
     stop();
+    if (sub_update_thread_.joinable()) sub_update_thread_.join();
 }
 
 void HunterOrchestrator::initComponents() {
@@ -361,11 +363,17 @@ void HunterOrchestrator::start() {
     printStartupBanner();
 
     // ═══ PHASE 4: Start all worker threads (background fetch + validation) ═══
-    if (thread_manager_ && !thread_manager_->isRunning()) {
-        thread_manager_.reset();
+    {
+        std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
+        // stop() may already have run while startup phases were in progress;
+        // don't start a full worker set that nothing will stop.
+        if (stop_requested_.load()) return;
+        if (thread_manager_ && !thread_manager_->isRunning()) {
+            thread_manager_.reset();
+        }
+        thread_manager_ = std::make_shared<orchestrator::ThreadManager>(this);
+        thread_manager_->startAll();
     }
-    thread_manager_ = std::make_unique<orchestrator::ThreadManager>(this);
-    thread_manager_->startAll();
     std::cout << "[Startup] All worker threads started" << std::endl;
 
     // Apply initial speed profile from hardware (overridable via HUNTER_SPEED_PROFILE env var)
@@ -390,7 +398,11 @@ void HunterOrchestrator::start() {
     // ═══ PHASE 5: Main loop ═══
     int dashboard_tick = 0;
     int db_save_tick = 0;
-    while (!stop_requested_.load() && thread_manager_ && thread_manager_->isRunning()) {
+    auto workers_running = [this] {
+        std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
+        return thread_manager_ && thread_manager_->isRunning();
+    };
+    while (!stop_requested_.load() && workers_running()) {
         if (utils::fileExists(stop_flag)) {
             try { std::filesystem::remove(stop_flag); } catch (...) {}
             std::cout << "\n[Hunter] stop.flag detected, shutting down..." << std::endl;
@@ -439,7 +451,11 @@ void HunterOrchestrator::start() {
         if (config_.subAutoupdate() && 
             sub_manager_.updateDue(utils::nowTimestamp(), config_.subUpdateIntervalMin() * 60.0)) {
             std::string proxy = "socks5h://127.0.0.1:" + std::to_string(config_.clientListenPort());
-            std::thread([this, proxy]() {
+            // Tracked (not detached): it uses sub_manager_, so stop() joins it.
+            if (sub_update_thread_.joinable() && !sub_update_running_.load()) sub_update_thread_.join();
+            if (!sub_update_thread_.joinable() && !stop_requested_.load()) {
+            sub_update_running_ = true;
+            sub_update_thread_ = std::thread([this, proxy]() {
                 try {
                     std::string err;
                     int imported = sub_manager_.updateAll(proxy, &err);
@@ -455,19 +471,31 @@ void HunterOrchestrator::start() {
                 } catch (...) {
                     std::cerr << "[Thread] subAutoupdate unknown exception" << std::endl;
                 }
-            }).detach();
+                sub_update_running_ = false;
+            });
+            }
         }
 
         std::this_thread::sleep_for(std::chrono::seconds(2));
     }
 
-    if (thread_manager_) {
-        thread_manager_->stopAll();
-        thread_manager_.reset();
+    {
+        std::shared_ptr<orchestrator::ThreadManager> tm;
+        {
+            std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
+            tm = std::move(thread_manager_);
+        }
+        if (tm) tm->stopAll();  // joins workers: never under thread_manager_mu_
     }
+    // Only this thread creates sub_update_thread_, so it is the one that joins it
+    // (bounded by the fetch's own network timeouts).
+    if (sub_update_thread_.joinable()) sub_update_thread_.join();
 }
 
 void HunterOrchestrator::stop() {
+    // Callers rely on teardown having finished when stop() returns, so a
+    // concurrent second caller waits rather than returning early.
+    std::lock_guard<std::mutex> stop_serial(stop_call_mu_);
     // Set stop flag so that workers and download thread can exit
     stop_requested_ = true;
     paused_ = false;
@@ -491,8 +519,9 @@ void HunterOrchestrator::stop() {
     stageA_threads.emplace_back([this] {
         std::lock_guard<std::mutex> lk(download_thread_mutex_);
         if (!download_thread_.joinable()) return;
-        std::atomic<bool> done{false};
-        std::thread([this, &done] {
+        // Heap-owned: the waiter may outlive this lambda when the 3s wait expires.
+        auto done = std::make_shared<std::atomic<bool>>(false);
+        std::thread([this, done] {
             try {
                 if (download_thread_.joinable()) download_thread_.join();
             } catch (const std::exception& e) {
@@ -500,10 +529,10 @@ void HunterOrchestrator::stop() {
             } catch (...) {
                 std::cerr << "[Thread] downloadJoinWaiter unknown exception" << std::endl;
             }
-            done.store(true);
+            done->store(true);
         }).detach();
         const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(3);
-        while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        while (!done->load() && std::chrono::steady_clock::now() < deadline) {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
         }
     });
@@ -516,9 +545,12 @@ void HunterOrchestrator::stop() {
 
     // a3. thread_manager_->stopAll() with timeout 3.0f (instead of default 15.0f)
     stageA_threads.emplace_back([this] {
-        if (thread_manager_) {
-            thread_manager_->stopAll(3.0f);
+        std::shared_ptr<orchestrator::ThreadManager> tm;
+        {
+            std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
+            tm = thread_manager_;
         }
+        if (tm) tm->stopAll(3.0f);
     });
 
     // a4. core::SelfUpdateManager::instance().stopAutoCheck()
@@ -567,8 +599,13 @@ void HunterOrchestrator::stop() {
     if (cleanup_manager_) {
         cleanup_manager_->stopPeriodicCleanup();
     }
-    if (thread_manager_) {
-        thread_manager_.reset();
+    {
+        std::shared_ptr<orchestrator::ThreadManager> tm;
+        {
+            std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
+            tm = std::move(thread_manager_);
+        }
+        tm.reset();  // destroy (joins workers) outside the lock
     }
 
     // Finalize progress
@@ -840,6 +877,7 @@ bool HunterOrchestrator::runCycle() {
               << http_raw.size() << " HTTP/GitHub";
       utils::LogRingBuffer::instance().push(_ls.str()); }
 
+    if (stop_requested_.load()) return false;
     // Store in ConfigDB
     if (config_db_) {
         int added_tg = 0;
@@ -869,6 +907,7 @@ bool HunterOrchestrator::runCycle() {
         }
     }
 
+    if (stop_requested_.load()) return false;
     // Inject untested batch from ConfigDB
     if (config_db_) {
         int batch_size = HunterConfig::getEnvInt("HUNTER_BG_VALIDATION_BATCH",
@@ -892,6 +931,7 @@ bool HunterOrchestrator::runCycle() {
         }
     }
 
+    if (stop_requested_.load()) return false;
     // Benchmark line 1: Telegram configs
     std::vector<BenchResult> validated;
     if (!tg_raw.empty()) {
@@ -903,6 +943,7 @@ bool HunterOrchestrator::runCycle() {
         validated.insert(validated.end(), tg_validated.begin(), tg_validated.end());
     }
 
+    if (stop_requested_.load()) return false;
     // Benchmark line 2: HTTP/GitHub configs
     if (!http_raw.empty()) {
         { std::ostringstream _ls; _ls << "[Bench] GitHub/HTTP: " << http_raw.size() << " configs";
@@ -913,6 +954,8 @@ bool HunterOrchestrator::runCycle() {
         validated.insert(validated.end(), http_validated.begin(), http_validated.end());
     }
 
+    // Per-batch verdicts are already in the DB; skip tiering/fetch on Stop.
+    if (stop_requested_.load()) return false;
     dedupeBenchResultsByEndpoint(validated);
 
     // Sort by latency
@@ -940,8 +983,13 @@ bool HunterOrchestrator::runCycle() {
 
     if (!all_configs.empty()) {
         double last_github_success_ts = 0.0;
-        if (thread_manager_) {
-            auto tm_status = thread_manager_->getStatus();
+        if (auto tm_status_opt = [this] {
+        std::optional<orchestrator::ThreadManager::Status> snap;
+        std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
+        if (thread_manager_) snap = thread_manager_->getStatus();
+        return snap;
+    }()) {
+            auto& tm_status = *tm_status_opt;
             auto github_worker_it = tm_status.workers.find("github_bg");
             if (github_worker_it != tm_status.workers.end()) {
                 auto extra_it = github_worker_it->second.extra.find("last_success_ts");
@@ -954,6 +1002,7 @@ bool HunterOrchestrator::runCycle() {
         if (last_github_success_ts <= 0.0 || (now_ts - last_github_success_ts) >= 3600.0) {
             std::vector<int> proxy_ports;
             const int github_cap = std::max(200, std::min(config_.maxTotal(), 5000));
+            if (stop_requested_.load()) return false;
             auto fetched = config_fetcher_.fetchGithubConfigs(config_.githubUrls(), proxy_ports, github_cap, 9, 40.0f);
              std::set<std::string> valid;
              for (const auto& uri : fetched) {
@@ -1179,6 +1228,7 @@ std::vector<BenchResult> HunterOrchestrator::validateConfigs(
     network::ProxyTester tester;
 
     for (size_t offset = 0; offset < deduped.size(); offset += batch_size) {
+        if (stop_requested_.load()) break;  // Stop must not wait for the whole backlog
         // Check pause/stop between batches
         if (stop_requested_.load() || paused_.load()) break;
         auto chunk_hw = HunterTaskManager::instance().getHardware();
@@ -1428,8 +1478,13 @@ void HunterOrchestrator::printDashboard() {
     // Workers
     int w_running = 0, w_sleeping = 0, w_err = 0, w_total = 0;
     std::vector<std::pair<std::string, WorkerStatus>> worker_list;
-    if (thread_manager_) {
-        auto st = thread_manager_->getStatus();
+    if (auto st_opt = [this] {
+        std::optional<orchestrator::ThreadManager::Status> snap;
+        std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
+        if (thread_manager_) snap = thread_manager_->getStatus();
+        return snap;
+    }()) {
+        auto& st = *st_opt;
         for (auto& [name, ws] : st.workers) {
             w_total++;
             if (ws.state == WorkerState::RUNNING) w_running++;
@@ -1748,7 +1803,8 @@ bool HunterOrchestrator::downloadConfigsAsync(const std::vector<std::string>& so
     
     // Test proxy connectivity and build working proxy list
     std::vector<std::string> working_proxies;
-    static const std::vector<std::string> connectivity_urls = {
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::vector<std::string>& connectivity_urls = *new std::vector<std::string>{
         "https://www.gstatic.com/generate_204",
         "https://cp.cloudflare.com/generate_204",
         "https://httpbin.org/ip"

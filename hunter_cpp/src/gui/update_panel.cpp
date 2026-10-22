@@ -63,7 +63,7 @@ void renderUpdatePanel() {
                 ImGui::EndPopup();
             }
             ImGui::SameLine();
-            if (ImGui::Button("Update Now", ImVec2(120 * ImGui::GetIO().FontGlobalScale, 0))) {
+            if (ImGui::Button("Update Now", ImVec2(120 * ImGui::GetStyle().FontScaleDpi, 0))) {
                 std::thread([&updater]() { updater.downloadAndApply(); }).detach();
             }
             break;

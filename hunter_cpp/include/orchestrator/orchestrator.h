@@ -4,6 +4,7 @@
 #include <vector>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <atomic>
 #include <memory>
 #include <set>
@@ -206,7 +207,16 @@ private:
     std::unique_ptr<network::ConfigDatabase> config_db_;
     std::unique_ptr<network::ContinuousValidator> continuous_validator_;
     std::unique_ptr<cache::SmartCache> cache_;
-    std::unique_ptr<orchestrator::ThreadManager> thread_manager_;
+    // shared_ptr so teardown can take it out under thread_manager_mu_ and then
+    // stop/destroy it with the lock released (workers take the lock briefly
+    // for status; joining them while holding it deadlocked).
+    std::shared_ptr<orchestrator::ThreadManager> thread_manager_;
+    std::mutex stop_call_mu_;            // stop() is reached from GUI and from start()'s stop.flag path
+    std::thread sub_update_thread_;      // subscription auto-update; joined in stop()
+    std::atomic<bool> sub_update_running_{false};
+    // Guards thread_manager_: start()'s loop/teardown and stop() run on
+    // different threads; an unguarded reset() raced stopAll() (use-after-free).
+    std::mutex thread_manager_mu_;
     std::unique_ptr<orchestrator::RuntimeCleanupManager> cleanup_manager_;
     proxy::ProxyServerManager proxy_server_manager_;
     client::SubscriptionManager sub_manager_;

@@ -150,7 +150,8 @@ std::set<std::string> extractRawUrisFromText(const std::string& text) {
     // Limit input size to prevent excessive processing
     const std::string& safe_text = text.size() > 1048576 ? text.substr(0, 1048576) : text;
     // Simple string scan instead of std::regex to avoid stack overflow from deep recursion
-    static const std::vector<std::string> schemes = {"vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria2://", "hy2://", "tuic://"};
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::vector<std::string>& schemes = *new std::vector<std::string>{"vmess://", "vless://", "trojan://", "ss://", "ssr://", "hysteria2://", "hy2://", "tuic://"};
     size_t pos = 0;
     while (pos < safe_text.size()) {
         size_t found = std::string::npos;

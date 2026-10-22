@@ -36,7 +36,11 @@ public:
     BaseWorker& operator=(const BaseWorker&) = delete;
 
     void start();
-    void join(float timeout = 10.0f);
+    // Joins the worker if its loop exits within `timeout` seconds; otherwise
+    // logs that it is still busy and returns with the thread still joinable.
+    // Returns true once the thread has been joined.
+    bool join(float timeout = 10.0f);
+    bool finished() const { return finished_.load(); }
     void requestStop();
     WorkerStatus getStatus() const;
     void setPauseCallback(std::function<bool()> callback);
@@ -48,6 +52,7 @@ protected:
     WorkerStatus status_;
     mutable std::mutex status_mutex_;
     std::thread thread_;
+    std::atomic<bool> finished_{false};  // set as runLoop() exits
     std::function<bool()> pause_callback_;
 
     void runLoop();
@@ -140,6 +145,7 @@ public:
     /**
      * @brief Stop all worker threads gracefully
      */
+    // Idempotent and serialized: concurrent callers never join one thread twice.
     void stopAll(float timeout = 15.0f);
 
     /**
@@ -175,6 +181,7 @@ private:
     std::unique_ptr<ValidatorWorker> validator_;
 
     std::vector<BaseWorker*> all_workers_;
+    std::mutex stop_mu_;
 };
 
 } // namespace orchestrator

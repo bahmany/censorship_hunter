@@ -1,4 +1,5 @@
 // JNI bridge - connects Java MainActivity/HunterView to native C++ code
+#include "gui/ui_fonts.h"
 #include <jni.h>
 #include <android/log.h>
 #include <android/asset_manager.h>
@@ -134,9 +135,7 @@ Java_com_hunter_app_HunterView_00024Renderer_nativeOnSurfaceCreated(JNIEnv* env,
         ImGui::StyleColorsDark();
 
         // Larger font for mobile
-        ImFontConfig font_cfg;
-        font_cfg.SizePixels = 32.0f;
-        io.Fonts->AddFontDefault(&font_cfg);
+        hunter::gui::loadUiFonts(28.0f);  // Noto Sans, large for touch screens
     }
 
     // Surface re-created (EGL context preserved/lost): drop old GL objects first to avoid leaks.

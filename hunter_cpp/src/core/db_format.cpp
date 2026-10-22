@@ -14,7 +14,8 @@ const char* const kDbHeaderV4 = "#HUNTER_CONFIG_DB_V4";
 const char* const kLiveHeaderV3 = "#HUNTER_LIVE_CACHE_V3";
 
 const std::vector<std::string>& v4ExtensionColumns() {
-    static const std::vector<std::string> cols = {
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::vector<std::string>& cols = *new std::vector<std::string>{
         "endpoint_key", "key_version", "health_state", "stability", "probe_profile", "eligible_count",
         "success_streak", "streak_started_at", "failure_streak_started_at", "last_full_success",
         "last_bulk_success", "last_attempt_at", "last_outcome", "probe_ring", "server_ips",

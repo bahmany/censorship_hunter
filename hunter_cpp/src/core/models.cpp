@@ -157,10 +157,14 @@ std::string alpnJsonArray(const std::string& csv) {
 } // namespace
 
 std::string ParsedConfig::unsupportedReason(const std::string& engine) const {
-    static const std::set<std::string> xray_nets = {"tcp", "raw", "ws", "grpc", "h2", "httpupgrade", "splithttp", "xhttp", "kcp", "quic"};
-    static const std::set<std::string> sb_nets = {"tcp", "raw", "ws", "grpc", "h2", "http", "httpupgrade"};
-    static const std::set<std::string> mh_nets = {"tcp", "raw", "ws", "grpc", "h2", "http"};
-    static const std::set<std::string> secs = {"", "none", "tls", "reality"};
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::set<std::string>& xray_nets = *new std::set<std::string>{"tcp", "raw", "ws", "grpc", "h2", "httpupgrade", "splithttp", "xhttp", "kcp", "quic"};
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::set<std::string>& sb_nets = *new std::set<std::string>{"tcp", "raw", "ws", "grpc", "h2", "http", "httpupgrade"};
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::set<std::string>& mh_nets = *new std::set<std::string>{"tcp", "raw", "ws", "grpc", "h2", "http"};
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::set<std::string>& secs = *new std::set<std::string>{"", "none", "tls", "reality"};
     const bool quic = protocol == "hysteria2" || protocol == "tuic";
     if (protocol == "ssr") return "ssr is not supported by " + engine;
     if (engine == "xray" && quic) return protocol + " is not supported by xray";
@@ -214,7 +218,8 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
     
     // Reject unsupported SS ciphers
     if (protocol == "shadowsocks") {
-        static const std::set<std::string> supported_ciphers = {
+        // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+        static const std::set<std::string>& supported_ciphers = *new std::set<std::string>{
             "aes-128-gcm", "aes-256-gcm", "chacha20-ietf-poly1305",
             "xchacha20-ietf-poly1305", "2022-blake3-aes-128-gcm",
             "2022-blake3-aes-256-gcm", "2022-blake3-chacha20-poly1305",
@@ -257,7 +262,8 @@ std::string ParsedConfig::toXrayOutboundJson(int socks_port) const {
     // Stream settings
     std::string net = network.empty() ? "tcp" : network;
     // Reject unsupported transport types
-    static const std::set<std::string> supported_nets = {
+    // Heap-allocated and never destroyed: safe if exit() runs while workers are live.
+    static const std::set<std::string>& supported_nets = *new std::set<std::string>{
         "tcp", "raw", "ws", "grpc", "h2", "httpupgrade", "splithttp", "kcp", "quic", "xhttp"
     };
     if (supported_nets.find(net) == supported_nets.end()) return "";
