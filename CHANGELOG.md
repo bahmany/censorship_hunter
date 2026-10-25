@@ -5,7 +5,28 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [1.11.0] - 2026-10-22
+## [1.12.0] - 2026-10-25
+
+### Added
+- **Automatic top-10 client mode on port 10808.**
+  - The client proxy is now maintained automatically: after every benchmark
+    cycle the top 10 gold configs (by latency) are served as ONE load-balanced
+    xray engine on the user port (10808), using the existing
+    `generateBalancedConfig` balancer (leastPing strategy + observatory).
+  - On startup the persisted gold configs are served immediately, before the
+    first benchmark cycle completes.
+  - Configs that need sing-box (hysteria2/tuic, insecure TLS) are filtered out
+    of the balanced set; if none qualify, the best single config is served
+    through the existing single-config path.
+  - Manual Connect still works and replaces the auto session until the next
+    refresh. Disable with `client_auto_top10 = false`.
+- **Blinking status dot while hunting.** The top-bar status dot pulses while
+  the orchestrator is searching/testing configs; static when idle/connected.
+
+### Changed
+- **Dead configs are kept for 1 hour** (was 72 h) before eviction — they may
+  come back alive. Local outages still never mass-delete.
+
 
 ### Fixed
 - **Connect crashed / never connected.**

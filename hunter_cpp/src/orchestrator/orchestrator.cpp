@@ -367,6 +367,18 @@ void HunterOrchestrator::start() {
     // ═══ PHASE 3: Print startup banner ═══
     printStartupBanner();
 
+    // ═══ PHASE 3b: Auto client mode — serve the persisted top configs immediately ═══
+    if (config_.clientAutoTop10()) {
+        std::vector<std::string> top10;
+        for (const auto& line : utils::readLines(config_.goldFile())) {
+            std::string trimmed = utils::trim(line);
+            if (trimmed.empty() || trimmed.find("://") == std::string::npos) continue;
+            top10.push_back(trimmed);
+            if (top10.size() >= 10) break;
+        }
+        autoServeClientTop10(top10);
+    }
+
     // ═══ PHASE 4: Start all worker threads (background fetch + validation) ═══
     {
         std::lock_guard<std::mutex> tm_lock(thread_manager_mu_);
@@ -837,6 +849,17 @@ HunterOrchestrator::ClientStatus HunterOrchestrator::clientStatus() {
     return status;
 }
 
+void HunterOrchestrator::autoServeClientTop10(const std::vector<std::string>& uris) {
+    if (!config_.clientAutoTop10() || uris.empty()) return;
+    if (proxy_server_manager_.clientActiveUris() == uris) return;   // already serving this set
+    int port = proxy_server_manager_.startClientProxyMulti(uris, config_.clientListenPort());
+    if (port > 0) {
+        if (config_.clientSysproxyEnabled()) network::SysProxy::set(port, port);
+        utils::LogRingBuffer::instance().push("[Client] Auto-served top " + std::to_string(uris.size()) +
+                                              " configs on port " + std::to_string(port));
+    }
+}
+
 // ─── Real-time UI Communication ───
 
 bool HunterOrchestrator::runCycle() {
@@ -1028,6 +1051,16 @@ bool HunterOrchestrator::runCycle() {
 
     // Save to files
     saveToFiles(tiered.gold, tiered.silver);
+
+    // Auto client mode: keep the top-10 gold configs load-balanced on the user port.
+    if (!tiered.gold.empty()) {
+        std::vector<std::string> top10;
+        for (const auto& r : tiered.gold) {
+            if (top10.size() >= 10) break;
+            top10.push_back(r.uri);
+        }
+        autoServeClientTop10(top10);
+    }
 
     double cycle_time = utils::nowTimestamp() - cycle_start;
     { std::ostringstream _ls; _ls << "Cycle #" << cycle_count_.load() << " completed in " << (int)cycle_time << "s";

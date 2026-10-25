@@ -203,7 +203,7 @@ int main(int argc, char** argv) {
     }
     T_END();
 
-    T_CASE("eviction: Dead retained >= 72 h; local outage cannot mass-delete");
+    T_CASE("eviction: Dead retained 1 h; local outage cannot mass-delete");
     {
         ConfigDatabase db(1000);
         setup(db);
@@ -216,10 +216,10 @@ int main(int argc, char** argv) {
         lo.outcome = ProbeOutcome::LocalNetworkDown;
         for (int i = 0; i < 5; i++) { lo.finished_at += 1; db.applyProbeResult(lo); }
         CHECK(db.evictDead() == 0, "nothing evicted inside retention");
-        NOW += 71 * 3600;
-        CHECK(db.evictDead() == 0, "71 h: retained");
-        NOW += 2 * 3600;
-        CHECK(db.evictDead() == 1, "73 h: Dead evicted");
+        NOW += 0.5 * 3600;
+        CHECK(db.evictDead() == 0, "30 min: retained");
+        NOW += 0.6 * 3600;
+        CHECK(db.evictDead() == 1, "66 min: Dead evicted");
         ConfigHealthRecord r;
         CHECK(!db.getRecord(a, &r) && db.getRecord(b, &r), "only the Dead record went");
         NOW = 1.7e9;

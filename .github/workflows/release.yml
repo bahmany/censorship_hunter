@@ -191,18 +191,21 @@ jobs:
           | Linux x64 | `hunter-linux-x64` |
           | Android arm64 | `hunter-android-arm64.apk` |
 
+          ### New in this release
+          - **Automatic top-10 client mode on port 10808:** the top 10 gold
+            configs are served automatically as one load-balanced xray engine
+            (leastPing balancer), refreshed after every benchmark cycle and
+            restored from the persisted gold list at startup.
+          - **Blinking status dot** while Hunter is searching/testing configs.
+          - **Dead configs kept 1 hour** before eviction (they may come back
+            alive); local outages still never mass-delete.
+          - Fully automatic self-updates: on startup Hunter checks GitHub for a
+            newer release, downloads and relaunches automatically.
+
           ### Auto-Update
-          Hunter now supports fully automatic self-updates. On startup, it checks
+          Hunter supports fully automatic self-updates. On startup, it checks
           GitHub for a newer release, downloads the appropriate binary, and
           relaunches automatically. No manual intervention required.
-
-          ### Performance
-          Config checking is now 10-50x faster on all platforms thanks to
-          batch xray testing (single process with N inbounds + parallel SOCKS tests).
-
-          ### UI
-          Modern tabbed interface with Dashboard, Configs, Settings, and About tabs.
-          Dark theme with rounded corners, status cards, and progress bars.
           EOF
 
       - name: Create Release

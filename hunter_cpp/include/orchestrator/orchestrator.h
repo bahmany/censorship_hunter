@@ -187,6 +187,10 @@ public:
     };
     ClientStatus clientStatus();
 
+    // ─── Auto Client Mode ───
+    // Keep the top-10 gold configs load-balanced on the user port (10808), automatically.
+    void autoServeClientTop10(const std::vector<std::string>& uris);
+
     // ─── Dashboard (terminal, optional — GUI reads configDb() directly) ───
     void printStartupBanner();
     void printDashboard();

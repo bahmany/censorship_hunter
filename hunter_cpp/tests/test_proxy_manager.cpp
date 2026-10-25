@@ -188,5 +188,28 @@ int main() {
     }
     T_END();
 
+    T_CASE("startClientProxyMulti: balanced session over xray-expressible URIs; fallback when none qualify");
+    {
+        Env env;
+        ProxyServerManager mgr(mdeps(env));
+        const std::string a = "vless://11111111-2222-3333-4444-555555555555@203.0.113.9:443?security=tls&sni=a.example.com&type=tcp#a";
+        const std::string b = "vless://11111111-2222-3333-4444-555555555555@203.0.113.10:443?security=tls&sni=b.example.com&type=tcp#b";
+        const std::string hy = "hy2://pw@203.0.113.11:443?sni=h.example.com&insecure=1#h";
+        int port = mgr.startClientProxyMulti({a, b}, 39100);
+        CHECK(port == 39100, "balanced client session started on the requested port");
+        CHECK(mgr.clientActiveUris().size() == 2 && mgr.clientActiveUri() == a, "both URIs active, first is primary");
+        CHECK(waitFor([&] { return mgr.getInstances().size() == 1 &&
+                                     mgr.getInstances()[0].status == ProxyStatus::Running; }), "balanced session reaches Running");
+        mgr.stopClientProxy(); mgr.waitAllStopped(3);
+        CHECK(mgr.clientActiveUris().empty() && mgr.clientActivePort() == 0, "stop clears the multi session");
+
+        // Only sing-box-expressible URIs: no balanced xray engine possible -> single fallback.
+        CHECK(mgr.startClientProxyMulti({hy}, 39100) == 39100, "fallback starts the single best config");
+        CHECK(mgr.clientActiveUris().size() == 1 && mgr.clientActiveUri() == hy, "fallback serves the first valid URI");
+        mgr.stopAll(); mgr.waitAllStopped(3);
+        CHECK(mgr.startClientProxyMulti({"not-a-uri"}, 39100) == -1, "no valid URI fails");
+    }
+    T_END();
+
     return T_SUMMARY();
 }

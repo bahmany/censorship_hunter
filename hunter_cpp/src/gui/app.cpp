@@ -1281,8 +1281,9 @@ void HunterGuiApp::renderTopBar() {
                           ImGui::GetColorU32(ImVec4(status_color.x, status_color.y, status_color.z, 0.18f)),
                           pill.y * 0.5f);
         const float dot_r = row_h * 0.16f;
+        const float pulse_alpha = hunting ? (0.625f + 0.375f * sinf(ImGui::GetTime() * 2.0f * 3.14159f)) : 1.0f;
         dl->AddCircleFilled(ImVec2(p0.x + style.FramePadding.x * 1.2f + dot_r, p0.y + pill.y * 0.5f), dot_r,
-                            ImGui::GetColorU32(status_color));
+                            ImGui::GetColorU32(ImVec4(status_color.x, status_color.y, status_color.z, status_color.w * pulse_alpha)));
         dl->AddText(ImVec2(p0.x + style.FramePadding.x * 2.2f + dot_r, p0.y + (pill.y - text_size.y) * 0.5f),
                     ImGui::GetColorU32(status_color), status_text);
         ImGui::Dummy(ImVec2(pill.x + dot_r * 2.0f, pill.y));

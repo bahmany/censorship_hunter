@@ -214,6 +214,20 @@ BuiltConfig ProxyServerManager::buildEngineConfig(const std::string& uri, int po
 // xray cannot express (hysteria2/tuic, or configs that demand insecure TLS).
 BuiltConfig ProxyServerManager::buildClientEngineConfig(const std::string& uri, int port) {
     BuiltConfig out;
+    if (uri == kMultiClientKey) {
+        std::vector<std::pair<ParsedConfig, int>> parsed;
+        {
+            std::lock_guard<std::mutex> lk(multi_mu_);
+            for (const auto& u : client_multi_uris_) {
+                auto p = network::UriParser::parse(u);
+                if (p.has_value() && p->isValid()) parsed.emplace_back(*p, 0);
+            }
+        }
+        if (parsed.empty()) { out.error = "no valid configs for the balanced client session"; return out; }
+        out.ok = true; out.engine = "xray";
+        out.config_text = XRayManager::generateBalancedConfig(parsed, port, port);  // mixed inbound
+        return out;
+    }
     auto parsed = network::UriParser::parse(uri);
     if (!parsed.has_value() || !parsed->isValid()) { out.error = "invalid or unsupported config URI"; return out; }
     const ParsedConfig& config = parsed.value();
@@ -495,13 +509,50 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
     }
 
     int ProxyServerManager::startClientProxy(const std::string& uri, int port) {
+        { std::lock_guard<std::mutex> lk(multi_mu_); client_multi_uris_.clear(); }
+        return startClientSession(uri, {uri}, port);
+    }
+
+    int ProxyServerManager::startClientProxyMulti(const std::vector<std::string>& uris, int port) {
+        // A balanced engine needs one core: keep only the configs xray can express.
+        const bool xray_avail = launcher_ && launcher_->available("xray");
+        std::vector<std::string> xray_uris;
+        std::string first_valid;
+        for (const auto& u : uris) {
+            auto parsed = network::UriParser::parse(u);
+            if (!parsed.has_value() || !parsed->isValid()) continue;
+            if (first_valid.empty()) first_valid = u;
+            const bool quic = parsed->protocol == "hysteria2" || parsed->protocol == "tuic";
+            if (quic || parsed->insecureTls() || !xray_avail ||
+                !parsed->unsupportedReason("xray").empty()) continue;
+            xray_uris.push_back(u);
+        }
+        if (xray_uris.empty()) {
+            if (!first_valid.empty()) return startClientProxy(first_valid, port);
+            std::lock_guard<std::mutex> lk(mutex_);
+            errors_[kMultiClientKey] = "no valid config URI";
+            return -1;
+        }
+        {
+            std::lock_guard<std::mutex> lk(multi_mu_);
+            client_multi_uris_ = xray_uris;
+        }
+        int result = startClientSession(kMultiClientKey, xray_uris, port);
+        if (result < 0) {
+            std::lock_guard<std::mutex> lk(multi_mu_);
+            client_multi_uris_.clear();
+        }
+        return result;
+    }
+
+    int ProxyServerManager::startClientSession(const std::string& key, const std::vector<std::string>& uris, int port) {
         std::unique_lock<std::mutex> lk(mutex_);
-        
+
         // Stop whatever holds this port or this URI (previous Connect). Done
         // with mutex_ released: stopProxy()/monitor teardown take it again.
         std::vector<std::shared_ptr<HealthMonitor>> to_stop;
         for (auto it = sessions_.begin(); it != sessions_.end();) {
-            if ((it->second.port == port && occupies(it->second)) || it->first == uri) {
+            if ((it->second.port == port && occupies(it->second)) || it->first == key) {
                 to_stop.push_back(it->second.mon);
                 retired_.push_back(std::move(it->second));   // keep alive until torn down
                 it = sessions_.erase(it);
@@ -523,13 +574,13 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
 
         // Check if port is free (not taken by foreign process)
         if (!deps_.port_free || !deps_.port_free(port)) {
-            errors_[uri] = "port busy";
+            errors_[key] = "port busy";
             utils::LogRingBuffer::instance().push("[ProxyServer] Port " + std::to_string(port) + " is busy");
             return -1;
         }
         
         // Clear any previous error for this URI
-        errors_.erase(uri);
+        errors_.erase(key);
         
         // Client sessions get a real client config (one "mixed" SOCKS+HTTP
         // inbound on 127.0.0.1, LAN direct) instead of the test-probe config.
@@ -538,38 +589,43 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
         md.build_config = [this](const std::string& u, int p) { return buildClientEngineConfig(u, p); };
 
         // Validate up front so the user gets a reason instead of a silent failure.
-        BuiltConfig probe = buildClientEngineConfig(uri, port);
+        BuiltConfig probe = buildClientEngineConfig(key, port);
         if (!probe.ok) {
-            errors_[uri] = probe.error;
+            errors_[key] = probe.error;
             utils::LogRingBuffer::instance().push("[ProxyServer] " + probe.error);
             return -1;
         }
 
         auto mon = HealthMonitor::create(mcfg_, md);
-        mon->setEventCallback([this, uri](const SessionEvent& e) {
+        mon->setEventCallback([this, key](const SessionEvent& e) {
             SessionEventCallback cb;
             { std::lock_guard<std::mutex> lk(mutex_); cb = event_cb_; }
             if (e.kind == EventKind::StateChanged || e.kind == EventKind::FailoverSucceeded ||
                 e.kind == EventKind::FailoverFailed || e.kind == EventKind::EngineExited)
                 utils::LogRingBuffer::instance().push("[ProxyServer] " + std::string(eventKindName(e.kind)) + " " +
                     sessionStateName(e.snapshot.state) + (e.detail.empty() ? "" : ": " + e.detail));
-            if (cb) cb(uri, e);
+            if (cb) cb(key, e);
         });
 
-        Session s; s.mon = mon; s.uri = uri; s.port = port;
-        sessions_[uri] = std::move(s);   // `s` is moved-from below this line: use `mon`
+        Session s; s.mon = mon; s.uri = key; s.port = port;
+        sessions_[key] = std::move(s);   // `s` is moved-from below this line: use `mon`
 
-        active_client_uri_ = uri;
+        active_client_uris_ = uris;
         active_client_port_ = port;
         // The event callback takes mutex_; never start (which may emit events) while holding it.
         lk.unlock();
-        mon->start(uri, port, SwitchMode::Auto);   // non-blocking: launch + first probe run
+        mon->start(key, port, SwitchMode::Auto);   // non-blocking: launch + first probe run
         return port;
     }
 
     std::string ProxyServerManager::clientActiveUri() const {
         std::lock_guard<std::mutex> lk(mutex_);
-        return active_client_uri_;
+        return !active_client_uris_.empty() ? active_client_uris_[0] : std::string();
+    }
+
+    std::vector<std::string> ProxyServerManager::clientActiveUris() const {
+        std::lock_guard<std::mutex> lk(mutex_);
+        return active_client_uris_;
     }
 
     int ProxyServerManager::clientActivePort() const {
@@ -578,16 +634,20 @@ std::pair<unsigned long long, unsigned long long> ProxyServerManager::readProces
     }
 
     bool ProxyServerManager::stopClientProxy() {
-        std::string uri;
+        std::string key;
         {
             std::lock_guard<std::mutex> lk(mutex_);
-            if (active_client_uri_.empty()) return false;
-            uri = active_client_uri_;
+            if (active_client_uris_.empty()) return false;
+            std::lock_guard<std::mutex> mlk(multi_mu_);
+            key = client_multi_uris_.empty() ? active_client_uris_[0] : kMultiClientKey;
         }
-        bool result = stopProxy(uri);   // takes mutex_ itself: must not be held here
+        bool result = stopProxy(key);   // takes mutex_ itself: must not be held here
         std::lock_guard<std::mutex> lk(mutex_);
-        if (active_client_uri_ == uri) {      // cleared even if the session had already ended
-            active_client_uri_.clear();
+        if (!active_client_uris_.empty() &&
+            (key == kMultiClientKey || active_client_uris_[0] == key)) {
+            std::lock_guard<std::mutex> mlk(multi_mu_);
+            active_client_uris_.clear();   // cleared even if the session had already ended
+            client_multi_uris_.clear();
             active_client_port_ = 0;
         }
         return result;

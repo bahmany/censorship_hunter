@@ -43,7 +43,7 @@ struct HealthThresholds {
     double stable_max_p90_ms = 3000.0;
     double stable_max_success_age_s = 180.0;
     double stable_max_bulk_age_s = 300.0;
-    double dead_retention_s = 72.0 * 3600.0;   // measured from dead_since (entry into Dead)
+    double dead_retention_s = 1.0 * 3600.0;   // measured from dead_since (entry into Dead)
     size_t recent_id_capacity = 64;
     double excluded_retry_base_s = 5.0;        // backoff for schedulable-but-excluded rounds
     double excluded_retry_max_s = 300.0;

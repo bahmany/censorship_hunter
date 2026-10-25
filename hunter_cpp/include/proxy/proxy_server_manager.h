@@ -106,8 +106,14 @@ public:
     /// last error "port busy". Reuses buildEngineConfig but for xray uses generateConfig with
     /// same port for socks and http (mixed inbound).
     int startClientProxy(const std::string& uri, int port);
+    /// Start the client proxy with several configs load-balanced by one xray engine
+    /// (generateBalancedConfig). Falls back to the single best config if any URI needs
+    /// sing-box. Returns the user-facing port (0 + getError() on failure).
+    int startClientProxyMulti(const std::vector<std::string>& uris, int port);
     /// Accessor for active client proxy URI (empty if none)
     std::string clientActiveUri() const;
+    /// All URIs served by the active client proxy (empty if none)
+    std::vector<std::string> clientActiveUris() const;
     /// Accessor for active client proxy port (0 if none)
     int clientActivePort() const;
     /// Stop the active client proxy (if any)
@@ -127,6 +133,7 @@ private:
     void init();
     int findFreePortLocked() const;
     static bool occupies(const Session& s);
+    int startClientSession(const std::string& key, const std::vector<std::string>& uris, int port);
     void watchdogLoop();
     void resolveEnginePaths();
     BuiltConfig buildClientEngineConfig(const std::string& uri, int port);
@@ -150,8 +157,14 @@ private:
     bool paths_resolved_ = false;
 
     // Active client proxy tracking
-    std::string active_client_uri_;
+    std::vector<std::string> active_client_uris_;
     int active_client_port_ = 0;
+    // URIs of the active multi-config (balanced) client session; session key is kMultiClientKey.
+    // Guarded by multi_mu_ (never locked while mutex_ is being acquired by the same thread path
+    // in reverse: build_config runs with mutex_ held, so it may only take multi_mu_).
+    std::vector<std::string> client_multi_uris_;
+    mutable std::mutex multi_mu_;
+    static constexpr const char* kMultiClientKey = "__top10__";
 
     std::thread watchdog_;
     std::mutex wd_mu_;
