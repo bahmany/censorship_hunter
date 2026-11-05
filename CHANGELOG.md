@@ -5,6 +5,56 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.1] - 2026-11-05
+
+### Added
+- **Robust Auto-Update System**
+  - Complete rewrite of update mechanism for production reliability
+  - Platform-specific binary replacement strategies:
+    * Windows: Safe rename-based replacement with backup
+    * Linux: Atomic rename with exec() process replacement
+    * macOS: Atomic operations with bundle support
+    * Android: APK download and install via Intent
+  - SHA-256 integrity verification for downloaded files
+  - Progress tracking with detailed status updates
+  - Both synchronous and asynchronous update checking
+  - Automatic GitHub release detection
+
+### Features
+- Checks GitHub API for latest releases automatically
+- Downloads platform-appropriate update file
+- Verifies download integrity using SHA-256
+- Self-replaces executable with proper process management
+- Auto-relaunches application after update
+- Handles network errors gracefully
+- Prevents downgrade attacks
+- Support for custom version formats
+
+### Bug Fixes
+- Fixed "About > Update" button not working
+- Fixed incomplete binary replacement process
+- Fixed missing SHA-256 verification
+- Fixed no progress feedback during updates
+- Fixed process hanging after update
+- Fixed orphaned temporary files
+- Improved error messages and recovery
+- Better handling of locked executables
+
+### Testing
+- 8+ unit tests for update operations
+- Async/sync check testing
+- Progress tracking verification
+- Platform-specific operation tests
+- Full integration test suite
+
+### Documentation
+- Comprehensive AUTO_UPDATE_SYSTEM.md guide
+- API reference with code examples
+- Platform implementation details
+- Integration instructions
+- Security considerations
+- Troubleshooting guide
+
 ## [1.13.0] - 2026-11-05
 
 ### Added
