@@ -199,6 +199,19 @@ void mergeDuplicate(ConfigHealthRecord& into, const ConfigHealthRecord& r) {
         into.gemini_checked_at = r.gemini_checked_at;
         into.gemini_status = r.gemini_status;
     }
+    if (r.claude_checked_at > into.claude_checked_at) {
+        into.claude_checked_at = r.claude_checked_at; into.claude_status = r.claude_status;
+    }
+    if (r.devin_checked_at > into.devin_checked_at) {
+        into.devin_checked_at = r.devin_checked_at; into.devin_status = r.devin_status;
+    }
+    if (r.google_developer_checked_at > into.google_developer_checked_at) {
+        into.google_developer_checked_at = r.google_developer_checked_at;
+        into.google_developer_status = r.google_developer_status;
+    }
+    if (r.aws_console_checked_at > into.aws_console_checked_at) {
+        into.aws_console_checked_at = r.aws_console_checked_at; into.aws_console_status = r.aws_console_status;
+    }
 }
 
 std::string buildV4Content(const char* header, const std::vector<const ConfigHealthRecord*>& recs,
@@ -220,6 +233,28 @@ bool validateV4Content(const std::string& content, const char* header, size_t ex
         ConfigHealthRecord r;
         std::string e;
         if (!parseRecordV4(lines[i], th, &r, &e)) { *err = "generated row invalid: " + e; return false; }
+    }
+    return true;
+}
+
+std::string buildV5Content(const std::vector<const ConfigHealthRecord*>& recs,
+                           double now, const HealthThresholds& th) {
+    std::string out = kDbHeaderV5;
+    out += "\n" + v5ColumnsLine() + "\n";
+    for (const auto* r : recs) out += serializeRecordV5(*r, now, th) + "\n";
+    return out;
+}
+
+bool validateV5Content(const std::string& content, size_t expect_rows,
+                       const HealthThresholds& th, std::string* err) {
+    if (firstLine(content) != kDbHeaderV5) { *err = "generated header mismatch"; return false; }
+    auto lines = bodyLines(content);
+    if (lines.empty() || lines[0] != v5ColumnsLine()) { *err = "generated columns mismatch"; return false; }
+    if (lines.size() - 1 != expect_rows) { *err = "generated row count mismatch"; return false; }
+    for (size_t i = 1; i < lines.size(); ++i) {
+        ConfigHealthRecord r;
+        std::string e;
+        if (!parseRecordV5(lines[i], th, &r, &e)) { *err = "generated row invalid: " + e; return false; }
     }
     return true;
 }
@@ -275,6 +310,18 @@ int countRejectedV4(const std::string& data, const HealthThresholds& th) {
     return bad;
 }
 
+int countRejectedV5(const std::string& data, const HealthThresholds& th) {
+    int bad = 0;
+    auto lines = bodyLines(data);
+    for (size_t i = 1; i < lines.size(); ++i) {
+        if (lines[i].empty() || lines[i][0] == '#') continue;
+        ConfigHealthRecord r;
+        std::string e;
+        if (!parseRecordV5(lines[i], th, &r, &e)) ++bad;
+    }
+    return bad;
+}
+
 }  // namespace
 
 bool ConfigDatabase::readOnly() const { std::lock_guard<std::mutex> l(mutex_); return read_only_; }
@@ -307,7 +354,7 @@ bool ConfigDatabase::checkDestinationLocked(const std::string& filepath, bool is
     }
     if (existing.empty() || existing.find_first_not_of(" \t\r\n") == std::string::npos) return true;
     const char* prefix = is_live ? "#HUNTER_LIVE_CACHE_V" : "#HUNTER_CONFIG_DB_V";
-    const int cur = is_live ? 3 : 4;
+    const int cur = is_live ? 3 : 5;
     const std::string first = firstLine(existing);
     const int v = headerVersion(first, prefix);
     auto fail = [&](const std::string& why) {
@@ -325,16 +372,22 @@ bool ConfigDatabase::checkDestinationLocked(const std::string& filepath, bool is
     }
     if (is_live && v < 3) return true;  // derived cache; older layouts are safely regenerated
     if (v < cur) {
+        if (!is_live && v == 4) {
+            const auto old_lines = bodyLines(existing);
+            if (old_lines.empty() || old_lines[0] != v4ColumnsLine())
+                return fail("refusing to overwrite a V4 file with an unrecognized column layout");
+        }
         if (!makeBackup(filepath + ".v" + std::to_string(v) + ".bak", existing, &used, err))
             return fail("backup of old-format file failed: " + *err);
         return true;
     }
     // Current version: the column layout must be exactly ours.
     auto lines = bodyLines(existing);
-    if (lines.empty() || lines[0] != v4ColumnsLine())
+    const bool columns_ok = !lines.empty() && (is_live ? lines[0] == v4ColumnsLine() : lines[0] == v5ColumnsLine());
+    if (!columns_ok)
         return fail("refusing to overwrite file with a different column layout");
-    if (!is_live && std::hash<std::string>{}(existing) != last_written_hash_ && countRejectedV4(existing, th_) > 0) {
-        if (!makeBackup(filepath + ".v4.bak", existing, &used, err))
+    if (!is_live && std::hash<std::string>{}(existing) != last_written_hash_ && countRejectedV5(existing, th_) > 0) {
+        if (!makeBackup(filepath + ".v5.bak", existing, &used, err))
             return fail("rows that cannot be parsed could not be backed up: " + *err);
     }
     return true;
@@ -361,8 +414,8 @@ int ConfigDatabase::saveToDisk(const std::string& filepath) const {
     const double now = clock_();
     std::vector<const ConfigHealthRecord*> recs;
     for (const auto& [k, rec] : db_) if (!rec.uri.empty()) recs.push_back(&rec);
-    const std::string content = buildV4Content(kDbHeaderV4, recs, now, th_);
-    if (!validateV4Content(content, kDbHeaderV4, recs.size(), th_, &err)) { err = "save refused: " + err; return -1; }
+    const std::string content = buildV5Content(recs, now, th_);
+    if (!validateV5Content(content, recs.size(), th_, &err)) { err = "save refused: " + err; return -1; }
     if (!writeFileAtomic(filepath, content, &err)) return -1;
     last_written_hash_ = std::hash<std::string>{}(content);
     return static_cast<int>(recs.size());
@@ -413,7 +466,7 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     }
     const std::string first = firstLine(data);
     const int ver = headerVersion(first, "#HUNTER_CONFIG_DB_V");
-    if (ver < 1 || ver > 4) {
+    if (ver < 1 || ver > 5) {
         rep.error = first.compare(0, 19, "#HUNTER_CONFIG_DB_V") == 0 ? "unsupported config DB version: " + first
                                                                       : "not a config DB file";
         if (first.compare(0, 19, "#HUNTER_CONFIG_DB_V") == 0) setReadOnlyLocked(rep.error);
@@ -425,9 +478,11 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     size_t start = 0;
     std::vector<ConfigHealthRecord> parsed;
 
-    if (ver == 4) {
-        if (lines.empty() || lines[0] != v4ColumnsLine()) {
-            rep.error = "V4 column header missing or different";
+    if (ver == 4 || ver == 5) {
+        const bool header_ok = !lines.empty() &&
+            (ver == 4 ? lines[0] == v4ColumnsLine() : lines[0] == v5ColumnsLine());
+        if (!header_ok) {
+            rep.error = ver == 4 ? "V4 column header missing or different" : "V5 column header missing or different";
             setReadOnlyLocked(rep.error);
             load_report_ = rep;
             return 0;
@@ -437,7 +492,8 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
             if (lines[i][0] == '#') continue;
             ConfigHealthRecord r;
             std::string e;
-            if (parseRecordV4(lines[i], th_, &r, &e)) parsed.push_back(std::move(r));
+            if ((ver == 4 ? parseRecordV4(lines[i], th_, &r, &e) : parseRecordV5(lines[i], th_, &r, &e)))
+                parsed.push_back(std::move(r));
             else rep.rejected++;
         }
         for (auto& r : parsed) {
@@ -451,7 +507,7 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
         if (rep.rejected > 0) {
             // A later save would drop the rejected rows: keep the current file bytes first.
             std::string err;
-            if (!makeBackup(filepath + ".v4.bak", data, &rep.backup_path, &err)) {
+            if (!makeBackup(filepath + (ver == 4 ? ".v4.bak" : ".v5.bak"), data, &rep.backup_path, &err)) {
                 rep.error = "rejected rows not backed up: " + err;
                 setReadOnlyLocked(rep.error);  // fail closed: no later save may drop them
             }
@@ -479,12 +535,12 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     }
     rep.ok = true;
 
-    // Rewrite as V4: validate the whole new file first, keep the original as .v<N>.bak.
+    // Rewrite as V5: validate the whole new file first, keep the original as .v<N>.bak.
     // The new file holds the union of everything in memory (never drops records added since).
     std::vector<const ConfigHealthRecord*> recs;
     for (const auto& [k, r] : db_) if (!r.uri.empty()) recs.push_back(&r);
     const double now = clock_();
-    const std::string content = buildV4Content(kDbHeaderV4, recs, now, th_);
+    const std::string content = buildV5Content(recs, now, th_);
     std::string err;
     if (read_only_) {
         rep.error = "migration not written: read-only mode: " + read_only_reason_;
@@ -492,7 +548,7 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
         // Rewriting would silently drop the rejected rows: leave the original file untouched.
         rep.error = "migration not written: " + std::to_string(rep.rejected) +
                     " row(s) could not be parsed; original kept";
-    } else if (!validateV4Content(content, kDbHeaderV4, recs.size(), th_, &err)) {
+    } else if (!validateV5Content(content, recs.size(), th_, &err)) {
         rep.error = "migration not written: " + err;
     } else {
         std::string bak;

@@ -11,6 +11,7 @@
 namespace hunter {
 
 const char* const kDbHeaderV4 = "#HUNTER_CONFIG_DB_V4";
+const char* const kDbHeaderV5 = "#HUNTER_CONFIG_DB_V5";
 const char* const kLiveHeaderV3 = "#HUNTER_LIVE_CACHE_V3";
 
 const std::vector<std::string>& v4ExtensionColumns() {
@@ -27,6 +28,15 @@ const std::vector<std::string>& v4ExtensionColumns() {
 std::string v4ColumnsLine() {
     std::string s = "#COLUMNS";
     for (const auto& c : v4ExtensionColumns()) s += "\t" + c;
+    return s;
+}
+
+std::string v5ColumnsLine() {
+    std::string s = v4ColumnsLine();
+    for (const char* name : {"claude_status", "devin_status", "google_developer_status", "aws_console_status",
+                             "claude_checked_at", "devin_checked_at", "google_developer_checked_at",
+                             "aws_console_checked_at"})
+        s += std::string("\t") + name;
     return s;
 }
 
@@ -373,7 +383,7 @@ bool parseRecordV4(const std::string& line, const HealthThresholds& th, ConfigHe
     r.total_tests = static_cast<int>(iv);
     if (!pI(f[11], 0, 2000000000LL, &iv)) return bad("bad total_passes");
     r.total_passes = static_cast<int>(iv);
-    if (!pI(f[12], -1, 1, &iv)) return bad("bad gemini_status");
+    if (!pI(f[12], -1, 2, &iv)) return bad("bad gemini_status");
     r.gemini_status = static_cast<int>(iv);
     if (!pD(f[13], &r.gemini_checked_at)) return bad("bad gemini_checked_at");
 
@@ -437,6 +447,45 @@ bool parseRecordV4(const std::string& line, const HealthThresholds& th, ConfigHe
     syncLegacyFromEvidence(&r);
     if (r.ev.state == HealthState::Unknown) { r.alive = hint_alive; r.latency_ms = hint_lat; }
     return *out = std::move(r), true;
+}
+
+std::string serializeRecordV5(const ConfigHealthRecord& rec, double now, const HealthThresholds& th) {
+    std::string row = serializeRecordV4(rec, now, th);
+    for (int value : {rec.claude_status, rec.devin_status, rec.google_developer_status, rec.aws_console_status})
+        row += "\t" + std::to_string(value);
+    for (double value : {rec.claude_checked_at, rec.devin_checked_at,
+                         rec.google_developer_checked_at, rec.aws_console_checked_at})
+        row += "\t" + fmtD(value);
+    return row;
+}
+
+bool parseRecordV5(const std::string& line, const HealthThresholds& th, ConfigHealthRecord* out,
+                   std::string* err) {
+    if (line.size() > kMaxRowBytes) { if (err) *err = "row too long"; return false; }
+    auto raw = splitTabs(line);
+    if (raw.size() < 8) { if (err) *err = "wrong V5 column count"; return false; }
+    const size_t v4_count = raw.size() - 8;
+    std::string v4;
+    for (size_t i = 0; i < v4_count; ++i) { if (i) v4.push_back('\t'); v4 += raw[i]; }
+    ConfigHealthRecord r;
+    if (!parseRecordV4(v4, th, &r, err)) return false;
+    long long status;
+    for (size_t i = 0; i < 4; ++i) {
+        if (!pI(raw[v4_count + i], -1, 2, &status)) { if (err) *err = "bad service status"; return false; }
+        const int value = static_cast<int>(status);
+        if (i == 0) r.claude_status = value;
+        else if (i == 1) r.devin_status = value;
+        else if (i == 2) r.google_developer_status = value;
+        else r.aws_console_status = value;
+    }
+    double at;
+    double* times[] = {&r.claude_checked_at, &r.devin_checked_at,
+                       &r.google_developer_checked_at, &r.aws_console_checked_at};
+    for (size_t i = 0; i < 4; ++i)
+        if (!pD(raw[v4_count + 4 + i], &at)) { if (err) *err = "bad service timestamp"; return false; }
+        else *times[i] = at;
+    *out = std::move(r);
+    return true;
 }
 
 bool parseRecordLegacy(int layout, const std::vector<std::string>& f, const HealthThresholds&,

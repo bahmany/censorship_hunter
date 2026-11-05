@@ -311,6 +311,20 @@ void ConfigDatabase::updateGeminiStatus(const std::string& uri, int gemini_statu
     it->second.gemini_checked_at = clock_();
 }
 
+void ConfigDatabase::updateServiceStatus(const std::string& uri, const std::string& service, int status) {
+    if (status < -1 || status > 2) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = db_.find(keyFor(uri));
+    if (it == db_.end()) return;
+    ConfigHealthRecord& rec = it->second;
+    const double now = clock_();
+    if (service == "gemini") { rec.gemini_status = status; rec.gemini_checked_at = now; }
+    else if (service == "claude") { rec.claude_status = status; rec.claude_checked_at = now; }
+    else if (service == "devin") { rec.devin_status = status; rec.devin_checked_at = now; }
+    else if (service == "google_developer") { rec.google_developer_status = status; rec.google_developer_checked_at = now; }
+    else if (service == "aws_console") { rec.aws_console_status = status; rec.aws_console_checked_at = now; }
+}
+
 std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForGeminiCheck(
         int gemini_interval_s, int max_count) {
     std::lock_guard<std::mutex> lock(mutex_);

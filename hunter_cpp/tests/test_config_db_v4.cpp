@@ -226,7 +226,7 @@ int main(int argc, char** argv) {
     }
     T_END();
 
-    T_CASE("V4 save/load roundtrip preserves evidence, countries and escaping");
+    T_CASE("V5 save/load roundtrip preserves evidence, service accessibility, countries and escaping");
     {
         ConfigDatabase db;
         setup(db);
@@ -245,20 +245,24 @@ int main(int argc, char** argv) {
         ConfigDatabase::CountryUpdate eu;
         eu.is_exit = true; eu.country = "DE"; eu.ip = "5.6.7.8"; eu.source = "cloudflare_trace"; eu.at = NOW - 4; eu.network_generation = 3;
         CHECK(db.applyCountryResult(ConfigDatabase::keyFor(a), eu), "exit country");
+        db.updateServiceStatus(a, "claude", 2);
+        db.updateServiceStatus(a, "devin", 1);
+        db.updateServiceStatus(a, "google_developer", 0);
+        db.updateServiceStatus(a, "aws_console", 1);
         eu.at = NOW - 100;
         CHECK(!db.applyCountryResult(ConfigDatabase::keyFor(a), eu), "older timestamp rejected (CAS)");
         eu.at = NOW; eu.network_generation = 2;
         CHECK(!db.applyCountryResult(ConfigDatabase::keyFor(a), eu), "older network generation rejected");
         CHECK(db.saveToDisk(P("rt.tsv")) == 2, "saved 2");
         std::string text = slurp(P("rt.tsv"));
-        CHECK(text.compare(0, 21, "#HUNTER_CONFIG_DB_V4\n") == 0, "V4 header");
-        CHECK(text.find(v4ColumnsLine()) != std::string::npos, "named columns line");
+        CHECK(text.compare(0, 21, "#HUNTER_CONFIG_DB_V5\n") == 0, "V5 header");
+        CHECK(text.find(v5ColumnsLine()) != std::string::npos, "named service columns line");
         CHECK(!exists(P("rt.tsv.tmp")), "no temp file left");
         ConfigDatabase db2;
         setup(db2);
         CHECK(db2.loadFromDisk(P("rt.tsv")) == 2, "loaded 2");
         auto rep = db2.lastLoadReport();
-        CHECK(rep.ok && rep.source_version == 4 && !rep.migrated && rep.rejected == 0, "report");
+        CHECK(rep.ok && rep.source_version == 5 && !rep.migrated && rep.rejected == 0, "report");
         ConfigHealthRecord x, y;
         db.getRecord(a, &x);
         db2.getRecord(a, &y);
@@ -271,6 +275,8 @@ int main(int argc, char** argv) {
         CHECK(y.ev.ring.back().latency_ms == x.ev.ring.back().latency_ms && y.ev.last_full_success == x.ev.last_full_success, "ring latencies");
         CHECK(y.server_country == "NL" && y.server_ips.size() == 2 && y.exit_country == "DE" && y.network_generation == 3 &&
               y.geo_db_version == "2026-09" && y.exit_ip == "5.6.7.8", "country columns");
+        CHECK(y.claude_status == 2 && y.devin_status == 1 && y.google_developer_status == 0 && y.aws_console_status == 1,
+              "service accessibility statuses persist");
         CHECK(db2.evaluate(y).ewma == db.evaluate(x).ewma && db2.evaluate(y).p90_ms == db.evaluate(x).p90_ms, "S and p90 recomputed identically");
         db2.getRecord(b, &y);
         CHECK(y.ev.insecure_tls && y.ev.state == HealthState::Degraded, "static attrs from URI + state");
@@ -283,7 +289,7 @@ int main(int argc, char** argv) {
     }
     T_END();
 
-    T_CASE("V3 -> V4 migration with .v3.bak, atomic write, idempotence");
+    T_CASE("V3 -> V5 migration with .v3.bak, atomic write, idempotence");
     {
         // two configs sharing an IP (previously collapsed), plus remark-variant duplicate, plus junk lines
         std::string v3 = "#HUNTER_CONFIG_DB_V3\n";
@@ -300,7 +306,7 @@ int main(int argc, char** argv) {
         CHECK(rep.error.empty(), rep.error);
         CHECK(slurp(P("m.tsv.v3.bak")) == v3, ".v3.bak is the byte-exact original");
         std::string nowv4 = slurp(P("m.tsv"));
-        CHECK(nowv4.compare(0, 20, "#HUNTER_CONFIG_DB_V4") == 0, "file rewritten as V4");
+        CHECK(nowv4.compare(0, 20, "#HUNTER_CONFIG_DB_V5") == 0, "file rewritten as V5");
         CHECK(!exists(P("m.tsv.tmp")), "no temp left");
         ConfigHealthRecord r;
         db.getRecord(vless(1), &r);
@@ -316,7 +322,7 @@ int main(int argc, char** argv) {
         ConfigDatabase db2;
         setup(db2);
         CHECK(db2.loadFromDisk(P("m.tsv")) == 2, "reload");
-        CHECK(!db2.lastLoadReport().migrated && db2.lastLoadReport().source_version == 4, "no second migration");
+        CHECK(!db2.lastLoadReport().migrated && db2.lastLoadReport().source_version == 5, "no second migration");
         CHECK(slurp(P("m.tsv")) == nowv4, "file unchanged by reload");
         CHECK(slurp(P("m.tsv.v3.bak")) == v3, "backup unchanged");
         CHECK(db2.saveToDisk(P("m.tsv")) == 2 && slurp(P("m.tsv")) == nowv4, "save after load is byte-identical");
@@ -328,7 +334,7 @@ int main(int argc, char** argv) {
         db3.loadFromDisk(P("m2.tsv"));
         CHECK(slurp(P("m2.tsv.v3.bak")) == "OLDER BACKUP", "unrelated existing backup preserved");
         CHECK(slurp(P("m2.tsv.v3.bak.1")) == v3 && db3.lastLoadReport().backup_path == P("m2.tsv.v3.bak.1"), "current original gets its own exclusive backup");
-        CHECK(slurp(P("m2.tsv")).compare(0, 20, "#HUNTER_CONFIG_DB_V4") == 0, "migrated after safe backup");
+        CHECK(slurp(P("m2.tsv")).compare(0, 20, "#HUNTER_CONFIG_DB_V5") == 0, "migrated after safe backup");
     }
     T_END();
 
@@ -387,7 +393,7 @@ int main(int argc, char** argv) {
         HealthThresholds th;
         ConfigHealthRecord tmp;
         std::string e;
-        CHECK(parseRecordV4(ra, th, &tmp, &e), "baseline parses: " + e);
+        CHECK(parseRecordV5(ra, th, &tmp, &e), "baseline parses: " + e);
         const size_t K0 = kLegacyColumns;  // first extension column
         struct Case { const char* name; std::string row; };
         std::vector<Case> bad = {
@@ -415,7 +421,7 @@ int main(int argc, char** argv) {
         for (auto& cse : bad) {
             ConfigHealthRecord t;
             std::string er;
-            CHECK(!parseRecordV4(cse.row, th, &t, &er), std::string("must reject: ") + cse.name);
+            CHECK(!parseRecordV5(cse.row, th, &t, &er), std::string("must reject: ") + cse.name);
         }
         // whole-file: bad rows skipped, good rows kept, and counted
         std::string file = lines[0] + "\n" + lines[1] + "\n" + ra + "\n" + bad[0].row + "\n" + rb + "\n" + bad[3].row + "\n" + rc + "\n";
@@ -424,16 +430,16 @@ int main(int argc, char** argv) {
         setup(d2);
         CHECK(d2.loadFromDisk(P("c2.tsv")) == 3, "good rows loaded");
         CHECK(d2.lastLoadReport().rejected == 2 && d2.lastLoadReport().ok, "rejections counted");
-        CHECK(slurp(P("c2.tsv")) == file, "V4 load never rewrites the file");
+        CHECK(slurp(P("c2.tsv")) == file, "V5 load never rewrites the file");
         // unknown future version: visible failure, no overwrite
-        std::string v5 = "#HUNTER_CONFIG_DB_V5\n" + lines[1] + "\n" + ra + "\n";
-        spit(P("v5.tsv"), v5);
+        std::string v6 = "#HUNTER_CONFIG_DB_V6\n" + lines[1] + "\n" + ra + "\n";
+        spit(P("v6.tsv"), v6);
         ConfigDatabase d3;
         setup(d3);
         d3.addConfigs({vless(7)});
-        CHECK(d3.loadFromDisk(P("v5.tsv")) == 0 && !d3.lastLoadReport().ok && !d3.lastLoadReport().error.empty(), "V5 load fails visibly");
-        CHECK(d3.saveToDisk(P("v5.tsv")) == -1 && !d3.lastSaveError().empty(), "save refuses to overwrite V5");
-        CHECK(slurp(P("v5.tsv")) == v5 && !exists(P("v5.tsv.tmp")), "V5 file untouched");
+        CHECK(d3.loadFromDisk(P("v6.tsv")) == 0 && !d3.lastLoadReport().ok && !d3.lastLoadReport().error.empty(), "V6 load fails visibly");
+        CHECK(d3.saveToDisk(P("v6.tsv")) == -1 && !d3.lastSaveError().empty(), "save refuses to overwrite V6");
+        CHECK(slurp(P("v6.tsv")) == v6 && !exists(P("v6.tsv.tmp")), "V6 file untouched");
         // wrong column header / garbage file / missing file
         spit(P("hdr.tsv"), "#HUNTER_CONFIG_DB_V4\n#COLUMNS\tfoo\n" + ra + "\n");
         ConfigDatabase d4;
@@ -747,7 +753,7 @@ int main(int argc, char** argv) {
         ConfigDatabase src; setup(src); src.addConfigs({vless(1)}); src.saveToDisk(p);
         std::string bytes = slurp(p) + "garbage\trow\n";
         spit(p, bytes);
-        for (int i = 0; i < 100; ++i) spit(p + ".v4.bak" + (i ? "." + std::to_string(i) : ""), "unrelated\n");
+        for (int i = 0; i < 100; ++i) spit(p + ".v5.bak" + (i ? "." + std::to_string(i) : ""), "unrelated\n");
         ConfigDatabase d; setup(d);
         d.loadFromDisk(p);
         CHECK(d.lastLoadReport().rejected == 1 && !d.lastLoadReport().error.empty(), "backup refusal reported");

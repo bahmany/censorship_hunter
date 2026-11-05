@@ -174,6 +174,9 @@ private:
         geo::CountryMode mode = geo::CountryMode::All;
         geo::CountryChoice choice;
         std::string query;
+        // -2 means any; -1 unknown; 0 blocked; 1 accessible; 2 location forbidden.
+        int gemini_filter = -2, claude_filter = -2, devin_filter = -2;
+        int google_developer_filter = -2, aws_console_filter = -2;
         uint64_t version = 1;
     };
     ViewSpec view_spec_;                     // guarded by view_mutex_

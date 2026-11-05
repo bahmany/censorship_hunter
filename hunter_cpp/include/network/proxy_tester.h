@@ -92,6 +92,12 @@ public:
      */
     int checkGeminiAccess(const std::string& config_uri, int timeout_seconds = 15);
 
+    /// Test an HTTP service URL through the config's local proxy. Returns -1 unknown,
+    /// 0 blocked, 1 accessible, or 2 location forbidden.
+    int checkServiceAccess(const std::string& config_uri, const std::string& service_url,
+                           int timeout_seconds = 10);
+    static int classifyServiceResponse(int http_status, const std::string& body);
+
 private:
     std::string xray_path_;
     std::string singbox_path_;

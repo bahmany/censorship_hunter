@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <condition_variable>
 #include <cstdlib>
 #include <future>
@@ -674,6 +675,54 @@ int ProxyTester::checkGeminiAccess(const std::string& config_uri, int timeout_se
         return res;
     }
     return -1;
+}
+
+int ProxyTester::checkServiceAccess(const std::string& config_uri, const std::string& service_url,
+                                   int timeout_seconds) {
+    ensureDeps();
+    auto parsed = UriParser::parse(config_uri);
+    if (!parsed.has_value() || !parsed->isValid() || service_url.rfind("https://", 0) != 0) return -1;
+    for (const char* engine : {"xray", "sing-box"}) {
+        if (!launcher_->available(engine)) continue;
+        PortLease lease = leases_->acquire();
+        if (!lease.valid()) return -1;
+        LaunchRequest req;
+        req.engine = engine;
+        req.ports = {lease.port()};
+        req.config_text = std::string(engine) == "xray" ? proxy::XRayManager::generateTestConfig(*parsed, lease.port())
+                                                         : parsed->toSingBoxConfigJson(lease.port());
+        if (req.config_text.empty()) continue;
+        lease.releaseSocket();
+        LaunchResult lr = launcher_->launch(req);
+        if (lr.status != LaunchStatus::Ok) continue;
+        TransportRequest rq;
+        rq.url = service_url;
+        rq.proxy_port = lease.port();
+        rq.connect_timeout_ms = std::min(timeout_seconds, 10) * 1000;
+        rq.total_timeout_ms = timeout_seconds * 1000;
+        rq.max_body_bytes = 64 * 1024;
+        static std::shared_ptr<ProbeTransport> tr = makeCurlTransport();
+        const TransportResponse response = tr->fetch(rq);
+        if ((response.error == TransportError::None || response.error == TransportError::TooLarge) && response.status > 0) {
+            return classifyServiceResponse(response.status, response.body);
+        }
+        if (response.error == TransportError::ProxyConnect) return -1;
+        return 0;
+    }
+    return -1;
+}
+
+int ProxyTester::classifyServiceResponse(int http_status, const std::string& response_body) {
+    if (http_status <= 0) return -1;
+    std::string body = response_body;
+    std::transform(body.begin(), body.end(), body.begin(), [](unsigned char c) { return (char)std::tolower(c); });
+    if (http_status == 451 || http_status == 403 ||
+        body.find("not available in your country") != std::string::npos ||
+        body.find("not available in your region") != std::string::npos ||
+        body.find("location not allowed") != std::string::npos ||
+        body.find("geographic restriction") != std::string::npos ||
+        body.find("access denied from your country") != std::string::npos) return 2;
+    return http_status >= 200 && http_status < 400 ? 1 : 0;
 }
 
 } // namespace network

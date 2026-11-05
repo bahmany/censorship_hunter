@@ -97,8 +97,8 @@ public:
         bool ok = false;
         int loaded = 0;
         int rejected = 0;
-        int source_version = 0;     // 1..4 (DB) or live-cache version
-        bool migrated = false;      // legacy file rewritten as V4
+        int source_version = 0;     // 1..5 (DB) or live-cache version
+        bool migrated = false;      // legacy file rewritten as V5
         std::string backup_path;
         std::string error;          // visible failure reason (unknown version, I/O, ...)
         std::string warning;        // e.g. another instance owns the data directory (read-only)
@@ -126,6 +126,9 @@ public:
      * @param gemini_status -1=unknown, 0=blocked, 1=accessible
      */
     void updateGeminiStatus(const std::string& uri, int gemini_status);
+
+    /// Update one service capability status (-1 unknown, 0 blocked, 1 accessible, 2 location forbidden).
+    void updateServiceStatus(const std::string& uri, const std::string& service, int status);
 
     /**
      * @brief Get alive configs that need a Gemini check (never checked

@@ -665,6 +665,11 @@ void HunterGuiApp::snapshotWorker() {
 
                     if (!spec.all_view && !r.alive) return;
                     if (!geo::passesCountryFilter(spec.mode, spec.choice, r.exit_country, r.server_country)) return;
+                    if ((spec.gemini_filter != -2 && r.gemini_status != spec.gemini_filter) ||
+                        (spec.claude_filter != -2 && r.claude_status != spec.claude_filter) ||
+                        (spec.devin_filter != -2 && r.devin_status != spec.devin_filter) ||
+                        (spec.google_developer_filter != -2 && r.google_developer_status != spec.google_developer_filter) ||
+                        (spec.aws_console_filter != -2 && r.aws_console_status != spec.aws_console_filter)) return;
                     if (!terms.empty()) {
                         auto mc = meta_cache.find(r.endpoint_key);
                         const std::string empty;
@@ -1549,6 +1554,84 @@ void HunterGuiApp::renderConfigTable() {
     auto client_status = orch_.clientStatus();
     bool active = client_status.active;
 
+    // Service filters are conjunctive: selecting Gemini and Claude shows configs
+    // matching both selections. The default Any value leaves each service unfiltered.
+    static const char* service_status_labels[] = {"Any", "Unknown", "Blocked", "Accessible", "Location forbidden"};
+    static const int service_status_values[] = {-2, -1, 0, 1, 2};
+    static const char* service_names[] = {"Gemini", "Claude", "Devin", "Google Developer", "AWS Console"};
+    int filter_values[5];
+    {
+        std::lock_guard<std::mutex> lock(view_mutex_);
+        filter_values[0] = view_spec_.gemini_filter;
+        filter_values[1] = view_spec_.claude_filter;
+        filter_values[2] = view_spec_.devin_filter;
+        filter_values[3] = view_spec_.google_developer_filter;
+        filter_values[4] = view_spec_.aws_console_filter;
+    }
+    bool filters_changed = false;
+    for (int i = 0; i < 5; ++i) {
+        if (i) ImGui::SameLine();
+        ImGui::SetNextItemWidth(150.0f * ui_scale_);
+        std::string label = std::string(service_names[i]) + "##service_filter_" + std::to_string(i);
+        int current = 0;
+        for (int j = 0; j < 5; ++j) if (service_status_values[j] == filter_values[i]) current = j;
+        if (ImGui::BeginCombo(label.c_str(), service_status_labels[current])) {
+            for (int j = 0; j < 5; ++j) {
+                const bool selected = current == j;
+                if (ImGui::Selectable(service_status_labels[j], selected)) {
+                    filter_values[i] = service_status_values[j];
+                    filters_changed = true;
+                }
+                if (selected) ImGui::SetItemDefaultFocus();
+            }
+            ImGui::EndCombo();
+        }
+    }
+    if (filters_changed) {
+        std::lock_guard<std::mutex> lock(view_mutex_);
+        view_spec_.gemini_filter = filter_values[0];
+        view_spec_.claude_filter = filter_values[1];
+        view_spec_.devin_filter = filter_values[2];
+        view_spec_.google_developer_filter = filter_values[3];
+        view_spec_.aws_console_filter = filter_values[4];
+        ++view_spec_.version;
+        view_dirty_ = true;
+        snapshot_cv_.notify_one();
+    }
+    ImGui::SameLine();
+    if (selected_uris_.empty()) ImGui::BeginDisabled();
+    if (ImGui::Button("Test selected services")) {
+        const std::vector<std::string> uris(selected_uris_.begin(), selected_uris_.end());
+        runBackground([this, uris]() {
+            static const std::pair<const char*, const char*> services[] = {
+                {"gemini", "https://generativelanguage.googleapis.com/v1beta/models"},
+                {"claude", "https://claude.ai/api/auth/session"},
+                {"devin", "https://devin.ai/api/health"},
+                {"google_developer", "https://console.cloud.google.com"},
+                {"aws_console", "https://console.aws.amazon.com/console/home"}};
+            network::ProxyTester tester;
+            auto* db = orch_.configDb();
+            if (!db) { showToast("Configuration database is unavailable"); return; }
+            int completed = 0;
+            for (const auto& uri : uris) {
+                for (const auto& service : services) {
+                    const int status = tester.checkServiceAccess(uri, service.second, 8);
+                    db->updateServiceStatus(uri, service.first, status);
+                    if (status >= 0) ++completed;
+                }
+            }
+            try { db->saveToDisk("runtime/HUNTER_config_db.tsv"); } catch (...) {}
+            {
+                std::lock_guard<std::mutex> lock(view_mutex_);
+                ++view_spec_.version;
+                view_dirty_ = true;
+            }
+            snapshot_cv_.notify_one();
+            showToast("Service checks complete: " + std::to_string(completed) + " results");
+        });
+    }
+    if (selected_uris_.empty()) ImGui::EndDisabled();
+
     static ImGuiTableFlags flags =
         ImGuiTableFlags_BordersOuter | ImGuiTableFlags_BordersInnerH | ImGuiTableFlags_RowBg | ImGuiTableFlags_Resizable |
         ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable | ImGuiTableFlags_SizingStretchProp |
@@ -1556,7 +1639,8 @@ void HunterGuiApp::renderConfigTable() {
 
     const float table_height = ImGui::GetContentRegionAvail().y;
 
-    const int num_columns = (viewport_width_ < kNarrowThreshold) ? 3 : 7;
+    const bool narrow = viewport_width_ < kNarrowThreshold;
+    const int num_columns = narrow ? 8 : 12;
     if (!ImGui::BeginTable("main_profiles", num_columns, flags, ImVec2(0, table_height))) {
         return;  // table clipped this frame; EndTable must not be called
 
@@ -1568,6 +1652,11 @@ void HunterGuiApp::renderConfigTable() {
                                            ImGuiTableColumnFlags_PreferSortAscending, 80 * ui_scale_);
     ImGui::TableSetupColumn("Exit", ImGuiTableColumnFlags_WidthFixed, 130 * ui_scale_);
     ImGui::TableSetupColumn("Remark", ImGuiTableColumnFlags_WidthStretch);
+    ImGui::TableSetupColumn("Gemini", ImGuiTableColumnFlags_WidthFixed, 105 * ui_scale_);
+    ImGui::TableSetupColumn("Claude", ImGuiTableColumnFlags_WidthFixed, 105 * ui_scale_);
+    ImGui::TableSetupColumn("Devin", ImGuiTableColumnFlags_WidthFixed, 105 * ui_scale_);
+    ImGui::TableSetupColumn("Google Dev", ImGuiTableColumnFlags_WidthFixed, 110 * ui_scale_);
+    ImGui::TableSetupColumn("AWS", ImGuiTableColumnFlags_WidthFixed, 105 * ui_scale_);
     if (viewport_width_ >= kNarrowThreshold) {
         ImGui::TableSetupColumn("Server", ImGuiTableColumnFlags_WidthFixed, 80 * ui_scale_);
         ImGui::TableSetupColumn("Proto", ImGuiTableColumnFlags_WidthFixed, 70 * ui_scale_);
@@ -1599,23 +1688,28 @@ void HunterGuiApp::renderConfigTable() {
                 case 0: c = lat_of(a) - lat_of(b); break;
                 case 1: c = countryCell(a->rec.exit_country).compare(countryCell(b->rec.exit_country)); break;
                 case 2: c = a->ps.compare(b->ps); break;
-                case 3:
-                    if (viewport_width_ >= kNarrowThreshold) {
+                case 3: c = a->rec.gemini_status - b->rec.gemini_status; break;
+                case 4: c = a->rec.claude_status - b->rec.claude_status; break;
+                case 5: c = a->rec.devin_status - b->rec.devin_status; break;
+                case 6: c = a->rec.google_developer_status - b->rec.google_developer_status; break;
+                case 7: c = a->rec.aws_console_status - b->rec.aws_console_status; break;
+                case 8:
+                    if (!narrow) {
                         c = countryCell(a->rec.server_country).compare(countryCell(b->rec.server_country));
                     }
                     break;
-                case 4:
-                    if (viewport_width_ >= kNarrowThreshold) {
+                case 9:
+                    if (!narrow) {
                         c = a->protocol.compare(b->protocol);
                     }
                     break;
-                case 5:
-                    if (viewport_width_ >= kNarrowThreshold) {
+                case 10:
+                    if (!narrow) {
                         c = a->address.compare(b->address);
                     }
                     break;
-                case 6:
-                    if (viewport_width_ >= kNarrowThreshold) {
+                case 11:
+                    if (!narrow) {
                         c = a->rec.uri.compare(b->rec.uri);
                     }
                     break;
@@ -1685,7 +1779,21 @@ void HunterGuiApp::renderConfigTable() {
             ImGui::TableNextColumn();
             ImGui::TextUnformatted(row.ps.empty() ? "-" : row.ps.c_str());
 
-            if (viewport_width_ >= kNarrowThreshold) {
+            auto draw_service_status = [](int status) {
+                switch (status) {
+                    case 1: ImGui::TextColored(ImVec4(0.35f, 0.85f, 0.48f, 1.0f), "Accessible"); break;
+                    case 0: ImGui::TextColored(ImVec4(0.95f, 0.40f, 0.38f, 1.0f), "Blocked"); break;
+                    case 2: ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1.0f), "Location forbidden"); break;
+                    default: ImGui::TextDisabled("Unknown"); break;
+                }
+            };
+            ImGui::TableNextColumn(); draw_service_status(r.gemini_status);
+            ImGui::TableNextColumn(); draw_service_status(r.claude_status);
+            ImGui::TableNextColumn(); draw_service_status(r.devin_status);
+            ImGui::TableNextColumn(); draw_service_status(r.google_developer_status);
+            ImGui::TableNextColumn(); draw_service_status(r.aws_console_status);
+
+            if (!narrow) {
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(countryCell(r.server_country).c_str());
 

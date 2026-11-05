@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
 # Define version string
-set(HUNTER_VERSION_STRING "1.13.1")
+set(HUNTER_VERSION_STRING "1.13.2")
 add_definitions(-DHUNTER_VERSION_STRING="${HUNTER_VERSION_STRING}")
 
 # Windows targets (MinGW cross or MSYS2) use the dedicated file.

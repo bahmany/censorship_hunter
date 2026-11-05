@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.2] - 2026-11-05
+
+### Added
+- Main configuration table now displays Gemini, Claude, Devin, Google Developer, and AWS Console access status, with conjunctive per-service status filters.
+- Selected configurations can be checked against all five services through their proxy; HTTP geo restrictions are reported as Location forbidden.
+- Config database V5 persists the additional four service statuses and timestamps, and upgrades older database files safely while retaining V4 read compatibility.
+
+### Fixed
+- Replaced the unused simulated service checker with real HTTPS requests through the tested proxy configuration.
+- Verified loopback-dependent tests with local socket access enabled.
+
+### Testing
+- C++ build succeeds and all 21 registered CTest tests pass.
+
 ## [1.13.1] - 2026-11-05
 
 ### Added

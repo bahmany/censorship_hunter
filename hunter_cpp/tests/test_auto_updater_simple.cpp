@@ -24,8 +24,8 @@ void testCurrentVersion() {
         return;
     }
     
-    if (version == "1.13.1") {
-        std::cout << "✅ PASSED: Version is correct (1.13.1)\n";
+    if (version == "1.13.2") {
+        std::cout << "✅ PASSED: Version is correct (1.13.2)\n";
     } else {
         std::cout << "⚠️  WARNING: Version mismatch (got: " << version << ")\n";
     }
@@ -100,7 +100,7 @@ void testCancel() {
 int main() {
     std::cout << "\n";
     std::cout << "╔════════════════════════════════════════════════════════════════╗\n";
-    std::cout << "║                AUTO-UPDATER TEST SUITE v1.13.1                 ║\n";
+    std::cout << "║                AUTO-UPDATER TEST SUITE v1.13.2                 ║\n";
     std::cout << "║                      Running on Linux                          ║\n";
     std::cout << "╚════════════════════════════════════════════════════════════════╝\n";
     

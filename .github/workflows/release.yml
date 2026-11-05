@@ -192,6 +192,10 @@ jobs:
           | Android arm64 | `hunter-android-arm64.apk` |
 
           ### New in this release
+          - **Service accessibility checks:** test selected proxies against Gemini,
+            Claude, Devin, Google Developer, and AWS Console; filter the table by
+            service status, including location-forbidden results. Service results
+            are persisted in config database V5; existing V4 databases remain readable.
           - **Automatic top-10 client mode on port 10808:** the top 10 gold
             configs are served automatically as one load-balanced xray engine
             (leastPing balancer), refreshed after every benchmark cycle and

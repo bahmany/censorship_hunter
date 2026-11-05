@@ -96,6 +96,17 @@ static std::string hy2(const std::string& host) { return "hysteria2://pw@" + hos
 static std::string tuic(const std::string& host) { return "tuic://11111111-2222-3333-4444-555555555555:pw@" + host + ":443?sni=" + host; }
 
 int main() {
+    T_CASE("service HTTP results distinguish accessible, blocked, location forbidden, and unknown");
+    {
+        CHECK(ProxyTester::classifyServiceResponse(200, "ok") == 1, "2xx accessible");
+        CHECK(ProxyTester::classifyServiceResponse(302, "redirect") == 1, "redirect reachable");
+        CHECK(ProxyTester::classifyServiceResponse(403, "forbidden") == 2, "403 location restricted");
+        CHECK(ProxyTester::classifyServiceResponse(451, "legal") == 2, "451 location restricted");
+        CHECK(ProxyTester::classifyServiceResponse(200, "Not available in your country") == 2, "geo message detected");
+        CHECK(ProxyTester::classifyServiceResponse(404, "not found") == 0, "4xx blocked");
+        CHECK(ProxyTester::classifyServiceResponse(503, "unavailable") == 0, "5xx blocked");
+        CHECK(ProxyTester::classifyServiceResponse(0, "") == -1, "no response unknown");
+    } T_END();
     setenv("HUNTER_ENABLE_TCP_PRESCREEN", "1", 1);   // must precede first use (cached)
 
     T_CASE("xray group: one bad outbound is bisected out, neighbours pass");
