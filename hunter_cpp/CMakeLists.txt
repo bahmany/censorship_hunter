@@ -2,6 +2,10 @@ cmake_minimum_required(VERSION 3.16)
 
 project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
+# Define version string
+set(HUNTER_VERSION_STRING "1.13.1")
+add_definitions(-DHUNTER_VERSION_STRING="${HUNTER_VERSION_STRING}")
+
 # Windows targets (MinGW cross or MSYS2) use the dedicated file.
 if(WIN32)
     include(${CMAKE_CURRENT_LIST_DIR}/CMakeListsMingw.txt)
@@ -190,6 +194,7 @@ set(CORE_SOURCES
     src/core/engine_embed.cpp
     src/core/config_embed.cpp
     src/core/updater.cpp
+    src/core/auto_updater.cpp
     src/core/found_history.cpp
 )
 
@@ -378,6 +383,11 @@ foreach(_t test_endpoint_key test_health_score test_config_db_v4 test_worker_joi
     target_link_options(${_t} PRIVATE -static-libgcc -static-libstdc++)
     target_link_libraries(${_t} PRIVATE hunter_core)
 endforeach()
+
+# Auto-updater test (standalone, no gtest)
+add_executable(test_auto_updater_simple tests/test_auto_updater_simple.cpp)
+target_link_options(test_auto_updater_simple PRIVATE -static-libgcc -static-libstdc++)
+target_link_libraries(test_auto_updater_simple PRIVATE hunter_core)
 
 # Stage 4 A2 suites (fake transports / loopback only: no public network)
 foreach(_t test_traffic_probe test_connectivity_baseline test_port_lease test_proxy_tester_batch
