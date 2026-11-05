@@ -1,0 +1,20 @@
+{
+  "name": "censorship_hunter",
+  "version": "1.0.0",
+  "description": "<div align=\"center\">",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/bahmany/censorship_hunter.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/bahmany/censorship_hunter/issues"
+  },
+  "homepage": "https://github.com/bahmany/censorship_hunter#readme"
+}

@@ -177,10 +177,23 @@ struct ConfigHealthRecord {
     int total_tests = 0;
     int total_passes = 0;
     bool needs_retest = true;
-    // Gemini (Google AI) accessibility through this proxy.
-    // -1 = unknown/not checked, 0 = blocked, 1 = accessible
+    // Service accessibility tracking
+    // -1 = unknown/not checked, 0 = blocked, 1 = accessible, 2 = location_forbidden
+    // Gemini (Google AI)
     int gemini_status = -1;
     double gemini_checked_at = 0.0;  // Timestamp of last Gemini check
+    // Claude (Anthropic AI)
+    int claude_status = -1;
+    double claude_checked_at = 0.0;
+    // Devin (AI Coding Assistant)
+    int devin_status = -1;
+    double devin_checked_at = 0.0;
+    // Google Developer Console
+    int google_developer_status = -1;
+    double google_developer_checked_at = 0.0;
+    // AWS Console
+    int aws_console_status = -1;
+    double aws_console_checked_at = 0.0;
 
     // ── Stage 4 / D2: typed health evidence (source of truth). The legacy fields above
     // (alive, latency_ms, consecutive_fails, last_alive_time, ...) are derived from it
