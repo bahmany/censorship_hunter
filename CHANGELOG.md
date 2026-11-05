@@ -5,6 +5,54 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.0] - 2026-11-05
+
+### Added
+- **Service Accessibility Dashboard & Tracking**
+  - New web-based dashboard for monitoring proxy accessibility to restricted services
+  - Track accessibility for: Gemini, Claude, Devin, Google Developer Console, AWS Console
+  - Four status categories: Accessible, Blocked, Location Forbidden, Unknown
+  - Advanced filtering: text search, status, source type, latency, service combinations
+  - Real-time statistics: total configs, accessible count, forbidden count, blocked count, avg latency
+  - Sortable data table with pagination (10, 25, 50, 100 per page)
+  - Configuration detail modal with full service status information
+  - CSV export for filtered configurations
+  - Auto-refresh with configurable interval
+  - Dark theme UI with color-coded status badges and responsive design
+
+- **Backend Service Accessibility Modules**
+  - `ServiceAccessibilityChecker` class for testing service accessibility
+  - `ServiceAccessibilityDatabase` for managing service status data
+  - `AccessibilityAPI` for WebSocket command handling
+  - Support for HTTP status code parsing and geographic restriction detection
+  - Service-specific test URLs for quick accessibility validation
+
+- **Extended Configuration Model**
+  - Added service accessibility fields to `ConfigHealthRecord`
+  - Separate status tracking for each service with timestamps
+  - Support for detection of geographically-restricted access
+
+- **Comprehensive Documentation**
+  - `ACCESSIBILITY_FEATURE.md` - Feature documentation and user guide
+  - `SERVICE_ACCESSIBILITY_IMPLEMENTATION.md` - Integration and deployment guide
+  - Unit test suite for accessibility modules
+  - API endpoint specifications
+  - Troubleshooting guide and FAQ
+
+### Features
+- Filter configurations by service accessibility individually or in combination
+- Identify location-forbidden vs. completely blocked services
+- Export filtered results for offline analysis
+- Monitor service availability trends over time
+- Integrated statistics dashboard
+- Mobile-responsive interface
+
+### Testing
+- Unit tests for ServiceAccessibilityChecker
+- Unit tests for ServiceAccessibilityDatabase
+- Integration tests for API handlers
+- Mock data generator for dashboard testing
+
 ## [1.12.0] - 2026-10-25
 
 ### Added
