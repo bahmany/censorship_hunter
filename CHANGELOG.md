@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.3] - 2026-11-06
+
+### Fixed
+- Replaced simulated service accessibility results with real HTTPS checks through the managed XRay/sing-box proxy path.
+- Aligned Gemini and Devin checks with the service URLs used by the configuration table.
+
+### Changed
+- Increased the persistent configuration database and GitHub intake cap to 1,000,000 records.
+- Kept successful/live configurations in the existing three-day live cache and sorted live results by measured latency.
+
 ## [1.13.2] - 2026-11-05
 
 ### Added

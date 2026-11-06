@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
 # Define version string
-set(HUNTER_VERSION_STRING "1.13.2")
+set(HUNTER_VERSION_STRING "1.13.3")
 add_definitions(-DHUNTER_VERSION_STRING="${HUNTER_VERSION_STRING}")
 
 # Windows targets (MinGW cross or MSYS2) use the dedicated file.
@@ -206,6 +206,7 @@ set(NETWORK_SOURCES
     src/network/continuous_validator.cpp
     src/network/config_db_store.cpp
     src/network/proxy_tester.cpp
+    src/network/service_accessibility.cpp
     src/network/traffic_probe.cpp
     src/network/connectivity_baseline.cpp
     src/network/port_lease.cpp

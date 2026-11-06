@@ -1,5 +1,6 @@
 #include "network/service_accessibility.h"
 #include "core/utils.h"
+#include "network/proxy_tester.h"
 #include <chrono>
 #include <sstream>
 #include <algorithm>
@@ -7,9 +8,9 @@
 ServiceAccessibilityChecker::ServiceAccessibilityChecker() {
     // Initialize service test URLs
     // These are lightweight endpoints that test accessibility quickly
-    service_urls_[Service::GEMINI] = "https://gemini.google.com/api/protos/google.ai.generativelanguage.v1beta.GenerativeService/GenerateContent:generateStream";
+    service_urls_[Service::GEMINI] = "https://generativelanguage.googleapis.com/v1beta/models";
     service_urls_[Service::CLAUDE] = "https://claude.ai/api/auth/session";
-    service_urls_[Service::DEVIN] = "https://devin.ai/api/health";
+    service_urls_[Service::DEVIN] = "https://devin.ai";
     service_urls_[Service::GOOGLE_DEVELOPER] = "https://console.cloud.google.com";
     service_urls_[Service::AWS_CONSOLE] = "https://console.aws.amazon.com/console/home";
 }
@@ -121,25 +122,21 @@ ServiceAccessibilityChecker::ServiceTestResult ServiceAccessibilityChecker::test
     result.error_message = "";
     result.timestamp = std::chrono::system_clock::now().time_since_epoch().count() / 1e9;
     
-    // TODO: Implement actual HTTP request through SOCKS proxy
-    // This would use libcurl with SOCKS5 support
-    // For now, return simulated results
-    
-    // Simulate testing (random result for demo)
-    int test_result = rand() % 100;
-    if (test_result < 40) {
-        result.status = AccessibilityStatus::ACCESSIBLE;
-        result.latency_ms = 50.0f + (rand() % 300);
-    } else if (test_result < 70) {
+    // Run the same managed XRay/sing-box proxy path as config benchmarking.
+    const int status = hunter::network::ProxyTester().checkServiceAccess(
+        socks_proxy, test_url, timeout_seconds);
+    if (status == 1) result.status = AccessibilityStatus::ACCESSIBLE;
+    else if (status == 2) {
         result.status = AccessibilityStatus::LOCATION_FORBIDDEN;
-        result.error_message = "HTTP 451: Unavailable For Legal Reasons";
-        result.latency_ms = 100.0f + (rand() % 500);
-    } else {
+        result.error_message = "Service denied access for this location";
+    } else if (status == 0) {
         result.status = AccessibilityStatus::BLOCKED;
-        result.error_message = "Connection refused or timeout";
-        result.latency_ms = 5000.0f;
+        result.error_message = "Service returned an access-denied or HTTP error response";
+    } else {
+        result.status = AccessibilityStatus::UNKNOWN;
+        result.error_message = "Proxy could not be launched or service request failed";
     }
-    
+
     return result;
 }
 
