@@ -257,6 +257,10 @@ void HunterOrchestrator::initComponents() {
     // Subscription manager
     sub_manager_.bind(config_db_.get(), &http_client_);
     sub_manager_.load(cache_dir + "/subscriptions.tsv");
+    for (const auto& url : constants::defaultSubscriptionUrls()) {
+        const size_t slash = url.find_last_of('/');
+        sub_manager_.add(url, slash == std::string::npos ? url : url.substr(slash + 1));
+    }
 
     // Found history: latest 200 discovered configs, persisted across runs.
     utils::mkdirRecursive(cache_dir);

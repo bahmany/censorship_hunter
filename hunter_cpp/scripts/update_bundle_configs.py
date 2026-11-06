@@ -13,8 +13,6 @@ SCHEME_RE = re.compile(r"(vmess|vless|trojan|ss)://[^\s\"'<>]+", re.IGNORECASE)
 DEFAULT_SOURCES = [
     "https://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt",
     "https://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt",
-    "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vless",
-    "https://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/reality",
 ]
 
 

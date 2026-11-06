@@ -31,6 +31,37 @@ namespace network {
 
  namespace {
 
+std::string ipv4SubnetForUri(const std::string& uri) {
+    const auto parsed = UriParser::parse(uri);
+    if (!parsed) return {};
+    const std::string& host = parsed->address;
+    int octets[4] = {0, 0, 0, 0};
+    size_t begin = 0;
+    for (int i = 0; i < 4; ++i) {
+        const size_t end = host.find('.', begin);
+        if ((i < 3 && end == std::string::npos) || (i == 3 && end != std::string::npos)) return {};
+        const size_t stop = end == std::string::npos ? host.size() : end;
+        if (stop == begin || stop - begin > 3) return {};
+        int value = 0;
+        for (size_t j = begin; j < stop; ++j) {
+            const unsigned char c = static_cast<unsigned char>(host[j]);
+            if (c < '0' || c > '9') return {};
+            value = value * 10 + (c - '0');
+        }
+        if (value > 255) return {};
+        octets[i] = value;
+        begin = stop + 1;
+    }
+    return std::to_string(octets[0]) + "." + std::to_string(octets[1]) + "." + std::to_string(octets[2]);
+}
+
+void releaseSubnetOwner(std::unordered_map<std::string, std::string>& owners,
+                        const ConfigHealthRecord& rec) {
+    const std::string subnet = ipv4SubnetForUri(rec.uri);
+    auto it = owners.find(subnet);
+    if (!subnet.empty() && it != owners.end() && it->second == rec.endpoint_key) owners.erase(it);
+}
+
 // Wait for a pool task with a hard deadline.
 //
 // These tasks shell out to xray/sing-box; a wedged subprocess makes the task
@@ -120,6 +151,8 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
             }
             continue;
         }
+        const std::string subnet = ipv4SubnetForUri(uri);
+        if (!subnet.empty() && subnet_owner_.count(subnet)) continue;
         if ((int)db_.size() >= max_size_) evictStale();
         if ((int)db_.size() >= max_size_) break;
 
@@ -131,6 +164,7 @@ int ConfigDatabase::addConfigsWithPriority(const std::set<std::string>& uris, co
         rec.priority_boost_until = boost_until;
         rec.needs_retest = true;
         db_[hash] = rec;
+        if (!subnet.empty()) subnet_owner_[subnet] = hash;
         added++;
         fresh.emplace_back(uri, now);
     }
@@ -635,7 +669,7 @@ void ConfigDatabase::evictStale() {
         if (rec.ev.state == HealthState::Dead && deadCertified(rec.ev, th_) &&
             (now - rec.ev.dead_since) > th_.dead_retention_s)
             dead_hashes.push_back(hash);
-    for (auto& h : dead_hashes) db_.erase(h);
+    for (auto& h : dead_hashes) { auto it = db_.find(h); if (it != db_.end()) { releaseSubnetOwner(subnet_owner_, it->second); db_.erase(it); } }
 
     // Phase 2 (capacity only): oldest inactive records that never had a full success, no alive
     // hint, and are older than the retention window. Anything else is never evicted.
@@ -653,7 +687,7 @@ void ConfigDatabase::evictStale() {
         return a.first < b.first;
     });
     int to_remove = std::max(1, (int)candidates.size() / 4);
-    for (int i = 0; i < to_remove && i < (int)candidates.size(); i++) db_.erase(candidates[i].first);
+    for (int i = 0; i < to_remove && i < (int)candidates.size(); i++) { auto it = db_.find(candidates[i].first); if (it != db_.end()) { releaseSubnetOwner(subnet_owner_, it->second); db_.erase(it); } }
 }
 
 int ConfigDatabase::clearOlderThan(int max_age_hours) {
@@ -671,6 +705,7 @@ int ConfigDatabase::clearOlderThan(int max_age_hours) {
             should_remove = true;
         }
         if (should_remove) {
+            releaseSubnetOwner(subnet_owner_, it->second);
             it = db_.erase(it);
             removed++;
         } else {
@@ -685,6 +720,7 @@ int ConfigDatabase::clearAlive() {
     int removed = 0;
     for (auto it = db_.begin(); it != db_.end(); ) {
         if (it->second.alive) {
+            releaseSubnetOwner(subnet_owner_, it->second);
             it = db_.erase(it);
             removed++;
         } else {
@@ -702,6 +738,7 @@ int ConfigDatabase::removeUris(const std::set<std::string>& uris) {
         const std::string hash = keyFor(uri);
         auto it = db_.find(hash);
         if (it != db_.end()) {
+            releaseSubnetOwner(subnet_owner_, it->second);
             db_.erase(it);
             removed++;
         }
@@ -745,6 +782,7 @@ int ConfigDatabase::removeDeadLive(int dead_ttl_s) {
         const auto& ev = it->second.ev;
         // Only attributed Dead records, measured from entry into Dead.
         if (ev.state == HealthState::Dead && deadCertified(ev, th_) && (now - ev.dead_since) > ttl) {
+            releaseSubnetOwner(subnet_owner_, it->second);
             it = db_.erase(it);
             removed++;
         } else ++it;

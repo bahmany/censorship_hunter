@@ -1,6 +1,7 @@
 // ConfigDatabase persistence: TSV V4 (config DB) / V3 (live cache), legacy migration,
 // atomic writes. Pure file logic; no network or process code.
 #include "network/continuous_validator.h"
+#include "network/uri_parser.h"
 #include "core/db_format.h"
 #include "core/utils.h"
 
@@ -32,6 +33,21 @@
 namespace hunter {
 namespace network {
 namespace {
+std::string ipv4SubnetForUri(const std::string& uri) {
+    const auto parsed = UriParser::parse(uri);
+    if (!parsed) return {};
+    const std::string& host = parsed->address;
+    int octets[4] = {0, 0, 0, 0}; size_t begin = 0;
+    for (int i = 0; i < 4; ++i) {
+        const size_t end = host.find('.', begin);
+        if ((i < 3 && end == std::string::npos) || (i == 3 && end != std::string::npos)) return {};
+        const size_t stop = end == std::string::npos ? host.size() : end;
+        if (stop == begin || stop - begin > 3) return {};
+        int value = 0; for (size_t j = begin; j < stop; ++j) { unsigned char c = host[j]; if (c < '0' || c > '9') return {}; value = value * 10 + c - '0'; }
+        if (value > 255) return {}; octets[i] = value; begin = stop + 1;
+    }
+    return std::to_string(octets[0]) + "." + std::to_string(octets[1]) + "." + std::to_string(octets[2]);
+}
 
 std::mutex& fileTxMutex() {  // serializes path-level save/migration transactions in-process
     static std::mutex m;
@@ -498,8 +514,11 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
         }
         for (auto& r : parsed) {
             if (db_.count(r.endpoint_key)) continue;
+            const std::string subnet = ipv4SubnetForUri(r.uri);
+            if (!subnet.empty() && subnet_owner_.count(subnet)) continue;
             if ((int)db_.size() >= max_size_) break;
             const std::string k = r.endpoint_key;
+            if (!subnet.empty()) subnet_owner_[subnet] = k;
             db_[k] = std::move(r);
             rep.loaded++;
         }
@@ -529,7 +548,10 @@ int ConfigDatabase::loadFromDisk(const std::string& filepath) {
     }
     for (auto& [k, r] : migrated) {
         if (db_.count(k)) continue;
+        const std::string subnet = ipv4SubnetForUri(r.uri);
+        if (!subnet.empty() && subnet_owner_.count(subnet)) continue;
         if ((int)db_.size() >= max_size_) break;
+        if (!subnet.empty()) subnet_owner_[subnet] = k;
         db_[k] = r;
         rep.loaded++;
     }
@@ -630,9 +652,12 @@ int ConfigDatabase::loadLiveFromDisk(const std::string& filepath) {
             if (changed) rep.loaded++;
             continue;
         }
+        const std::string subnet = ipv4SubnetForUri(r.uri);
+        if (!subnet.empty() && subnet_owner_.count(subnet)) continue;
         if ((int)db_.size() >= max_size_) break;
         r.needs_retest = true;
         const std::string k = r.endpoint_key;
+        if (!subnet.empty()) subnet_owner_[subnet] = k;
         db_[k] = std::move(r);
         rep.loaded++;
     }

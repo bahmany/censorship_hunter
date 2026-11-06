@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
 # Define version string
-set(HUNTER_VERSION_STRING "1.13.3")
+set(HUNTER_VERSION_STRING "1.13.4")
 add_definitions(-DHUNTER_VERSION_STRING="${HUNTER_VERSION_STRING}")
 
 # Windows targets (MinGW cross or MSYS2) use the dedicated file.
@@ -106,7 +106,7 @@ endif()
 # GitHub sources at BUILD TIME, compresses the deduplicated bundle with zstd,
 # and embeds it via .incbin so the binary ships with a full working config
 # set on first launch. Controlled by HUNTER_EMBED_CONFIGS (ON/OFF).
-option(HUNTER_EMBED_CONFIGS "Download + embed proxy configs into the binary (single-file mode)" OFF)
+option(HUNTER_EMBED_CONFIGS "Download + embed proxy configs into the binary (single-file mode)" ON)
 option(HUNTER_DOWNLOAD_CONFIGS "Download fresh configs at build time (requires network)" ON)
 set(HUNTER_CONFIG_BUNDLE "${CMAKE_BINARY_DIR}/configs_bundle.txt" CACHE PATH "Path to config bundle to embed")
 set(HUNTER_CONFIG_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded_configs" CACHE PATH "Output dir for config embed files")

@@ -7,8 +7,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SRC="$(cd "$HERE/.." && pwd)"; ROOT="$(cd "$SRC/.." && pwd)"
 export HUNTER_WIN_DEPS="${HUNTER_WIN_DEPS:-$ROOT/build/win-deps}"
 BUILD="${HUNTER_WIN_BUILD:-$ROOT/build/win}"
-ENG=ON; CFG=OFF
-for a in "$@"; do case "$a" in --no-engines) ENG=OFF;; --configs) CFG=ON;; esac; done
+ENG=ON; CFG=ON
+for a in "$@"; do case "$a" in --no-engines) ENG=OFF;; --configs) CFG=ON;; --no-configs) CFG=OFF;; esac; done
 [ -f "$SRC/third_party/imgui/imgui.cpp" ] || git -C "$ROOT" submodule update --init hunter_cpp/third_party/imgui
 "$HERE/fetch_windows_deps.sh" "$HUNTER_WIN_DEPS"
 TC=(); [ -n "${HUNTER_NATIVE_MINGW:-}" ] || TC=(-DCMAKE_TOOLCHAIN_FILE="$SRC/cmake/mingw-w64-toolchain.cmake")

@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <set>
 
 namespace hunter {
 
@@ -41,7 +42,7 @@ void HunterConfig::setDefaults() {
     // Client mode configuration defaults
     data_["client_listen_port"] = "10808";
     data_["client_sysproxy_enabled"] = "false";
-    data_["sub_update_interval_min"] = "60";
+    data_["sub_update_interval_min"] = "15";
     data_["sub_autoupdate"] = "true";
 }
 
@@ -201,8 +202,11 @@ void HunterConfig::set(const std::string& key, bool value) {
 
 std::vector<std::string> HunterConfig::githubUrls() const {
     auto urls = getStringList("github_urls");
-    if (urls.empty()) {
-        return constants::githubRepos();
+    const auto& defaults = constants::githubRepos();
+    if (urls.empty()) return defaults;
+    std::set<std::string> seen(urls.begin(), urls.end());
+    for (const auto& url : defaults) {
+        if (seen.insert(url).second) urls.push_back(url);
     }
     return urls;
 }

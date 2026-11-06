@@ -36,8 +36,9 @@ static std::string uuid(int i) {
     std::snprintf(b, sizeof b, "%08x-2222-3333-4444-555555555555", i);
     return b;
 }
-static std::string vless(int i, const char* host = "1.2.3.4", int port = 443) {
-    return "vless://" + uuid(i) + "@" + host + ":" + std::to_string(port) + "?type=ws&path=/p#r" + std::to_string(i);
+static std::string vless(int i, const char* host = nullptr, int port = 443) {
+    const std::string address = host ? host : "198.15." + std::to_string(i) + ".1";
+    return "vless://" + uuid(i) + "@" + address + ":" + std::to_string(port) + "?type=ws&path=/p#r" + std::to_string(i);
 }
 static void setup(ConfigDatabase& db) {
     db.setClock([]() { return NOW; });
@@ -82,18 +83,21 @@ int main(int argc, char** argv) {
     TMP = mkdtemp(tmpl);
     std::cout << "=== ConfigDatabase V4 ===  (tmp " << TMP << ")\n";
 
-    T_CASE("configs sharing an IP are separate records");
+    T_CASE("IPv4 /24 duplicate suppression keeps one server per subnet and releases removed subnets");
     {
         ConfigDatabase db;
         setup(db);
-        std::set<std::string> u = {vless(1), vless(2), vless(3, "1.2.3.4", 8443), "trojan://pw@1.2.3.4:443"};
-        CHECK(db.addConfigs(u) == 4, "4 distinct endpoints on one IP");
-        CHECK(db.addConfigs({"vless://" + uuid(1) + "@1.2.3.4:443?type=ws&path=/p#another-remark"}) == 0, "remark variant is the same endpoint");
-        CHECK(db.size() == 4, "size");
+        std::set<std::string> u = {vless(1, "1.2.3.4"), vless(2, "1.2.3.9"), vless(3, "1.2.3.4", 8443), "trojan://pw@1.2.3.8:443", vless(4, "1.2.4.5")};
+        CHECK(db.addConfigs(u) == 2, "one endpoint per IPv4 /24");
+        CHECK(db.addConfigs({"vless://" + uuid(1) + "@1.2.3.4:443?type=ws&path=/p#another-remark"}) == 0, "remark variant remains deduplicated");
+        CHECK(db.size() == 2, "size");
         ConfigHealthRecord r;
-        CHECK(db.getRecord(vless(1), &r) && r.endpoint_key == ConfigDatabase::keyFor(vless(1)) && r.uri_hash == r.endpoint_key, "record key");
-        CHECK(r.ev.protocol == "vless" && !r.ev.unsupported, "protocol attrs");
+        bool found_owner = db.getRecord(vless(1, "1.2.3.4"), &r) || db.getRecord("trojan://pw@1.2.3.8:443", &r);
+        CHECK(found_owner && r.endpoint_key == ConfigDatabase::keyFor(r.uri) && r.uri_hash == r.endpoint_key, "record key");
+        CHECK(r.ev.protocol == "vless" || r.ev.protocol == "trojan", "protocol attrs");
         CHECK(r.ev.state == HealthState::Unknown, "starts Unknown");
+        CHECK(db.removeUris({vless(1, "1.2.3.4"), vless(2, "1.2.3.9"), vless(3, "1.2.3.4", 8443), "trojan://pw@1.2.3.8:443"}) == 1, "remove subnet owner");
+        CHECK(db.addConfigs({vless(2, "1.2.3.9")}) == 1, "removed subnet can be reused");
     }
     T_END();
 
@@ -295,7 +299,7 @@ int main(int argc, char** argv) {
         std::string v3 = "#HUNTER_CONFIG_DB_V3\n";
         v3 += v3Row(vless(1), "scrape", 1000.0, 1, 150.0, 7, 5);
         v3 += v3Row(vless(2), "harvest", 2000.0, 0, 0.0, 3, 0, 3);
-        v3 += v3Row("vless://" + uuid(1) + "@1.2.3.4:443?type=ws&path=/p#dup", "later", 500.0, 0, 0.0, 9, 2);
+        v3 += v3Row(vless(1), "later", 500.0, 0, 0.0, 9, 2);
         v3 += "#comment\n\n";
         spit(P("m.tsv"), v3);
         ConfigDatabase db;

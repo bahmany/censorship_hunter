@@ -4,6 +4,7 @@ import android.app.Notification;
 import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
+import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
@@ -221,6 +222,7 @@ public class HunterVpnService extends VpnService {
     // ---- notification / lifecycle ----
     private SharedPreferences prefs() { return getSharedPreferences(PREFS, MODE_PRIVATE); }
 
+    @SuppressWarnings("deprecation") // Required for the minSdk 24 notification fallback.
     private Notification buildNotification(String text) {
         NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
         if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(CHANNEL) == null) {
@@ -271,7 +273,7 @@ public class HunterVpnService extends VpnService {
         if (tun != null) { try { tun.close(); } catch (Exception ignored) {} tun = null; }
         try { HunterNative.stopCore(); } catch (Throwable t) { Log.e(TAG, "stopCore", t); }
         running = false;
-        stopForeground(true);
+        stopForeground(Service.STOP_FOREGROUND_REMOVE);
         stopSelf();
     }
 

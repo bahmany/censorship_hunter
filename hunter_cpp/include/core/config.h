@@ -92,7 +92,7 @@ public:
     int clientListenPort() const { return getInt("client_listen_port", 10808); }
     bool clientSysproxyEnabled() const { return getBool("client_sysproxy_enabled", false); }
     bool clientAutoTop10() const { return getBool("client_auto_top10", true); }
-    int subUpdateIntervalMin() const { return getInt("sub_update_interval_min", 60); }
+    int subUpdateIntervalMin() const { return getInt("sub_update_interval_min", 15); }
     bool subAutoupdate() const { return getBool("sub_autoupdate", true); }
     
 #ifdef _WIN32

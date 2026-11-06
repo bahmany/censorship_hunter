@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.4] - 2026-11-06
+
+Android companion version: 2.6.1 (versionCode 9).
+
+### Added
+- Enabled fresh public configuration downloads and embedded config bundles by default for builds.
+- Added the supplied Barry-Far, MatinGhanbari, 0xRadikal, Alirewa, Hamedcode, CNT-Cafe, ZendanTeam, Milad Tahanian, and Mehrtat feeds to build-time and runtime source lists.
+- Added MatinGhanbari subscription feeds 1 through 39 and the Hamedcode Clash feed to the supported source list.
+
+### Changed
+- The first run now ships with freshly downloaded configurations embedded in the application when the configured build-time minimum is met.
+
 ## [1.13.3] - 2026-11-06
 
 ### Fixed
@@ -13,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 - Increased the persistent configuration database and GitHub intake cap to 1,000,000 records.
+- Suppressed duplicate IPv4 server subnets at /24 and capped disposable runtime data/log growth at 1 GiB.
 - Kept successful/live configurations in the existing three-day live cache and sorted live results by measured latency.
 
 ## [1.13.2] - 2026-11-05

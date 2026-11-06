@@ -271,6 +271,42 @@ CleanupStats RuntimeCleanupManager::runCleanup() {
             combined.recent_deletions.push_back(d);
     }
 
+    // Hard runtime footprint ceiling. Preserve the durable database and source
+    // registry; discard oldest disposable cache, export, temp and log files first.
+    constexpr int64_t kRuntimeLimitBytes = 1024LL * 1024LL * 1024LL;
+    struct RuntimeFile { std::string path; int64_t size; double mtime; };
+    auto files = listFiles(runtime_dir_, "", true);
+    std::vector<RuntimeFile> disposable;
+    int64_t total_bytes = 0;
+    for (const auto& path : files) {
+        const int64_t size = getFileSize(path);
+        total_bytes += size;
+        const std::string name = path.substr(path.find_last_of('/') + 1);
+        if (name == "HUNTER_config_db.tsv" || name == "HUNTER_live_cache.tsv" ||
+            name == "sources_manager.tsv" || name == "source_history.tsv" ||
+            name.find(".lock") != std::string::npos) continue;
+        if (name.size() >= 4 && (name.substr(name.size()-4) == ".tsv" || name.substr(name.size()-4) == ".json")) {
+            if (name.find("cache") == std::string::npos && name.find("export") == std::string::npos) continue;
+        }
+        disposable.push_back({path, size, getFileModTime(path)});
+    }
+    combined.files_scanned += static_cast<int>(files.size());
+    std::sort(disposable.begin(), disposable.end(), [](const RuntimeFile& a, const RuntimeFile& b) {
+        return a.mtime < b.mtime;
+    });
+    for (const auto& file : disposable) {
+        if (total_bytes <= kRuntimeLimitBytes) break;
+        if (deleteFile(file.path)) {
+            total_bytes -= file.size;
+            combined.files_deleted++;
+            combined.bytes_freed += file.size;
+            combined.recent_deletions.push_back(file.path);
+        }
+    }
+    if (total_bytes > kRuntimeLimitBytes)
+        std::cerr << "[Cleanup] Runtime directory remains above 1 GiB; protected persistent data occupies "
+                  << (total_bytes / (1024LL * 1024LL)) << " MiB" << std::endl;
+
     combined.last_run_ts = start;
     combined.duration_ms = (utils::nowTimestamp() - start) * 1000.0;
 

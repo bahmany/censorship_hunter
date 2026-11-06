@@ -7,6 +7,7 @@
 #include <mutex>
 #include <atomic>
 #include <functional>
+#include <unordered_map>
 
 #include "core/models.h"
 #include "core/health_score.h"
@@ -304,6 +305,7 @@ public:
 private:
     int max_size_;
     std::map<std::string, ConfigHealthRecord> db_;  // keyed by EndpointKeyV1
+    std::unordered_map<std::string, std::string> subnet_owner_;  // IPv4 /24 -> endpoint key
     mutable std::mutex mutex_;
     ClockFn clock_;
     BatchPrioritizer batch_prioritizer_;   // guarded by mutex_ (C2)

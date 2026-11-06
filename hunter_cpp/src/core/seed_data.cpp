@@ -10,31 +10,18 @@ namespace hunter {
 static const char* DEFAULT_SOURCES_SEED =
 "# enabled\tpriority\tcategory\tadded_ts\tlast_success_ts\ttotal_configs_found\tsuccess_rate\tname\tdescription\turl\n"
 "1\t1\tpremium\t0\t0\t0\t0\tBarry Far Configs\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/barry-far/V2ray-config/main/All_Configs_Sub.txt\n"
-"1\t1\tpremium\t0\t0\t0\t0\tEbrasha Free List\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/ebrasha/free-v2ray-public-list/refs/heads/main/all_extracted_configs.txt\n"
 "1\t1\tpremium\t0\t0\t0\t0\tMilad Tahanian Dumper\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/miladtahanian/V2RayCFGDumper/refs/heads/main/sub.txt\n"
-"1\t1\tpremium\t0\t0\t0\t0\tEpodonios Configs\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/Epodonios/v2ray-configs/main/All_Configs_Sub.txt\n"
 "1\t1\tpremium\t0\t0\t0\t0\tMahdi Bland Aggregator\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge.txt\n"
 "1\t0\tprimary\t0\t0\t0\t0\tColdwater Lite\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/coldwater-10/V2ray-Config-Lite/main/All_Configs_Sub.txt\n"
 "1\t0\tprimary\t0\t0\t0\t0\tMatin Ghanbari\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/MatinGhanbari/v2ray-configs/main/subscriptions/v2ray/all_sub.txt\n"
 "1\t0\tprimary\t0\t0\t0\t0\tMashreghi Collector\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/M-Mashreghi/Free-V2ray-Collector/main/All_Configs_Sub.txt\n"
-"1\t0\tprimary\t0\t0\t0\t0\tNiREvil VLESS\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/NiREvil/vless/main/subscription.txt\n"
 "1\t0\tprimary\t0\t0\t0\t0\tALIILA V2rayNG\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/ALIILAPRO/v2rayNG-Config/main/sub.txt\n"
-"1\t0\tprimary\t0\t0\t0\t0\tSkyWRT Configs\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/skywrt/v2ray-configs/main/All_Configs_Sub.txt\n"
 "1\t0\tprimary\t0\t0\t0\t0\tLonglon Configs\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/longlon/v2ray-config/main/All_Configs_Sub.txt\n"
-"1\t0\tprimary\t0\t0\t0\t0\tYebekhe Normal\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/mix\n"
-"1\t0\tprimary\t0\t0\t0\t0\tYebekhe Base64\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/base64/mix\n"
-"1\t0\tprimary\t0\t0\t0\t0\tMFUU V2ray\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/mfuu/v2ray/master/v2ray\n"
 "1\t0\tprimary\t0\t0\t0\t0\tPeasoft NoMoreWalls\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt\n"
 "1\t0\tprimary\t0\t0\t0\t0\tFreeFQ\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/freefq/free/master/v2\n"
-"1\t0\tprimary\t0\t0\t0\t0\tAiboboxx Free\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/aiboboxx/v2rayfree/main/v2\n"
 "1\t0\tprimary\t0\t0\t0\t0\tErmaozi Subscribe\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/ermaozi/get_subscribe/main/subscribe/v2ray.txt\n"
 "1\t0\tprimary\t0\t0\t0\t0\tPawdroid Free Servers\tHigh-quality V2ray configuration source\thttps://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub\n"
-"1\t0\tprimary\t0\t0\t0\t0\tMahdibland Base64 Merge\tAggregator base64 source\thttps://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt\n"
-"1\t0\tprimary\t0\t0\t0\t0\tSoroush Reality\tTelegram collector (reality)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/reality\n"
-"1\t0\tprimary\t0\t0\t0\t0\tSoroush VLESS\tTelegram collector (vless)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vless\n"
-"1\t0\tprimary\t0\t0\t0\t0\tSoroush Trojan\tTelegram collector (trojan)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/trojan\n"
-"1\t0\tprimary\t0\t0\t0\t0\tSoroush VMess\tTelegram collector (vmess)\thttps://raw.githubusercontent.com/soroushmirzaei/telegram-configs-collector/main/protocols/vmess\n"
-"1\t0\tprimary\t0\t0\t0\t0\tMrMohebi All\tTelegram grabber full feed\thttps://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/all.txt\n";
+"1\t0\tprimary\t0\t0\t0\t0\tMahdibland Base64 Merge\tAggregator base64 source\thttps://raw.githubusercontent.com/mahdibland/V2RayAggregator/master/sub/sub_merge_base64.txt\n";
 
 // Default seed configs for initial testing
 static const char* DEFAULT_CONFIGS_SEED = 

@@ -8,8 +8,8 @@ android {
         applicationId "com.hunter.app"
         minSdk 24
         targetSdk 34
-        versionCode 8
-        versionName "2.6.0"
+        versionCode 9
+        versionName "2.6.1"
 
         // ARM64 only — real Android phones. x86_64 is emulators-only.
         ndk {
@@ -19,7 +19,7 @@ android {
         externalNativeBuild {
             cmake {
                 cppFlags '-std=c++17 -fexceptions -frtti'
-                arguments '-DANDROID_STL=c++_shared'
+                arguments '-DANDROID_STL=c++_shared', '-DCMAKE_WARN_DEPRECATED=OFF'
             }
         }
     }
@@ -76,7 +76,7 @@ android {
     externalNativeBuild {
         cmake {
             path "src/main/cpp/CMakeLists.txt"
-            version "3.22.1"
+            version "3.31.6"
         }
     }
 
