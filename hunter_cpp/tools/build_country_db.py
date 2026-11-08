@@ -325,7 +325,7 @@ def generate_embed_files(out_dir: Path, zst_filename: str, comp_size: int, raw_s
         "",
     ]
     if target_win:
-        asm_lines.append('    .section .hunterdat,"dr"')
+        asm_lines.append('    .section .rdata,"dr"')
     else:
         asm_lines.append("    .section .rodata")
     asm_lines.append("")

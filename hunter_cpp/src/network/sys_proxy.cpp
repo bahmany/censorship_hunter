@@ -1,4 +1,5 @@
 #include "network/sys_proxy.h"
+#include "core/utils.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -8,7 +9,6 @@
 #endif
 #endif
 
-#include "core/utils.h"
 #include <string>
 #include <iostream>
 #include <algorithm>

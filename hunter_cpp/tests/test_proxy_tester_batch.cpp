@@ -1,6 +1,7 @@
 #include "test_support.h"
 #include "fake_transport.h"
 #include "network/proxy_tester.h"
+#include "network/service_accessibility.h"
 #include "network/uri_parser.h"
 #include "proxy/xray_manager.h"
 #include <atomic>
@@ -100,12 +101,29 @@ int main() {
     {
         CHECK(ProxyTester::classifyServiceResponse(200, "ok") == 1, "2xx accessible");
         CHECK(ProxyTester::classifyServiceResponse(302, "redirect") == 1, "redirect reachable");
-        CHECK(ProxyTester::classifyServiceResponse(403, "forbidden") == 2, "403 location restricted");
+        CHECK(ProxyTester::classifyServiceResponse(401, "authentication required") == 1, "401 endpoint reachable");
+        CHECK(ProxyTester::classifyServiceResponse(403, "forbidden") == 0, "generic 403 blocked");
+        CHECK(ProxyTester::classifyServiceResponse(403, "not available in your region") == 2, "geo 403 location restricted");
         CHECK(ProxyTester::classifyServiceResponse(451, "legal") == 2, "451 location restricted");
         CHECK(ProxyTester::classifyServiceResponse(200, "Not available in your country") == 2, "geo message detected");
         CHECK(ProxyTester::classifyServiceResponse(404, "not found") == 0, "4xx blocked");
         CHECK(ProxyTester::classifyServiceResponse(503, "unavailable") == 0, "5xx blocked");
         CHECK(ProxyTester::classifyServiceResponse(0, "") == -1, "no response unknown");
+        using Service = ServiceAccessibilityChecker::Service;
+        CHECK(ServiceAccessibilityChecker::getServiceTestUrl(Service::GEMINI) ==
+              "https://generativelanguage.googleapis.com/v1beta/models", "Gemini endpoint registered");
+        CHECK(ServiceAccessibilityChecker::getServiceTestUrl(Service::CLAUDE) ==
+              "https://claude.ai/api/auth/session", "Claude endpoint registered");
+        CHECK(ServiceAccessibilityChecker::getServiceTestUrl(Service::DEVIN) == "https://devin.ai/",
+              "Devin uses the live site endpoint");
+        CHECK(ServiceAccessibilityChecker::getServiceTestUrl(Service::GOOGLE_DEVELOPER) ==
+              "https://console.cloud.google.com", "Google developer endpoint registered");
+        CHECK(ServiceAccessibilityChecker::getServiceTestUrl(Service::AWS_CONSOLE) ==
+              "https://console.aws.amazon.com/console/home", "AWS endpoint registered");
+        CHECK(ServiceAccessibilityChecker::getServiceFromName("Google Development") ==
+              Service::GOOGLE_DEVELOPER, "Google Development alias");
+        CHECK(ServiceAccessibilityChecker::getServiceFromName("Amazon Web Services") ==
+              Service::AWS_CONSOLE, "AWS full name alias");
     } T_END();
     setenv("HUNTER_ENABLE_TCP_PRESCREEN", "1", 1);   // must precede first use (cached)
 

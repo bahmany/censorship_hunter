@@ -1,6 +1,7 @@
 #include "network/continuous_validator.h"
 #include "network/uri_parser.h"
 #include "network/proxy_tester.h"
+#include "network/service_accessibility.h"
 #include "core/utils.h"
 #include "core/endpoint_key.h"
 #include "core/db_format.h"
@@ -361,14 +362,25 @@ void ConfigDatabase::updateServiceStatus(const std::string& uri, const std::stri
 
 std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForGeminiCheck(
         int gemini_interval_s, int max_count) {
+    return getAliveForServiceCheck("gemini", gemini_interval_s, max_count);
+}
+
+std::vector<ConfigHealthRecord> ConfigDatabase::getAliveForServiceCheck(
+        const std::string& service, int interval_s, int max_count) {
+    if (max_count <= 0 || interval_s < 0) return {};
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<ConfigHealthRecord> result;
     double now = clock_();
     for (auto& [hash, rec] : db_) {
         if (!rec.alive) continue;
-        // Need check if: never checked (gemini_checked_at == 0) OR
-        // last check is older than gemini_interval_s
-        if (rec.gemini_checked_at == 0.0 || (now - rec.gemini_checked_at) > gemini_interval_s) {
+        double checked_at = -1.0;
+        if (service == "gemini") checked_at = rec.gemini_checked_at;
+        else if (service == "claude") checked_at = rec.claude_checked_at;
+        else if (service == "devin") checked_at = rec.devin_checked_at;
+        else if (service == "google_developer") checked_at = rec.google_developer_checked_at;
+        else if (service == "aws_console") checked_at = rec.aws_console_checked_at;
+        if (checked_at < 0.0) return {};
+        if (checked_at == 0.0 || (now - checked_at) > interval_s) {
             result.push_back(rec);
             if ((int)result.size() >= max_count) break;
         }
@@ -878,59 +890,66 @@ std::pair<int, int> ContinuousValidator::validateBatch() {
         }
     }
 
-    // ─── Phase 1.5: Gemini accessibility check for alive configs ───
-    // Check if alive configs can reach Gemini (Google AI API). This runs
-    // every hour per config (not every batch) to avoid overhead. We check
-    // up to 5 configs per batch that haven't been checked in the last hour.
-    constexpr int GEMINI_CHECK_INTERVAL_S = 3600;  // 1 hour
-    constexpr int GEMINI_CHECK_BATCH = 5;
-    auto gemini_batch = db_.getAliveForGeminiCheck(GEMINI_CHECK_INTERVAL_S, GEMINI_CHECK_BATCH);
-    int gemini_checked = 0, gemini_accessible = 0;
+    // ─── Phase 1.5: round-robin service capability checks ───
+    // Spread work across batches: one service per cycle, with an independent
+    // hourly timestamp per service/config. This keeps the extra proxy launches
+    // bounded while ensuring every supported platform is checked automatically.
+    constexpr int SERVICE_CHECK_INTERVAL_S = 3600;
+    constexpr int SERVICE_CHECK_BATCH = 5;
+    static const ServiceAccessibilityChecker::Service services[] = {
+        ServiceAccessibilityChecker::Service::GEMINI,
+        ServiceAccessibilityChecker::Service::CLAUDE,
+        ServiceAccessibilityChecker::Service::DEVIN,
+        ServiceAccessibilityChecker::Service::GOOGLE_DEVELOPER,
+        ServiceAccessibilityChecker::Service::AWS_CONSOLE,
+    };
+    constexpr unsigned int service_count = sizeof(services) / sizeof(services[0]);
+    const auto service = services[next_service_check_.fetch_add(1, std::memory_order_relaxed) % service_count];
+    const std::string service_name = ServiceAccessibilityChecker::getServiceName(service);
+    const std::string service_url = ServiceAccessibilityChecker::getServiceTestUrl(service);
+    auto service_batch = db_.getAliveForServiceCheck(service_name, SERVICE_CHECK_INTERVAL_S,
+                                                      SERVICE_CHECK_BATCH);
+    int service_checked = 0, service_accessible = 0, service_location_forbidden = 0;
 
-    if (!gemini_batch.empty()) {
-        int gemini_timeout = std::max(5, std::min(20, timeout_s_));
-        size_t gchunk = (size_t)std::max(1, std::min(5, max_concurrent_));
-        auto& gmgr = HunterTaskManager::instance();
-
-        // Pair each URI with its future for proper result tracking
-        struct GeminiTask {
+    if (!service_url.empty() && !service_batch.empty()) {
+        const int service_timeout = std::max(5, std::min(20, timeout_s_));
+        const size_t chunk_size = (size_t)std::max(1, std::min(SERVICE_CHECK_BATCH, max_concurrent_));
+        auto& service_manager = HunterTaskManager::instance();
+        struct ServiceTask {
             std::string uri;
             std::future<int> future;
         };
-        std::vector<GeminiTask> gemini_tasks;
 
-        for (size_t off = 0; off < gemini_batch.size(); off += gchunk) {
-            size_t chunk_end = std::min(off + gchunk, gemini_batch.size());
-            for (size_t i = off; i < chunk_end; i++) {
-                std::string uri = gemini_batch[i].uri;
-                int gtimeout = gemini_timeout;
-                GeminiTask task;
-                task.uri = uri;
-                task.future = gmgr.submitIO([uri, gtimeout]() -> int {
-                    ProxyTester gemini_tester;
-                    return gemini_tester.checkGeminiAccess(uri, gtimeout);
-                });
-                gemini_tasks.push_back(std::move(task));
+        for (size_t off = 0; off < service_batch.size(); off += chunk_size) {
+            const size_t chunk_end = std::min(off + chunk_size, service_batch.size());
+            std::vector<ServiceTask> tasks;
+            tasks.reserve(chunk_end - off);
+            for (size_t i = off; i < chunk_end; ++i) {
+                const std::string uri = service_batch[i].uri;
+                tasks.push_back({uri, service_manager.submitIO([uri, service_url, service_timeout]() {
+                    return ProxyTester().checkServiceAccess(uri, service_url, service_timeout);
+                })});
             }
-            // Wait for this chunk to complete before starting the next
-            auto gemini_deadline = std::chrono::steady_clock::now() +
-                                   std::chrono::seconds(gemini_timeout + kChunkSlackSeconds);
-            for (size_t i = off; i < chunk_end && i < gemini_tasks.size(); i++) {
+
+            const auto deadline = std::chrono::steady_clock::now() +
+                                  std::chrono::seconds(service_timeout + kChunkSlackSeconds);
+            for (auto& task : tasks) {
+                int status = -1;
                 try {
-                    auto status = getBefore(gemini_tasks[i].future, gemini_deadline);
-                    if (!status) continue;  // straggler: drop it rather than hang
-                    gemini_checked++;
-                    if (*status == 1) gemini_accessible++;
-                    db_.updateGeminiStatus(gemini_tasks[i].uri, *status);
-                } catch (...) {
-                    db_.updateGeminiStatus(gemini_tasks[i].uri, -1);
-                }
+                    auto result = getBefore(task.future, deadline);
+                    if (result) status = *result;
+                } catch (...) {}
+                db_.updateServiceStatus(task.uri, service_name, status);
+                ++service_checked;
+                if (status == 1) ++service_accessible;
+                if (status == 2) ++service_location_forbidden;
             }
         }
-        if (gemini_checked > 0) {
+        if (service_checked > 0) {
             std::ostringstream ss;
-            ss << "[Validator] Gemini check: " << gemini_accessible << "/" << gemini_checked
-               << " configs can reach Gemini API";
+            ss << "[Validator] " << service_name << " check: " << service_accessible << "/"
+               << service_checked << " accessible, " << service_location_forbidden
+               << " location-forbidden";
             utils::LogRingBuffer::instance().push(ss.str());
         }
     }

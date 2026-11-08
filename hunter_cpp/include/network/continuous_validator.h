@@ -140,6 +140,11 @@ public:
     std::vector<ConfigHealthRecord> getAliveForGeminiCheck(int gemini_interval_s = 3600,
                                                              int max_count = 20);
 
+    /// Get alive configs that need a check for the named service capability.
+    std::vector<ConfigHealthRecord> getAliveForServiceCheck(const std::string& service,
+                                                             int interval_s = 3600,
+                                                             int max_count = 20);
+
     /**
      * @brief Get a batch of untested or stale configs
      */
@@ -364,6 +369,7 @@ private:
     int max_concurrent_;
     std::atomic<int> total_tested_{0};
     std::atomic<int> total_passed_{0};
+    std::atomic<unsigned int> next_service_check_{0};
 };
 
 } // namespace network

@@ -5,16 +5,6 @@
 #include <sstream>
 #include <algorithm>
 
-ServiceAccessibilityChecker::ServiceAccessibilityChecker() {
-    // Initialize service test URLs
-    // These are lightweight endpoints that test accessibility quickly
-    service_urls_[Service::GEMINI] = "https://generativelanguage.googleapis.com/v1beta/models";
-    service_urls_[Service::CLAUDE] = "https://claude.ai/api/auth/session";
-    service_urls_[Service::DEVIN] = "https://devin.ai";
-    service_urls_[Service::GOOGLE_DEVELOPER] = "https://console.cloud.google.com";
-    service_urls_[Service::AWS_CONSOLE] = "https://console.aws.amazon.com/console/home";
-}
-
 ServiceAccessibilityChecker::ServiceTestResult ServiceAccessibilityChecker::testService(
     const std::string& proxy_uri,
     Service service,
@@ -73,8 +63,11 @@ ServiceAccessibilityChecker::Service ServiceAccessibilityChecker::getServiceFrom
     if (lower_name == "gemini") return Service::GEMINI;
     if (lower_name == "claude") return Service::CLAUDE;
     if (lower_name == "devin") return Service::DEVIN;
-    if (lower_name == "google_developer" || lower_name == "google") return Service::GOOGLE_DEVELOPER;
-    if (lower_name == "aws_console" || lower_name == "aws") return Service::AWS_CONSOLE;
+    if (lower_name == "google_developer" || lower_name == "google developer" ||
+        lower_name == "google_development" || lower_name == "google development" ||
+        lower_name == "google_dev" || lower_name == "google") return Service::GOOGLE_DEVELOPER;
+    if (lower_name == "aws_console" || lower_name == "aws console" || lower_name == "aws" ||
+        lower_name == "amazon_web_services" || lower_name == "amazon web services") return Service::AWS_CONSOLE;
     
     throw std::invalid_argument("Unknown service: " + name);
 }
@@ -103,12 +96,16 @@ ServiceAccessibilityChecker::AccessibilityStatus ServiceAccessibilityChecker::st
     return AccessibilityStatus::UNKNOWN;
 }
 
-std::string ServiceAccessibilityChecker::getServiceTestUrl(Service service) const {
-    auto it = service_urls_.find(service);
-    if (it != service_urls_.end()) {
-        return it->second;
-    }
-    return "";
+std::string ServiceAccessibilityChecker::getServiceTestUrl(Service service) {
+    static const std::map<Service, std::string> urls = {
+        {Service::GEMINI, "https://generativelanguage.googleapis.com/v1beta/models"},
+        {Service::CLAUDE, "https://claude.ai/api/auth/session"},
+        {Service::DEVIN, "https://devin.ai/"},
+        {Service::GOOGLE_DEVELOPER, "https://console.cloud.google.com"},
+        {Service::AWS_CONSOLE, "https://console.aws.amazon.com/console/home"},
+    };
+    const auto it = urls.find(service);
+    return it == urls.end() ? std::string{} : it->second;
 }
 
 ServiceAccessibilityChecker::ServiceTestResult ServiceAccessibilityChecker::testHttpAccess(
@@ -138,61 +135,6 @@ ServiceAccessibilityChecker::ServiceTestResult ServiceAccessibilityChecker::test
     }
 
     return result;
-}
-
-ServiceAccessibilityChecker::AccessibilityStatus ServiceAccessibilityChecker::parseHttpStatus(
-    int http_status) const {
-    
-    if (http_status >= 200 && http_status < 300) {
-        return AccessibilityStatus::ACCESSIBLE;
-    } else if (http_status == 451) {
-        // HTTP 451: Unavailable For Legal Reasons (geographic restriction)
-        return AccessibilityStatus::LOCATION_FORBIDDEN;
-    } else if (http_status == 403 || http_status == 403) {
-        // HTTP 403: Forbidden (might be geographic)
-        return AccessibilityStatus::LOCATION_FORBIDDEN;
-    } else if (http_status >= 400 && http_status < 500) {
-        return AccessibilityStatus::BLOCKED;
-    } else if (http_status >= 500) {
-        return AccessibilityStatus::BLOCKED;
-    }
-    
-    return AccessibilityStatus::UNKNOWN;
-}
-
-bool ServiceAccessibilityChecker::isLocationForbidden(
-    int http_status,
-    const std::string& response_headers,
-    const std::string& response_body) const {
-    
-    // HTTP 451: Unavailable For Legal Reasons (standard geo-block)
-    if (http_status == 451) {
-        return true;
-    }
-    
-    // Check for geo-blocking headers
-    std::string headers_lower = response_headers;
-    std::transform(headers_lower.begin(), headers_lower.end(), headers_lower.begin(), ::tolower);
-    
-    if (headers_lower.find("x-geo-block") != std::string::npos ||
-        headers_lower.find("x-restricted-location") != std::string::npos ||
-        headers_lower.find("x-blocked-region") != std::string::npos) {
-        return true;
-    }
-    
-    // Check response body for common geo-block messages
-    std::string body_lower = response_body;
-    std::transform(body_lower.begin(), body_lower.end(), body_lower.begin(), ::tolower);
-    
-    if (body_lower.find("not available in your country") != std::string::npos ||
-        body_lower.find("not available in your region") != std::string::npos ||
-        body_lower.find("geographic restriction") != std::string::npos ||
-        body_lower.find("location not allowed") != std::string::npos ||
-        body_lower.find("access denied from your country") != std::string::npos) {
-        return true;
-    }
-    
-    return false;
 }
 
 // ─────────────────────────────────────────────────────────────────────

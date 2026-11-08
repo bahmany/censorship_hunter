@@ -101,6 +101,30 @@ int main(int argc, char** argv) {
     }
     T_END();
 
+    T_CASE("service checks schedule each platform independently and become due again after interval");
+    {
+        ConfigDatabase db;
+        setup(db);
+        const std::string uri = vless(20);
+        db.addConfigs({uri});
+        db.updateHealth(uri, true, 100.0f, "xray");
+        const std::vector<std::string> services = {
+            "gemini", "claude", "devin", "google_developer", "aws_console"};
+        for (const auto& service : services) {
+            auto due = db.getAliveForServiceCheck(service, 3600, 5);
+            CHECK(due.size() == 1 && due.front().uri == uri, service + " initially due");
+            db.updateServiceStatus(uri, service, 1);
+            CHECK(db.getAliveForServiceCheck(service, 3600, 5).empty(), service + " checked once");
+        }
+        CHECK(db.getAliveForServiceCheck("unsupported", 3600, 5).empty(), "unknown service is ignored");
+        NOW += 3601.0;
+        for (const auto& service : services) {
+            CHECK(db.getAliveForServiceCheck(service, 3600, 5).size() == 1,
+                  service + " due again after interval");
+        }
+    }
+    T_END();
+
     T_CASE("applyProbeResult: typed evidence, legacy fields derived");
     {
         ConfigDatabase db;

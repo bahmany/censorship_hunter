@@ -39,13 +39,11 @@ def zstd_compress(path: Path, zstd_bin: str, out_path: Path) -> bytes:
     return out_path.read_bytes()
 
 
-def count_lines(path: Path) -> int:
-    n = 0
-    with open(path, "r", errors="replace") as f:
-        for line in f:
-            if line.strip():
-                n += 1
-    return n
+VALID_SCHEMES = (
+    "vless://", "vmess://", "trojan://", "ss://", "ssr://",
+    "hysteria2://", "hy2://", "hysteria://", "tuic://", "snell://",
+    "wireguard://", "wg://", "socks://", "socks5://",
+)
 
 
 def main():
@@ -54,6 +52,8 @@ def main():
     ap.add_argument("--outdir", required=True, help="Output directory for generated files.")
     ap.add_argument("--zstd", default=shutil.which("zstd") or "zstd", help="zstd CLI path.")
     ap.add_argument("--no-zstd", action="store_true", help="Embed raw bytes (no compression).")
+    ap.add_argument("--min-configs", type=int, default=100,
+                    help="Fail if the bundle has fewer non-empty entries than this value.")
     ap.add_argument("--platform", default=None,
                     help="Target platform: 'windows' or 'linux'/'android'. "
                          "Defaults to host OS. Controls .rdata vs .rodata section.")
@@ -71,7 +71,21 @@ def main():
 
     have_bundle = bundle.exists() and bundle.stat().st_size > 0
     if not have_bundle:
-        print(f"[cfg-embed] bundle not found at {bundle} — emitting empty payload.", file=sys.stderr)
+        print(f"[cfg-embed] ERROR: bundle not found or empty at {bundle}.", file=sys.stderr)
+        return 2
+
+    lines = bundle.read_text(encoding="utf-8", errors="replace").splitlines()
+    configs = sorted({line.strip() for line in lines
+                      if line.strip().lower().startswith(VALID_SCHEMES)})
+    config_count = len(configs)
+    if config_count < args.min_configs:
+        print(f"[cfg-embed] ERROR: only {config_count} configs; minimum is {args.min_configs}.",
+              file=sys.stderr)
+        return 2
+    normalized_bundle = out_dir / "configs.normalized.txt"
+    normalized_bundle.write_text("\n".join(configs) + "\n", encoding="utf-8")
+    raw = normalized_bundle.read_bytes()
+    sha256 = hashlib.sha256(raw).hexdigest()
 
     # ─── Generate config_embedded.h ───
     header_lines = [
@@ -91,8 +105,8 @@ def main():
         "",
         "extern const unsigned char kConfigsZst[];",
         "extern const unsigned long  kConfigsZstLen;",
-        f"static const unsigned long  kConfigsOrigLen = {bundle.stat().st_size if have_bundle else 0};",
-        f"static const char           kConfigsSha256[] = \"\";",
+        f"static const unsigned long  kConfigsOrigLen = {len(raw)};",
+        f"static const char           kConfigsSha256[] = \"{sha256}\";",
         "",
         "#ifdef __cplusplus",
         "}",
@@ -104,21 +118,17 @@ def main():
     # Compute metadata + compress.
     orig_size = 0
     embed_size = 0
-    sha256 = ""
-    config_count = 0
+    sha256 = hashlib.sha256(raw).hexdigest()
     zst_filename = ""
 
     if have_bundle:
-        raw = bundle.read_bytes()
         orig_size = len(raw)
-        sha256 = hashlib.sha256(raw).hexdigest()
-        config_count = count_lines(bundle)
         ext = ".zst" if use_zstd else ".bin"
         blob_path = out_dir / f"configs{ext}"
         if use_zstd:
-            comp = zstd_compress(bundle, args.zstd, blob_path)
+            comp = zstd_compress(normalized_bundle, args.zstd, blob_path)
         else:
-            shutil.copy2(bundle, blob_path)
+            shutil.copy2(normalized_bundle, blob_path)
             comp = blob_path.read_bytes()
         embed_size = len(comp)
         zst_filename = blob_path.name
@@ -138,12 +148,10 @@ def main():
         "// Self-contained — no #include.",
         "",
     ]
-    # Custom section on Windows rather than .rdata — see embed_engines.py for
-    # why: a multi-MB maximum-entropy blob inside .rdata is a static "looks
-    # packed" trigger for AV/EDR heuristics; a distinctly-named section avoids
-    # that specific signal without changing anything at runtime.
+    # Use the conventional read-only data section so inspection tools and
+    # endpoint security can identify embedded data without a custom section.
     if target_win:
-        asm_lines.append('    .section .hunterdat,"dr"')
+        asm_lines.append('    .section .rdata,"dr"')
     else:
         asm_lines.append('    .section .rodata')
     asm_lines.append("")

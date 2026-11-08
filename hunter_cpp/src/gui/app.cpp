@@ -45,6 +45,7 @@
 #include "network/country_provider.h"
 #include "network/traffic_probe.h"
 #include "network/uri_parser.h"
+#include "network/service_accessibility.h"
 #include "orchestrator/orchestrator.h"
 #include "network/proxy_tester.h"
 #include "network/sys_proxy.h"
@@ -1603,20 +1604,14 @@ void HunterGuiApp::renderConfigTable() {
     if (ImGui::Button("Test selected services")) {
         const std::vector<std::string> uris(selected_uris_.begin(), selected_uris_.end());
         runBackground([this, uris]() {
-            static const std::pair<const char*, const char*> services[] = {
-                {"gemini", "https://generativelanguage.googleapis.com/v1beta/models"},
-                {"claude", "https://claude.ai/api/auth/session"},
-                {"devin", "https://devin.ai/api/health"},
-                {"google_developer", "https://console.cloud.google.com"},
-                {"aws_console", "https://console.aws.amazon.com/console/home"}};
-            network::ProxyTester tester;
+            ServiceAccessibilityChecker checker;
             auto* db = orch_.configDb();
             if (!db) { showToast("Configuration database is unavailable"); return; }
             int completed = 0;
             for (const auto& uri : uris) {
-                for (const auto& service : services) {
-                    const int status = tester.checkServiceAccess(uri, service.second, 8);
-                    db->updateServiceStatus(uri, service.first, status);
+                for (const auto& result : checker.testAllServices(uri, 8)) {
+                    const int status = static_cast<int>(result.status);
+                    db->updateServiceStatus(uri, result.service_name, status);
                     if (status >= 0) ++completed;
                 }
             }
@@ -1640,7 +1635,7 @@ void HunterGuiApp::renderConfigTable() {
     const float table_height = ImGui::GetContentRegionAvail().y;
 
     const bool narrow = viewport_width_ < kNarrowThreshold;
-    const int num_columns = narrow ? 8 : 12;
+    const int num_columns = narrow ? 8 : 11;
     if (!ImGui::BeginTable("main_profiles", num_columns, flags, ImVec2(0, table_height))) {
         return;  // table clipped this frame; EndTable must not be called
 
@@ -1658,7 +1653,6 @@ void HunterGuiApp::renderConfigTable() {
     ImGui::TableSetupColumn("Google Dev", ImGuiTableColumnFlags_WidthFixed, 110 * ui_scale_);
     ImGui::TableSetupColumn("AWS", ImGuiTableColumnFlags_WidthFixed, 105 * ui_scale_);
     if (viewport_width_ >= kNarrowThreshold) {
-        ImGui::TableSetupColumn("Server", ImGuiTableColumnFlags_WidthFixed, 80 * ui_scale_);
         ImGui::TableSetupColumn("Proto", ImGuiTableColumnFlags_WidthFixed, 70 * ui_scale_);
         ImGui::TableSetupColumn("Address", ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableSetupColumn("URI", ImGuiTableColumnFlags_WidthStretch);
@@ -1695,20 +1689,15 @@ void HunterGuiApp::renderConfigTable() {
                 case 7: c = a->rec.aws_console_status - b->rec.aws_console_status; break;
                 case 8:
                     if (!narrow) {
-                        c = countryCell(a->rec.server_country).compare(countryCell(b->rec.server_country));
+                        c = a->protocol.compare(b->protocol);
                     }
                     break;
                 case 9:
                     if (!narrow) {
-                        c = a->protocol.compare(b->protocol);
-                    }
-                    break;
-                case 10:
-                    if (!narrow) {
                         c = a->address.compare(b->address);
                     }
                     break;
-                case 11:
+                case 10:
                     if (!narrow) {
                         c = a->rec.uri.compare(b->rec.uri);
                     }
@@ -1794,9 +1783,6 @@ void HunterGuiApp::renderConfigTable() {
             ImGui::TableNextColumn(); draw_service_status(r.aws_console_status);
 
             if (!narrow) {
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(countryCell(r.server_country).c_str());
-
                 ImGui::TableNextColumn();
                 ImGui::TextUnformatted(row.protocol.c_str());
 

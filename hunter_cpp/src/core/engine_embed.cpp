@@ -238,7 +238,7 @@ struct EngineRecord {
     ss << "\n";
     ss << "This directory contains proxy engine binaries that were embedded\n";
     ss << "inside the Hunter executable (single-file distribution mode) and\n";
-    ss << "extracted here on first run. They are NOT malware.\n";
+    ss << "extracted here on first run so the proxy engines can be launched.\n";
     ss << "\n";
     ss << "Hunter is an open-source anti-censorship proxy tool (MIT licensed):\n";
     ss << "  https://github.com/bahmany/censorship_hunter\n";
@@ -291,19 +291,30 @@ struct EngineRecord {
 [[maybe_unused]] bool extractEngine(const char* engine,
                    const unsigned char* zst_data, unsigned long zst_len,
                    unsigned long orig_len, const char* sha_expected) {
+    if (!sha_expected || !sha_expected[0]) {
+        utils::LogRingBuffer::instance().push(
+            std::string("[EngineEmbed] SECURITY ERROR: no embedded SHA-256 for ") + engine +
+            "; refusing to extract or execute this engine");
+        return false;
+    }
     const std::string dir = resolveCacheBase() + "/engines";
     try { fs::create_directories(dir); } catch (...) {}
 
     const std::string path = dir + "/" + engineExeName(engine);
     const std::string stamp = dir + "/" + std::string(engine) + ".sha256";
 
-    // Fast path: cached file exists and stored digest matches expected.
+    // Fast path: verify both the stamp and the actual cached executable bytes.
+    // The adjacent stamp is only a cache hint and is never trusted as integrity proof.
     std::string cached_digest;
     if (utils::fileExists(path) && readAllBytes(stamp, cached_digest)) {
         while (!cached_digest.empty() && (cached_digest.back() == '\n' || cached_digest.back() == '\r' ||
                cached_digest.back() == ' ' || cached_digest.back() == '\t'))
             cached_digest.pop_back();
-        if (cached_digest == sha_expected) {
+        std::string cached_bytes;
+        const bool content_verified = cached_digest == sha_expected &&
+            readAllBytes(path, cached_bytes) &&
+            sha256_hex(reinterpret_cast<const uint8_t*>(cached_bytes.data()), cached_bytes.size()) == sha_expected;
+        if (content_verified) {
             utils::LogRingBuffer::instance().push(
                 std::string("[EngineEmbed] ") + engine + " already extracted and verified (cached)");
             makeExecutable(path);
@@ -324,6 +335,7 @@ struct EngineRecord {
 
     // Decompress.
     std::vector<uint8_t> buf(orig_len);
+#if defined(HUNTER_EMBED_USE_ZSTD) && HUNTER_EMBED_USE_ZSTD
     size_t r = ZSTD_decompress(buf.data(), orig_len, zst_data, (size_t)zst_len);
     if (ZSTD_isError(r)) {
         utils::LogRingBuffer::instance().push(
@@ -331,6 +343,15 @@ struct EngineRecord {
             ZSTD_getErrorName(r));
         return false;
     }
+#else
+    if (zst_len != orig_len) {
+        utils::LogRingBuffer::instance().push(
+            std::string("[EngineEmbed] raw payload size mismatch for ") + engine + "; refusing to extract");
+        return false;
+    }
+    std::memcpy(buf.data(), zst_data, (size_t)orig_len);
+    const size_t r = (size_t)orig_len;
+#endif
     if (r != orig_len) {
         utils::LogRingBuffer::instance().push(
             std::string("[EngineEmbed] size mismatch for ") + engine + ": got " +
@@ -392,6 +413,10 @@ ExtractedState& state() {
 }
 
 } // namespace
+
+std::string sha256Hex(const unsigned char* data, size_t size) {
+    return sha256_hex(data, size);
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Public API

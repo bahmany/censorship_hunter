@@ -716,12 +716,18 @@ int ProxyTester::classifyServiceResponse(int http_status, const std::string& res
     if (http_status <= 0) return -1;
     std::string body = response_body;
     std::transform(body.begin(), body.end(), body.begin(), [](unsigned char c) { return (char)std::tolower(c); });
-    if (http_status == 451 || http_status == 403 ||
+    if (http_status == 451 ||
         body.find("not available in your country") != std::string::npos ||
         body.find("not available in your region") != std::string::npos ||
         body.find("location not allowed") != std::string::npos ||
         body.find("geographic restriction") != std::string::npos ||
-        body.find("access denied from your country") != std::string::npos) return 2;
+        body.find("access denied from your country") != std::string::npos ||
+        body.find("not available in this location") != std::string::npos ||
+        body.find("region is not supported") != std::string::npos) return 2;
+    // The no-key Gemini endpoint is expected to return 401. An auth challenge
+    // confirms the service is reachable; Hunter does not test account access.
+    if (http_status == 401) return 1;
+    if (http_status == 403) return 0;
     return http_status >= 200 && http_status < 400 ? 1 : 0;
 }
 

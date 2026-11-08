@@ -104,6 +104,10 @@ def main():
 
     xray_path = find_engine(bin_dir, xray_names)
     sing_path = find_engine(bin_dir, sing_names)
+    if xray_path is None or sing_path is None:
+        missing = [name for name, path in (("xray", xray_path), ("sing-box", sing_path)) if path is None]
+        print(f"[embed] ERROR: required embedded engine(s) missing: {', '.join(missing)}", file=sys.stderr)
+        return 2
 
     use_zstd = not args.no_zstd
     if use_zstd and not shutil.which(args.zstd):
@@ -215,14 +219,10 @@ def main():
         "",
     ]
 
-    # Section directive: .rodata on ELF. On PE/COFF (MinGW) we use a dedicated
-    # custom section rather than .rdata — dumping ~20MB of maximum-entropy
-    # compressed binary data into .rdata (a section AV/EDR heuristics expect
-    # to hold small string/vtable data) is a well-known static "looks packed"
-    # trigger. A distinctly-named section carries the same data just as
-    # legitimately without that specific red flag.
+    # Store payloads in the conventional read-only data section. This keeps
+    # PE inspection tools and endpoint security behavior straightforward.
     if target_win:
-        asm_lines.append('    .section .hunterdat,"dr"')
+        asm_lines.append('    .section .rdata,"dr"')
     else:
         asm_lines.append('    .section .rodata')
     asm_lines.append("")

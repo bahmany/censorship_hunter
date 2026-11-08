@@ -1,4 +1,5 @@
 #include "core/config_embed.h"
+#include "core/engine_embed.h"
 #include "core/utils.h"
 
 #include <cstdint>
@@ -55,6 +56,7 @@ const std::vector<std::string>& configs() {
             std::to_string(kConfigsOrigLen) + " bytes)");
 
         std::vector<uint8_t> buf(kConfigsOrigLen);
+#if defined(HUNTER_EMBED_CONFIGS_USE_ZSTD) && HUNTER_EMBED_CONFIGS_USE_ZSTD
         size_t r = ZSTD_decompress(buf.data(), kConfigsOrigLen, kConfigsZst, (size_t)kConfigsZstLen);
         if (ZSTD_isError(r)) {
             utils::LogRingBuffer::instance().push(
@@ -63,10 +65,27 @@ const std::vector<std::string>& configs() {
             cfgState().decompressed = true;
             return;
         }
+#else
+        if (kConfigsZstLen != kConfigsOrigLen) {
+            utils::LogRingBuffer::instance().push(
+                "[ConfigEmbed] raw payload size mismatch; refusing to load configs");
+            cfgState().decompressed = true;
+            return;
+        }
+        std::memcpy(buf.data(), kConfigsZst, (size_t)kConfigsOrigLen);
+        const size_t r = (size_t)kConfigsOrigLen;
+#endif
         if (r != kConfigsOrigLen) {
             utils::LogRingBuffer::instance().push(
                 "[ConfigEmbed] size mismatch: got " + std::to_string(r) +
                 " expected " + std::to_string(kConfigsOrigLen));
+            cfgState().decompressed = true;
+            return;
+        }
+        const std::string actual_sha256 = sha256Hex(buf.data(), r);
+        if (kConfigsSha256[0] && actual_sha256 != kConfigsSha256) {
+            utils::LogRingBuffer::instance().push(
+                "[ConfigEmbed] SECURITY ERROR: embedded config bundle SHA-256 mismatch; refusing to load configs");
             cfgState().decompressed = true;
             return;
         }

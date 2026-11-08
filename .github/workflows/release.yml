@@ -146,9 +146,8 @@ jobs:
           if [ -n "$APK" ]; then
             cp "$APK" release-assets/hunter-android-arm64.apk
           else
-            echo "WARNING: No APK found"
-            # Create a placeholder so the release doesn't fail
-            echo "APK build not available" > release-assets/hunter-android-arm64.apk
+            echo "ERROR: Android release build produced no APK" >&2
+            exit 1
           fi
 
       - name: Upload artifact
@@ -176,6 +175,7 @@ jobs:
           mkdir -p release-assets
           # Flatten all artifacts into one directory
           find all-assets -type f -exec cp {} release-assets/ \;
+          (cd release-assets && sha256sum hunter-* > SHA256SUMS)
           ls -la release-assets/
 
       - name: Generate release notes

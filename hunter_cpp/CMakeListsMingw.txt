@@ -37,7 +37,11 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 include_directories(${CMAKE_SOURCE_DIR})
 
 # ─── Embedded Engine Support (xray + sing-box) ───
-option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" OFF)
+set(_hunter_embed_engines_default OFF)
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+    set(_hunter_embed_engines_default ON)
+endif()
+option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" ${_hunter_embed_engines_default})
 set(HUNTER_EMBED_BIN_DIR "${CMAKE_BINARY_DIR}/engines" CACHE PATH "Directory containing Windows engine binaries to embed")
 option(HUNTER_FETCH_ENGINES "Download pinned+SHA256-verified xray/sing-box when HUNTER_EMBED_ENGINES=ON" ON)
 set(HUNTER_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded" CACHE PATH "Output dir for generated engine embed files")
@@ -113,6 +117,7 @@ if(HUNTER_EMBED_CONFIGS)
         COMMAND ${HUNTER_PYTHON} -X utf8 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
                 --bundle ${HUNTER_CONFIG_BUNDLE}
                 --outdir ${HUNTER_CONFIG_EMBED_OUT_DIR}
+                --min-configs ${HUNTER_CONFIG_MIN_CONFIGS}
                 --platform windows
         DEPENDS ${HUNTER_CONFIG_BUNDLE}
                 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
@@ -208,6 +213,7 @@ set(NETWORK_SOURCES
     src/network/continuous_validator.cpp
     src/network/config_db_store.cpp
     src/network/proxy_tester.cpp
+    src/network/service_accessibility.cpp
     src/network/traffic_probe.cpp
     src/network/connectivity_baseline.cpp
     src/network/port_lease.cpp

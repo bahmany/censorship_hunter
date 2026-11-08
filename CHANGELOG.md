@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.5] - 2026-11-08
+
+### Added
+- Schedule recurring reachability checks across Gemini, Claude, Devin, Google Cloud, and AWS, with independent per-service check timestamps.
+- Embed a validated, deduplicated configuration snapshot and pinned XRay and sing-box engines in Windows Release builds; verify engine hashes before reuse and publish SHA-256 checksums for release assets.
+
+### Changed
+- Removed the always-unknown Server column from the configurations table.
+- Store embedded engine payloads in the conventional PE `.rdata` section and document the unsigned release and integrity-verification behavior.
+
+### Fixed
+- Classify authentication challenges as reachable, distinguish explicit geographic restrictions from generic access denial, and use the same endpoint registry for manual and scheduled checks.
+- Require both verified engine binaries before embedding them and rebuild unverifiable engine cache entries from pinned, checksum-validated sources.
+
 ## [1.13.4] - 2026-11-06
 
 Android companion version: 2.6.1 (versionCode 9).

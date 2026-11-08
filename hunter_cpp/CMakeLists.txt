@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.16)
 project(hunter_cpp VERSION 2.0.0 LANGUAGES C CXX)
 
 # Define version string
-set(HUNTER_VERSION_STRING "1.13.4")
+set(HUNTER_VERSION_STRING "1.13.5")
 add_definitions(-DHUNTER_VERSION_STRING="${HUNTER_VERSION_STRING}")
 
 # Windows targets (MinGW cross or MSYS2) use the dedicated file.
@@ -40,7 +40,11 @@ include_directories(${CMAKE_SOURCE_DIR})
 #   ${CMAKE_BINARY_DIR}/embedded/*.zst              (compressed payloads)
 # When OFF or bin/ has no engines, a stub header is generated and the binary
 # falls back to classic bin/xray, bin/sing-box lookup at runtime.
-option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" OFF)
+set(_hunter_embed_engines_default OFF)
+if(CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+    set(_hunter_embed_engines_default ON)
+endif()
+option(HUNTER_EMBED_ENGINES "Embed xray/sing-box into the binary (single-file mode)" ${_hunter_embed_engines_default})
 set(HUNTER_EMBED_BIN_DIR "${CMAKE_SOURCE_DIR}/../bin" CACHE PATH "Directory containing engine binaries to embed")
 set(HUNTER_EMBED_OUT_DIR "${CMAKE_BINARY_DIR}/embedded" CACHE PATH "Output dir for generated embed files")
 
@@ -149,6 +153,7 @@ if(HUNTER_EMBED_CONFIGS)
         COMMAND python3 -X utf8 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py
                 --bundle ${HUNTER_CONFIG_BUNDLE}
                 --outdir ${HUNTER_CONFIG_EMBED_OUT_DIR}
+                --min-configs ${HUNTER_CONFIG_MIN_CONFIGS}
                 --platform ${_cfg_embed_platform}
         DEPENDS ${HUNTER_CONFIG_BUNDLE}
                 ${CMAKE_SOURCE_DIR}/tools/embed_configs.py

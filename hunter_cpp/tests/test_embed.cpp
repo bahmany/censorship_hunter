@@ -1,11 +1,29 @@
 // test_embed.cpp — Verify embedded engine extraction works correctly.
 #include "core/engine_embed.h"
+#include "core/config_embed.h"
 #include "core/utils.h"
 #include <iostream>
 #include <fstream>
 
 int main() {
-    std::cout << "=== Engine Embed Test ===" << std::endl;
+    std::cout << "=== Single-file Embed Test ===" << std::endl;
+
+    if (hunter::embed::hasEmbeddedConfigs()) {
+        const auto& configs = hunter::embed::configs();
+        std::cout << "Embedded configs: " << configs.size() << std::endl;
+        if (configs.size() < 100) {
+            std::cerr << "Embedded config payload failed integrity validation or is under-populated" << std::endl;
+            return 1;
+        }
+        for (const auto& uri : configs) {
+            if (uri.find("://") == std::string::npos) {
+                std::cerr << "Embedded config entry is not a URI" << std::endl;
+                return 1;
+            }
+        }
+    } else {
+        std::cout << "Embedded configs: disabled in this build" << std::endl;
+    }
 
     if (!hunter::embed::hasEmbeddedEngines()) {
         std::cout << "No embedded engines in this build (expected for non-embedded builds)." << std::endl;

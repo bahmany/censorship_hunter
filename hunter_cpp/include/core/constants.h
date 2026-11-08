@@ -8,7 +8,7 @@ namespace hunter {
 namespace constants {
 
 // ─── Version ───
-constexpr const char* HUNTER_VERSION = "1.13.4";
+constexpr const char* HUNTER_VERSION = "1.13.5";
 constexpr const char* HUNTER_NAME = "Hunter C++";
 
 // ─── Network Defaults ───
@@ -157,9 +157,7 @@ inline const std::vector<std::string>& defaultSubscriptionUrls() {
         "https://raw.githubusercontent.com/ZendanTeam/SS44-sub/main/SS44-gold.txt",
         "https://raw.githubusercontent.com/miladtahanian/Config-Collector/main/mixed_iran.txt",
         "https://raw.githubusercontent.com/mehrtat/vless-collector/main/sub.txt",
-        "https://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/reality.txt",
         "https://raw.githubusercontent.com/mahdibland/SSAggregator/master/sub/sub_merge.txt",
-        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/vless",
     };
     return urls;
 }
@@ -176,8 +174,6 @@ inline const std::vector<std::string>& antiCensorshipSources() {
 // ─── Iran Priority Sources ───
 inline const std::vector<std::string>& iranPrioritySources() {
     static const std::vector<std::string> sources = {
-        "https://raw.githubusercontent.com/MrMohebi/xray-proxy-grabber-telegram/master/collected-proxies/row-url/reality.txt",
-        "https://raw.githubusercontent.com/yebekhe/TelegramV2rayCollector/main/sub/normal/vless",
         "https://raw.githubusercontent.com/mahdibland/SSAggregator/master/sub/sub_merge.txt",
         "https://raw.githubusercontent.com/peasoft/NoMoreWalls/master/list_raw.txt",
         "https://raw.githubusercontent.com/Pawdroid/Free-servers/main/sub",

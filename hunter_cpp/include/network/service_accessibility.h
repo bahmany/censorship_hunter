@@ -37,7 +37,6 @@ public:
         AWS_CONSOLE
     };
 
-    ServiceAccessibilityChecker();
     ~ServiceAccessibilityChecker() = default;
 
     /**
@@ -67,6 +66,9 @@ public:
      */
     static std::string getServiceName(Service service);
 
+    /// Canonical lightweight HTTP endpoint used by both manual and scheduled tests.
+    static std::string getServiceTestUrl(Service service);
+
     /**
      * @brief Get service enum from name
      */
@@ -87,8 +89,6 @@ private:
      * @brief Get the test URL for a service
      * Each service has a lightweight endpoint that can be tested for accessibility
      */
-    std::string getServiceTestUrl(Service service) const;
-
     /**
      * @brief Test HTTP(S) access through SOCKS proxy
      * @param socks_proxy SOCKS proxy address
@@ -101,27 +101,6 @@ private:
         const std::string& test_url,
         int timeout_seconds);
 
-    /**
-     * @brief Parse HTTP status code to determine accessibility
-     * @param http_status HTTP status code (e.g., 200, 403, 451)
-     * @return AccessibilityStatus based on HTTP code
-     */
-    AccessibilityStatus parseHttpStatus(int http_status) const;
-
-    /**
-     * @brief Check if error is due to geographic restriction
-     * Common error patterns:
-     * - HTTP 451 (Unavailable For Legal Reasons)
-     * - HTTP 403 (Forbidden) with geo-block headers
-     * - Specific error messages from services
-     */
-    bool isLocationForbidden(
-        int http_status,
-        const std::string& response_headers,
-        const std::string& response_body) const;
-
-    // Service test endpoint URLs (lightweight, quick to test)
-    std::map<Service, std::string> service_urls_;
 };
 
 /**

@@ -49,6 +49,12 @@ The project consists of two main components:
 
 The native UI talks directly to the orchestrator and also exposes websocket-based realtime control and monitoring channels.
 
+### Self-contained Windows release
+
+The Windows release EXE embeds a build-time snapshot of proxy configurations and the pinned XRay and sing-box engines. On first use, Hunter verifies each engine against the SHA-256 digest embedded in the EXE and extracts it under the current user's `%LOCALAPPDATA%\Hunter\engines`; it does not need administrator access or a download to load the bundled data. `MANIFEST.txt` records engine versions, sources, and hashes. Release builds from this revision also attach a `SHA256SUMS` file for the published assets.
+
+The embedded configurations are a snapshot: public proxy endpoints can expire or stop working, and testing them against online platforms requires network access. An unsigned release is not Authenticode-signed; users should verify `SHA256SUMS` and report suspected false positives to the project rather than disabling endpoint protection.
+
 ## Architecture
 
 ```
@@ -325,7 +331,7 @@ Configs are scored by anti-censorship features:
 | Symptom | Cause | Solution |
 |---------|-------|----------|
 | `hountersansor_cli.exe` not found | Backend binary missing from `bin/` | Re-extract from release ZIP or build from source |
-| DLL errors on launch | Antivirus quarantined files | Add extraction folder to antivirus exclusions |
+| DLL errors on launch | An engine file may have been removed or blocked by endpoint security | Verify the release checksum and extracted engine SHA-256 in `MANIFEST.txt`; do not disable endpoint protection. Report a suspected false positive with the release link and manifest. |
 | Port 10808 already in use | Another proxy or previous instance | Kill the process using the port, or change port in `runtime/hunter_config.json` |
 | No configs appearing | No internet, or all sources blocked | Check connectivity; try adding manual configs via Advanced tab |
 | UI won't start | Native app files missing or blocked | Ensure `hountersansor.exe` exists alongside the bundled engines and runtime files |

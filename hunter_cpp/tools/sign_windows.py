@@ -149,13 +149,13 @@ def main():
     # Verify.
     if args.verify and all_ok:
         print("\n[sign] Verifying signatures...")
-        verify_signature(signtool, str(exe_path))
+        all_ok = verify_signature(signtool, str(exe_path))
         if args.sign_engines:
             bin_dir = Path(args.bin_dir) if args.bin_dir else exe_path.parent
             for engine in ["xray.exe", "sing-box.exe"]:
                 ep = bin_dir / engine
                 if ep.exists():
-                    verify_signature(signtool, str(ep))
+                    all_ok = verify_signature(signtool, str(ep)) and all_ok
 
     return 0 if all_ok else 1
 

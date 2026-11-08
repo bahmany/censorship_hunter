@@ -17,9 +17,13 @@
 //
 
 #include <string>
+#include <cstddef>
 
 namespace hunter {
 namespace embed {
+
+/// SHA-256 helper shared by embedded payload validators.
+std::string sha256Hex(const unsigned char* data, size_t size);
 
 /// True if this binary carries embedded engine payloads.
 bool hasEmbeddedEngines();
