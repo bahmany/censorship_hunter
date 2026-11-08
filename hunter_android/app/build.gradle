@@ -8,8 +8,8 @@ android {
         applicationId "com.hunter.app"
         minSdk 24
         targetSdk 34
-        versionCode 9
-        versionName "2.6.1"
+        versionCode 10
+        versionName "2.6.2"
 
         // ARM64 only — real Android phones. x86_64 is emulators-only.
         ndk {

@@ -81,6 +81,7 @@ set(NETWORK_SOURCES
     ${HUNTER_SRC_DIR}/src/network/uri_parser.cpp
     ${HUNTER_SRC_DIR}/src/network/config_fetcher.cpp
     ${HUNTER_SRC_DIR}/src/network/continuous_validator.cpp
+    ${HUNTER_SRC_DIR}/src/network/service_accessibility.cpp
     ${HUNTER_SRC_DIR}/src/network/proxy_tester.cpp
     ${HUNTER_SRC_DIR}/src/network/aggressive_harvester.cpp
     ${HUNTER_SRC_DIR}/src/network/flexible_fetcher.cpp
