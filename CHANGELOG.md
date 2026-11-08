@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.13.6] - 2026-11-08
+
+Android companion version: 2.6.2 (versionCode 10).
+
+### Fixed
+- Windows GUI freezing / "Not Responding": the render loop now enforces a hard 60 FPS cap, so on systems where the driver does not honor `glfwSwapInterval(1)` (software GL, RDP, basic display adapters) the loop can no longer spin at unlimited FPS, saturate the CPU and starve the window message pump.
+- The snapshot read on the render thread now uses a non-blocking try-lock, so a contended scan can never stall a frame.
+- `SysProxy` status is cached for 1.5 s instead of running registry reads several times per rendered frame.
+
 ## [1.13.5] - 2026-11-08
 
 Android companion version: 2.6.2 (versionCode 10).

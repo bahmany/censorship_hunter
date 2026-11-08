@@ -105,3 +105,4 @@ country.bin
 country.zst
 dbip-country-lite-*.csv.gz
 .orch/
+.aider*

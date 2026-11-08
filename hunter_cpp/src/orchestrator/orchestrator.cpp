@@ -849,7 +849,21 @@ HunterOrchestrator::ClientStatus HunterOrchestrator::clientStatus() {
         status.uri = active_client_uri_;
         status.port = active_client_port_;
     }
-    status.sysproxy_on = config_.clientSysproxyEnabled() && network::SysProxy::isEnabled();
+    // The GUI calls this every frame (several times per frame). On Windows
+    // isEnabled() is two registry reads, so cache the answer briefly instead
+    // of doing hundreds of registry queries per second on the UI thread.
+    if (config_.clientSysproxyEnabled()) {
+        static std::atomic<double> cache_ts{0.0};
+        static std::atomic<bool> cache_val{false};
+        const double now = utils::nowTimestamp();
+        if (now - cache_ts.load(std::memory_order_relaxed) > 1.5) {
+            cache_val.store(network::SysProxy::isEnabled(), std::memory_order_relaxed);
+            cache_ts.store(now, std::memory_order_relaxed);
+        }
+        status.sysproxy_on = cache_val.load(std::memory_order_relaxed);
+    } else {
+        status.sysproxy_on = false;
+    }
     return status;
 }
 

@@ -775,7 +775,10 @@ void HunterGuiApp::refreshSnapshotIfDue() {
     // database mutex, so a contended or slow scan can no longer stall a frame.
     std::shared_ptr<const UiSnapshot> latest;
     {
-        std::lock_guard<std::mutex> lock(snapshot_mutex_);
+        // Never block the render thread on the snapshot worker: if the mutex
+        // is contended this frame simply reuses the previous snapshot.
+        std::unique_lock<std::mutex> lock(snapshot_mutex_, std::try_to_lock);
+        if (!lock.owns_lock()) return;
         latest = latest_snapshot_;
     }
 
@@ -2274,6 +2277,7 @@ int HunterGuiApp::run() {
     core::SelfUpdateManager::instance().startAutoCheck(21600, 10);
 
      while (!glfwWindowShouldClose(window_)) {
+         const auto frame_start = std::chrono::steady_clock::now();
          glfwPollEvents();
  
          // A second launch of Hunter exits immediately after leaving a request
@@ -2307,6 +2311,12 @@ int HunterGuiApp::run() {
          ImGui_ImplOpenGL2_RenderDrawData(ImGui::GetDrawData());
  
          glfwSwapBuffers(window_);
+ 
+         // Hard frame cap: when the driver does not honor glfwSwapInterval(1)
+         // (software GL, RDP, basic display adapter) the loop spins at
+         // unlimited FPS, saturates the CPU and Windows ghosts the window as
+         // "Not Responding". Always yield so the loop can never exceed ~60 FPS.
+         std::this_thread::sleep_until(frame_start + std::chrono::milliseconds(16));
      }
  
       // Instead of blocking stop, request shutdown and wait for it to finish with overlay
